@@ -287,6 +287,8 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
             return 1;  // 等待静止帧期间屏蔽键盘（2026-10-05 用户要求）
         const char letter = UiVirtualKeyToLetter_((int)wParam, true);
         if (letter) {
+            // 只记"本帧按下了哪个键"，存档触发由绘制帧的边沿判定决定
+            // （2026-10-05：改键单次短按穿透，根因是事件残留而非按住）
             InterlockedExchange(&g_pendingSaveKey, letter);
             LogInfo("系统键盘边沿：vk=%d letter=%c", (int)wParam, letter);
         }
@@ -441,15 +443,6 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         if (now < g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         static bool keyWasDown = false;
-        // 改键后按住新键不放：keyWasDown 跟随真实按键状态，guard 窗内不
-        // 产生"新按下"边沿——否则松手前的首次判定会穿透触发存档（表现为
-        // 改完键立刻"等待动画结束"，2026-10-05 用户实测定位）。
-        const bool keyDown = !g_ui.awaitingRebind
-            && !g_uiWaitSaveUntil
-            && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
-        if (keyDown && !keyWasDown && now >= g_ui.rebindGuardUntil)
-            InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
-        keyWasDown = keyDown;
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
         const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
         if (clickX >= 0 && clickY >= 0)
@@ -458,10 +451,20 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         const LONG rightY = InterlockedExchange(&g_pendingRightClickY, -1);
         if (rightX >= 0 && rightY >= 0)
             UiHandleFrameRightClick_((int)rightX, (int)rightY);
-        const char pressed = (g_ui.awaitingRebind || now < g_ui.rebindGuardUntil)
-            ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed == g_ui.saveKey)
-            TrySaveOrWait_(mgr, 0);
+        // 存档键触发 = 松开→按下的边沿（2026-10-05 用户实测：改键单次短按
+        // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
+        // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
+        const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
+        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind
+            && !g_uiWaitSaveUntil && now >= g_ui.rebindGuardUntil) {
+            const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+            if (downNow && !keyWasDown)
+                TrySaveOrWait_(mgr, 0);
+            keyWasDown = downNow;
+        } else {
+            keyWasDown = !g_ui.awaitingRebind && !g_uiWaitSaveUntil
+                && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        }
         if (g_uiWaitSaveUntil && !g_ui.awaitingRebind) {
             const char* waitReason = nullptr;
             if (CombatFullyIdle_(mgr, 0, &waitReason)) {
