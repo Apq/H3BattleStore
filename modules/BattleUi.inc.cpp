@@ -77,6 +77,7 @@ static struct
     int dragDownY = 0;
     char saveKey = 'G';
     bool awaitingRebind = false;
+    char rebindKey = 0;          // 改键接受的键：必须先松开才允许触发存档
     char lastSavedStamp[32] = {};
     DWORD lastSavedUntil = 0;
     DWORD rebindGuardUntil = 0;  // 改键生效后短窗内忽略该键，防误触发存档
@@ -679,6 +680,7 @@ static void UiHandleRebindKey_(char key, bool escape)
         g_ui.saveKey = (char)key;
         UiSaveHotkey_();
         g_ui.awaitingRebind = false;
+        g_ui.rebindKey = g_ui.saveKey;  // 该键松开前不触发存档
         g_ui.rebindGuardUntil = GetTickCount() + 400;
     }
 }
@@ -703,6 +705,7 @@ static void UiPollRebindKey_()
             g_ui.saveKey = kUiFreeKeys_[i];
             UiSaveHotkey_();
             g_ui.awaitingRebind = false;
+            g_ui.rebindKey = g_ui.saveKey;  // 该键松开前不触发存档
             g_ui.rebindGuardUntil = GetTickCount() + 400;
             LogInfo("改键完成：%c", g_ui.saveKey);
         }

@@ -386,8 +386,22 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
             InterlockedExchange(&g_pendingSaveKey, 0);
             return result;
         }
-        if (pressed && pressed == g_ui.saveKey)
-            TrySaveOrWait_(mgr, result);
+        // 存档触发要求真实边沿（2026-10-05 22:54 日志实证：游戏对同一次按键
+        // 把本钩子调用两次——第一次 saveKey 还是旧键正确改键，79ms 后第二次
+        // saveKey 已是新键，pressed==saveKey 成立穿透触发存档）。
+        if (pressed && pressed == g_ui.saveKey) {
+            static bool msgKeyWasDown = false;
+            const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+            // rebindKey：改键接受的那次按键必须先松开（2026-10-05 22:54 日志：
+            // 游戏对同一次按键调本钩子两次，第二次时键仍按着，边沿挡不住）
+            if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
+                if (!downNow) g_ui.rebindKey = 0;
+            } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
+                && now >= g_ui.rebindGuardUntil) {
+                TrySaveOrWait_(mgr, result);
+            }
+            msgKeyWasDown = downNow;
+        }
         return result;
     }
     // 拖动跟随只走系统 WH_MOUSE 钩子：消息钩子对每条消息（含 cmd=0 空帧
@@ -455,11 +469,13 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind
-            && !g_uiWaitSaveUntil && now >= g_ui.rebindGuardUntil) {
+        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind && !g_uiWaitSaveUntil) {
             const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
-            if (downNow && !keyWasDown)
+            if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
+                if (!downNow) g_ui.rebindKey = 0;  // 改键那次按键松开后才解锁
+            } else if (downNow && !keyWasDown && now >= g_ui.rebindGuardUntil) {
                 TrySaveOrWait_(mgr, 0);
+            }
             keyWasDown = downNow;
         } else {
             keyWasDown = !g_ui.awaitingRebind && !g_uiWaitSaveUntil
