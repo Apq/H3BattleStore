@@ -38,14 +38,13 @@
 D:\Heroes3\Heroes3_2026.05.01\_HD3_Data\Packs\战场存档\
 ```
 
-可执行：
+可执行（编译/部署统一入口，三选一）：
 
-```powershell
-.\build.ps1
-.\deploy.ps1
+```bat
+build.bat             仅编译
+deploy.bat            仅部署
+build_and_deploy.bat  编译 + 部署一步完成
 ```
-
-或者使用 `build_and_deploy.bat` 一次完成编译和部署。
 
 ## 使用方法
 
