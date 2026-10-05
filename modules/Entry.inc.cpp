@@ -314,6 +314,11 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
     }
     if (readable && !mgr->finished && mgr->dlg) {
         EnsureCombatKeyboardHook_();
+        static bool keyWasDown = false;
+        const bool keyDown = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        if (keyDown && !keyWasDown)
+            InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
+        keyWasDown = keyDown;
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey) {
             const char* reason = nullptr;

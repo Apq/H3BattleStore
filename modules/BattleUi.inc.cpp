@@ -310,8 +310,9 @@ static void UiConfirmAndRestore_(const UiSaveEntry& entry)
 static void UiHandleMouse_(H3Msg* msg)
 {
     if (!msg) return;
-    const int px = msg->position.x;
-    const int py = msg->position.y;
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+    const int px = cursor.x;
+    const int py = cursor.y;
     if (msg->command == eMsgCommand::MOUSE_OVER) {
         g_ui.hoverRow = UiHitRow_(px, py);
         return;
