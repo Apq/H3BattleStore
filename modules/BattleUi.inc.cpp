@@ -186,8 +186,9 @@ static WORD UiRgb8888To565_(DWORD c)
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
 
-// 加载 DLL 同目录 img\HB_bg.pcx（成品图 360x204，24 位 3 平面 PCX）：
-// 金框/条底分隔线/列表行分隔线/键位小框已离线烘焙进图，运行时只整图粘贴。
+// 加载 DLL 同目录 img\HB_bg.pcx（成品图 360x24，24 位 3 平面 PCX）：
+// 仅悬浮条本体一行；金框/键位小框已离线烘焙进图，运行时整图粘贴。
+// 下拉列表超出悬浮框，不使用背景图（2026-10-05 用户明确）。
 static H3LoadedPcx16* UiLoadBarBg_()
 {
     if (g_barBg || g_barBgFailed)
@@ -230,9 +231,7 @@ static H3LoadedPcx16* UiLoadBarBg_()
     const int width = xmax - xmin + 1;
     const int height = ymax - ymin + 1;
     if (encoded[0] != 0x0A || encoded[2] != 1 || bpp != 8 || planes != 3
-        || width < kUiBarWidth
-        || height < kUiBarHeight + kUiListMaxRows * kUiRowHeight
-        || bpl < width) {
+        || width < kUiBarWidth || height < kUiBarHeight || bpl < width) {
         LogWarn("背景图格式不符：w=%d h=%d bpp=%d planes=%d", width, height, bpp, planes);
         free(encoded);
         return nullptr;
@@ -424,23 +423,21 @@ static void UiDrawBar_(H3CombatManager* mgr)
         const bool rectChanged = lastX != x || lastY != y || lastH != usedH;
         // 每帧整图清底，防列表收起后残留旧像素
         c->FillRectangle(0, 0, kUiBarWidth, compositeH, 0, 0, 0);
-        // 背景：成品图 HB_bg.pcx 整图粘贴（金框/分隔线已烘焙，2026-10-05 用户
-        // 要求改成品图而非运行时裁切）；加载失败回退纯色 + 代码画框。
+        // 背景：成品图 HB_bg.pcx 只贴悬浮条本体一行（金框已烘焙）；
+        // 下拉列表超出悬浮框，不用背景图（2026-10-05 用户明确），纯色+代码框。
         H3LoadedPcx16* bg = UiLoadBarBg_();
         const bool bgOk = bg && bg->buffer
-            && bg->width >= kUiBarWidth && bg->height >= compositeH;
+            && bg->width >= kUiBarWidth && bg->height >= kUiBarHeight;
         if (bgOk) {
-            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, usedH);
+            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, kUiBarHeight);
         }
         else {
             c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
             c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
-            if (rows > 0) {
-                c->FillRectangle(0, kUiBarHeight, kUiBarWidth,
-                    kUiListMaxRows * kUiRowHeight, 10, 10, 30);
-                c->DrawFrame(0, kUiBarHeight, kUiBarWidth,
-                    kUiListMaxRows * kUiRowHeight, 160, 140, 70);
-            }
+        }
+        if (rows > 0) {
+            c->FillRectangle(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
+            c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
         }
         char label[128] = {};
         if (g_ui.awaitingRebind)
