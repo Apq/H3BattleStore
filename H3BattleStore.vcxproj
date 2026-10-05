@@ -63,6 +63,11 @@
     <ClInclude Include="..\H3API\single_header\H3API.hpp" />
     <ClInclude Include="modules\IniUtf8.inc.cpp" />
     <ClInclude Include="modules\ConfigLog.inc.cpp" />
+    <ClInclude Include="modules\BattleArchive.inc.cpp" />
+    <ClInclude Include="modules\BattleCodec.inc.cpp" />
+    <ClInclude Include="modules\BattleCapture.inc.cpp" />
+    <ClInclude Include="modules\BattleRestore.inc.cpp" />
+    <ClInclude Include="modules\BattleUi.inc.cpp" />
     <ClInclude Include="modules\Entry.inc.cpp" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="third_party\nlohmann\json.hpp" />

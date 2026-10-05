@@ -31,14 +31,14 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "Comments", "Õ½¶·´æµµ"
+            VALUE "Comments", "Õ½³¡´æµµ"
             VALUE "CompanyName", "Apq"
-            VALUE "FileDescription", "Õ½¶·´æµµ"
+            VALUE "FileDescription", "Õ½³¡´æµµ"
             VALUE "FileVersion", "0.1.2026.1005"
             VALUE "InternalName", "H3BattleStore"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "H3BattleStore.dll"
-            VALUE "ProductName", "Õ½¶·´æµµ"
+            VALUE "ProductName", "Õ½³¡´æµµ"
             VALUE "ProductVersion", "0.1.2026.1005"
         END
     END

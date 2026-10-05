@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $gameDir = 'D:\Heroes3\Heroes3_2026.05.01'
-$packsDst = "$gameDir\_HD3_Data\Packs\战斗存档"
+$packsDst = "$gameDir\_HD3_Data\Packs\战场存档"
 $src = "$PSScriptRoot\Release"
 
 try {
