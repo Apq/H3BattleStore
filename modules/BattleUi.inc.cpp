@@ -408,7 +408,9 @@ static void UiDrawBar_(H3CombatManager* mgr)
             ? (g_ui.entries.size() < (size_t)kUiListMaxRows
                 ? (int)g_ui.entries.size() : kUiListMaxRows)
             : 0;
-        const int usedH = rows > 0 ? compositeH : kUiBarHeight;
+        // 列表高度随实际行数自适应（2026-10-05 用户实测纠正：固定满高会显示
+        // 一堆空行背景板）；成品图行分隔线在每行底部，任意行数展开底边闭合。
+        const int usedH = kUiBarHeight + rows * kUiRowHeight;
         // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
         // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
         static int lastX = -1;
