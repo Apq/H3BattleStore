@@ -227,7 +227,26 @@ static bool CombatFullyIdle_(const H3CombatManager* mgr, int messageResult, cons
 }
 
 static HHOOK g_combatKeyboardHook = nullptr;
+static HHOOK g_combatMouseHook = nullptr;
 static volatile LONG g_pendingSaveKey = 0;
+static volatile LONG g_pendingClickX = -1;
+static volatile LONG g_pendingClickY = -1;
+
+static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
+{
+    HWND gameWindow = *reinterpret_cast<HWND*>(0x699650);
+    H3WindowManager* wnd = H3WindowManager::Get();
+    POINT clientPoint = screenPoint;
+    RECT client = {};
+    if (!gameWindow || !wnd || !wnd->screenPcx16
+        || !ScreenToClient(gameWindow, &clientPoint)
+        || !GetClientRect(gameWindow, &client)
+        || client.right <= client.left || client.bottom <= client.top)
+        return false;
+    *gameX = MulDiv(clientPoint.x, wnd->screenPcx16->width, client.right - client.left);
+    *gameY = MulDiv(clientPoint.y, wnd->screenPcx16->height, client.bottom - client.top);
+    return true;
+}
 
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
 {
@@ -241,6 +260,21 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
+static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && wParam == WM_LBUTTONUP) {
+        const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
+        int gameX = 0;
+        int gameY = 0;
+        if (mouse && UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) {
+            InterlockedExchange(&g_pendingClickX, gameX);
+            InterlockedExchange(&g_pendingClickY, gameY);
+            LogInfo("系统鼠标松开：game=(%d,%d)", gameX, gameY);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
 static void EnsureCombatKeyboardHook_()
 {
     if (g_combatKeyboardHook) return;
@@ -249,7 +283,11 @@ static void EnsureCombatKeyboardHook_()
     const DWORD threadId = GetWindowThreadProcessId(gameWindow, nullptr);
     if (!threadId) return;
     g_combatKeyboardHook = SetWindowsHookExA(WH_KEYBOARD, CombatKeyboardHook_, g_hModule, threadId);
-    LogInfo("战斗键盘钩子：%s hwnd=%p", g_combatKeyboardHook ? "已安装" : "安装失败", gameWindow);
+    if (!g_combatMouseHook)
+        g_combatMouseHook = SetWindowsHookExA(WH_MOUSE, CombatMouseHook_, g_hModule, threadId);
+    LogInfo("战斗输入钩子：键盘=%s 鼠标=%s hwnd=%p",
+        g_combatKeyboardHook ? "已安装" : "安装失败",
+        g_combatMouseHook ? "已安装" : "安装失败", gameWindow);
 }
 
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
@@ -319,6 +357,18 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         if (keyDown && !keyWasDown)
             InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
         keyWasDown = keyDown;
+        const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
+        const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
+        if (clickX >= 0 && clickY >= 0 && UiPointInBar_((int)clickX, (int)clickY)) {
+            if (clickX >= g_ui.x + kUiBarWidth - 58) {
+                g_ui.awaitingRebind = true;
+                LogInfo("点击快捷键区域：(%ld,%ld)", clickX, clickY);
+            } else {
+                g_ui.listOpen = !g_ui.listOpen;
+                if (g_ui.listOpen) UiReloadEntries_(mgr);
+                LogInfo("点击存档列表区域：(%ld,%ld)", clickX, clickY);
+            }
+        }
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey) {
             const char* reason = nullptr;
