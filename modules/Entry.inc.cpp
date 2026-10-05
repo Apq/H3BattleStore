@@ -270,6 +270,8 @@ static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         const bool rightDown = wParam == WM_RBUTTONDOWN;
         const bool rightUp = wParam == WM_RBUTTONUP;
         const bool move = wParam == WM_MOUSEMOVE;
+        if (move && !g_ui.dragging)
+            return CallNextHookEx(nullptr, code, wParam, lParam);
         if (leftDown || leftUp || rightDown || rightUp || move) {
             // 只在真实战斗且悬浮条显示时介入，避免战斗外误吞点击。
             H3CombatManager* combat = H3CombatManager::Get();
