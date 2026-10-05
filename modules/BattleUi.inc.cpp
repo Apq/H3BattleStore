@@ -140,15 +140,19 @@ static void UiDrawBar_(H3CombatManager* mgr)
 {
     H3WindowManager* wnd = H3WindowManager::Get();
     static DWORD lastMissing = 0;
-    if (!wnd || !wnd->screenPcx16) {
+    const BYTE* dlgBytes = reinterpret_cast<const BYTE*>(mgr ? mgr->dlg : nullptr);
+    H3LoadedPcx16* dlgScreen = dlgBytes
+        ? *reinterpret_cast<H3LoadedPcx16* const*>(dlgBytes + 0x44)
+        : nullptr;
+    H3LoadedPcx16* screen = dlgScreen ? dlgScreen : (wnd ? wnd->screenPcx16 : nullptr);
+    if (!screen) {
         const DWORD now = GetTickCount();
         if (now - lastMissing > 1000) {
-            LogWarn("悬浮条未绘制：窗口管理器或屏幕缓冲不可用");
+            LogWarn("悬浮条未绘制：战斗对话框和窗口屏幕缓冲都不可用");
             lastMissing = now;
         }
         return;
     }
-    H3LoadedPcx16* screen = wnd->screenPcx16;
     H3Font* font = H3SmallFont::Get();
     if (!font) {
         LogWarn("悬浮条未绘制：小字体不可用");
@@ -199,9 +203,21 @@ static void UiDrawBar_(H3CombatManager* mgr)
     }
 }
 
-static bool UiHitBar_(int px, int py)
+static bool UiPointInBar_(int px, int py)
 {
     return px >= g_ui.x && px < g_ui.x + kUiBarWidth && py >= g_ui.y && py < g_ui.y + kUiBarHeight;
+}
+
+static bool UiHitBar_(const H3Msg* msg)
+{
+    if (!msg) return false;
+    if (UiPointInBar_(msg->position.x, msg->position.y)) return true;
+    const H3CombatManager* mgr = H3CombatManager::Get();
+    const BYTE* dlgBytes = reinterpret_cast<const BYTE*>(mgr ? mgr->dlg : nullptr);
+    if (!dlgBytes) return false;
+    const int dlgX = *reinterpret_cast<const INT32*>(dlgBytes + 0x18);
+    const int dlgY = *reinterpret_cast<const INT32*>(dlgBytes + 0x1C);
+    return UiPointInBar_(dlgX + msg->position.x, dlgY + msg->position.y);
 }
 
 static int UiHitRow_(int px, int py)
@@ -284,7 +300,7 @@ static void UiHandleMouse_(H3Msg* msg)
         return;
     }
     if (msg->command != eMsgCommand::MOUSE_BUTTON) return;
-    if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && UiHitBar_(px, py)) {
+    if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && UiHitBar_(msg)) {
         g_ui.dragging = true;
         g_ui.dragOffX = px - g_ui.x;
         g_ui.dragOffY = py - g_ui.y;
@@ -305,7 +321,7 @@ static void UiHandleMouse_(H3Msg* msg)
             UiSaveBarPosition_();
             return;
         }
-        if (UiHitBar_(px, py)) {
+        if (UiHitBar_(msg)) {
             if (px >= g_ui.x + kUiBarWidth - 52) {
                 g_ui.awaitingRebind = true;
                 return;

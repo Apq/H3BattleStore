@@ -226,9 +226,42 @@ static bool CombatFullyIdle_(const H3CombatManager* mgr, int messageResult, cons
     return true;
 }
 
+static HHOOK g_combatKeyboardHook = nullptr;
+static volatile LONG g_pendingSaveKey = 0;
+
+static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)) {
+        const char letter = UiVirtualKeyToLetter_((int)wParam);
+        if (letter) {
+            InterlockedExchange(&g_pendingSaveKey, letter);
+            LogInfo("系统键盘边沿：vk=%d letter=%c", (int)wParam, letter);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+static void EnsureCombatKeyboardHook_()
+{
+    if (g_combatKeyboardHook) return;
+    HWND gameWindow = *reinterpret_cast<HWND*>(0x699650);
+    if (!gameWindow) return;
+    const DWORD threadId = GetWindowThreadProcessId(gameWindow, nullptr);
+    if (!threadId) return;
+    g_combatKeyboardHook = SetWindowsHookExA(WH_KEYBOARD, CombatKeyboardHook_, g_hModule, threadId);
+    LogInfo("战斗键盘钩子：%s hwnd=%p", g_combatKeyboardHook ? "已安装" : "安装失败", gameWindow);
+}
+
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
 {
-    if (msg && msg->command == eMsgCommand::KEY_DOWN) {
+    static DWORD lastInput = 0;
+    const DWORD now = GetTickCount();
+    if (msg && now - lastInput > 250) {
+        LogInfo("战斗消息：cmd=%d sub=%d item=%d x=%d y=%d",
+            (int)msg->command, (int)msg->subtype, msg->itemId, msg->position.x, msg->position.y);
+        lastInput = now;
+    }
+    if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
         const char pressed = UiVirtualKeyToLetter_(msg->subtype);
         LogInfo("战斗按键：virtual=%d letter=%c save=%c", msg->subtype,
             pressed ? pressed : '?', g_ui.saveKey);
@@ -247,7 +280,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
         return result;
     }
     UiHandleDragMove_(msg);
-    const bool onBar = msg && UiHitBar_(msg->position.x, msg->position.y);
+    const bool onBar = UiHitBar_(msg);
     const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
     if ((onBar || row >= 0 || g_ui.dragging) && msg) {
         if (msg->command == eMsgCommand::MOUSE_BUTTON) {
@@ -279,8 +312,18 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
             readable ? mgr->dlg : nullptr);
         lastFrame = now;
     }
-    if (readable && !mgr->finished && mgr->dlg)
+    if (readable && !mgr->finished && mgr->dlg) {
+        EnsureCombatKeyboardHook_();
+        const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
+        if (pressed == g_ui.saveKey) {
+            const char* reason = nullptr;
+            if (!CombatFullyIdle_(mgr, 0, &reason))
+                LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
+            else
+                TryCaptureCombat_();
+        }
         UiDrawBar_(mgr);
+    }
     else if (now - lastFrame <= 20)
         LogInfo("悬浮条跳过绘制：readable=%d finished=%d dlg=%p",
             readable ? 1 : 0,
