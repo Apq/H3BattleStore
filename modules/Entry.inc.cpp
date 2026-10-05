@@ -352,8 +352,10 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
     }
     if (readable && !mgr->finished && mgr->dlg) {
         EnsureCombatKeyboardHook_();
+        UiPollRebindKey_();
         static bool keyWasDown = false;
-        const bool keyDown = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        const bool keyDown = !g_ui.awaitingRebind
+            && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
         if (keyDown && !keyWasDown)
             InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
         keyWasDown = keyDown;
@@ -369,7 +371,7 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
                 LogInfo("点击存档列表区域：(%ld,%ld)", clickX, clickY);
             }
         }
-        const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
+        const char pressed = g_ui.awaitingRebind ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey) {
             const char* reason = nullptr;
             if (!CombatFullyIdle_(mgr, 0, &reason))

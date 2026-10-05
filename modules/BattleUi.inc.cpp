@@ -395,3 +395,28 @@ static void UiHandleRebindKey_(char key, bool escape)
         g_ui.awaitingRebind = false;
     }
 }
+
+// 改键确认不依赖战斗消息钩子：等待期间在绘制帧轮询全部允许字母与 Esc。
+static void UiPollRebindKey_()
+{
+    if (!g_ui.awaitingRebind) return;
+    static bool prevDown[16] = {};
+    const int escIndex = (int)strlen(kUiFreeKeys_);
+    const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    if (escDown && !prevDown[escIndex]) {
+        g_ui.awaitingRebind = false;
+        prevDown[escIndex] = escDown;
+        return;
+    }
+    prevDown[escIndex] = escDown;
+    for (int i = 0; kUiFreeKeys_[i]; ++i) {
+        const bool down = (GetAsyncKeyState((int)kUiFreeKeys_[i]) & 0x8000) != 0;
+        if (down && !prevDown[i]) {
+            g_ui.saveKey = kUiFreeKeys_[i];
+            UiSaveHotkey_();
+            g_ui.awaitingRebind = false;
+            LogInfo("改键完成：%c", g_ui.saveKey);
+        }
+        prevDown[i] = down;
+    }
+}
