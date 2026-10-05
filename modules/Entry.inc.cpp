@@ -231,6 +231,8 @@ static HHOOK g_combatMouseHook = nullptr;
 static volatile LONG g_pendingSaveKey = 0;
 static volatile LONG g_pendingClickX = -1;
 static volatile LONG g_pendingClickY = -1;
+static volatile LONG g_pendingRightClickX = -1;
+static volatile LONG g_pendingRightClickY = -1;
 
 static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
 {
@@ -262,14 +264,21 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
 
 static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && wParam == WM_LBUTTONUP) {
+    if (code == HC_ACTION
+        && (wParam == WM_LBUTTONUP || wParam == WM_RBUTTONUP)) {
         const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
         int gameX = 0;
         int gameY = 0;
         if (mouse && UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) {
-            InterlockedExchange(&g_pendingClickX, gameX);
-            InterlockedExchange(&g_pendingClickY, gameY);
-            LogInfo("系统鼠标松开：game=(%d,%d)", gameX, gameY);
+            if (wParam == WM_LBUTTONUP) {
+                InterlockedExchange(&g_pendingClickX, gameX);
+                InterlockedExchange(&g_pendingClickY, gameY);
+            } else {
+                InterlockedExchange(&g_pendingRightClickX, gameX);
+                InterlockedExchange(&g_pendingRightClickY, gameY);
+            }
+            LogInfo("系统鼠标松开：%s game=(%d,%d)",
+                wParam == WM_LBUTTONUP ? "左" : "右", gameX, gameY);
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -361,16 +370,12 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         keyWasDown = keyDown;
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
         const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
-        if (clickX >= 0 && clickY >= 0 && UiPointInBar_((int)clickX, (int)clickY)) {
-            if (clickX >= g_ui.x + kUiBarWidth - 58) {
-                g_ui.awaitingRebind = true;
-                LogInfo("点击快捷键区域：(%ld,%ld)", clickX, clickY);
-            } else {
-                g_ui.listOpen = !g_ui.listOpen;
-                if (g_ui.listOpen) UiReloadEntries_(mgr);
-                LogInfo("点击存档列表区域：(%ld,%ld)", clickX, clickY);
-            }
-        }
+        if (clickX >= 0 && clickY >= 0)
+            UiHandleFrameClick_((int)clickX, (int)clickY);
+        const LONG rightX = InterlockedExchange(&g_pendingRightClickX, -1);
+        const LONG rightY = InterlockedExchange(&g_pendingRightClickY, -1);
+        if (rightX >= 0 && rightY >= 0)
+            UiHandleFrameRightClick_((int)rightX, (int)rightY);
         const char pressed = g_ui.awaitingRebind ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey) {
             const char* reason = nullptr;

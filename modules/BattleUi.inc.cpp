@@ -420,3 +420,43 @@ static void UiPollRebindKey_()
         prevDown[i] = down;
     }
 }
+
+// 系统鼠标钩子路径的统一点击入口：gameX/gameY 为游戏逻辑坐标。
+static void UiHandleFrameClick_(int gameX, int gameY)
+{
+    if (UiPointInBar_(gameX, gameY)) {
+        if (gameX >= g_ui.x + kUiBarWidth - 58) {
+            g_ui.awaitingRebind = true;
+            LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
+        } else {
+            g_ui.listOpen = !g_ui.listOpen;
+            if (g_ui.listOpen) UiReloadEntries_(H3CombatManager::Get());
+            LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
+        }
+        return;
+    }
+    const int row = UiHitRow_(gameX, gameY);
+    if (row >= 0 && row < (int)g_ui.entries.size()) {
+        UiConfirmAndRestore_(g_ui.entries[row]);
+        return;
+    }
+    if (g_ui.listOpen) g_ui.listOpen = false;
+    if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
+}
+
+// 系统鼠标钩子路径的右键删除：点击列表行删除对应存档。
+static void UiHandleFrameRightClick_(int gameX, int gameY)
+{
+    const int row = UiHitRow_(gameX, gameY);
+    if (row < 0 || row >= (int)g_ui.entries.size()) return;
+    hbs::ArchiveStore store(ArchiveRoot_());
+    hbs::ArchiveRecord record;
+    record.path = g_ui.entries[row].path;
+    std::wstring storeError;
+    if (store.Delete(record, storeError)) {
+        UiReloadEntries_(H3CombatManager::Get());
+        LogInfo("已删除存档行：%d", row);
+    } else {
+        LogError("删除存档失败：行 %d", row);
+    }
+}
