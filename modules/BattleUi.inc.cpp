@@ -19,8 +19,23 @@ static void UiToGbk_(const char* utf8, char* out, int outCap)
     out[outCap - 1] = 0;
 }
 
-static char UiVirtualKeyToLetter_(int virtualKey)
+static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
 {
+    if (windowsVk) {
+        switch (virtualKey) {
+        case 'B': return 'B';
+        case 'F': return 'F';
+        case 'G': return 'G';
+        case 'K': return 'K';
+        case 'M': return 'M';
+        case 'N': return 'N';
+        case 'U': return 'U';
+        case 'V': return 'V';
+        case 'X': return 'X';
+        case 'Y': return 'Y';
+        default: return 0;
+        }
+    }
     switch (virtualKey) {
     case h3::NH3VKey::H3VK_B: return 'B';
     case h3::NH3VKey::H3VK_F: return 'F';
@@ -211,6 +226,8 @@ static bool UiPointInBar_(int px, int py)
 static bool UiHitBar_(const H3Msg* msg)
 {
     if (!msg) return false;
+    const H3POINT cursor = H3POINT::GetCursorPosition();
+    if (UiPointInBar_(cursor.x, cursor.y)) return true;
     if (UiPointInBar_(msg->position.x, msg->position.y)) return true;
     const H3CombatManager* mgr = H3CombatManager::Get();
     const BYTE* dlgBytes = reinterpret_cast<const BYTE*>(mgr ? mgr->dlg : nullptr);

@@ -232,7 +232,7 @@ static volatile LONG g_pendingSaveKey = 0;
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)) {
-        const char letter = UiVirtualKeyToLetter_((int)wParam);
+        const char letter = UiVirtualKeyToLetter_((int)wParam, true);
         if (letter) {
             InterlockedExchange(&g_pendingSaveKey, letter);
             LogInfo("系统键盘边沿：vk=%d letter=%c", (int)wParam, letter);
@@ -262,7 +262,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
         lastInput = now;
     }
     if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
-        const char pressed = UiVirtualKeyToLetter_(msg->subtype);
+        const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
         LogInfo("战斗按键：virtual=%d letter=%c save=%c", msg->subtype,
             pressed ? pressed : '?', g_ui.saveKey);
         const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
