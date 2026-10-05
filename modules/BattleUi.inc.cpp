@@ -447,8 +447,11 @@ static void UiDrawBar_(H3CombatManager* mgr)
             c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
         }
         char label[128] = {};
-        if (g_ui.awaitingRebind)
-            UiToGbk_("请按新的存档键（Esc 取消）", label, sizeof(label));
+        if (g_ui.awaitingRebind) {
+            char utf8[96] = {};
+            _snprintf(utf8, sizeof(utf8), "可用：B F G K M N U V X Y，Esc 取消");
+            UiToGbk_(utf8, label, sizeof(label));
+        }
         else if (g_uiWaitSaveUntil)
             UiToGbk_("等待动画结束…", label, sizeof(label));
         else if (g_ui.lastSavedStamp[0] && GetTickCount() < g_ui.lastSavedUntil) {
@@ -463,15 +466,19 @@ static void UiDrawBar_(H3CombatManager* mgr)
             _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
             UiToGbk_(utf8, label, sizeof(label));
         }
-        font->TextDraw(c, label, 6, 0, kUiBarWidth - 60, kUiBarHeight,
+        // 改键时整条都给提示（列出可用键），键框让位；平时键框仍由代码画。
+        const int labelW = g_ui.awaitingRebind ? kUiBarWidth - 12 : kUiBarWidth - 60;
+        font->TextDraw(c, label, 6, 0, labelW, kUiBarHeight,
             eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
-        char key[16] = {};
-        char keyUtf8[8] = {};
-        _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
-        UiToGbk_(keyUtf8, key, sizeof(key));
-        font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
-            eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        if (!g_ui.awaitingRebind) {
+            char key[16] = {};
+            char keyUtf8[8] = {};
+            _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
+            UiToGbk_(keyUtf8, key, sizeof(key));
+            font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
+                eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+            c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        }
         if (rows > 0) {
             const int listY = kUiBarHeight;
             for (int row = 0; row < rows; ++row) {
