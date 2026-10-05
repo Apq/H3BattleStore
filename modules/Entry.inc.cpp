@@ -283,6 +283,8 @@ static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)) {
+        if (g_uiWaitSaveUntil)
+            return 1;  // 等待静止帧期间屏蔽键盘（2026-10-05 用户要求）
         const char letter = UiVirtualKeyToLetter_((int)wParam, true);
         if (letter) {
             InterlockedExchange(&g_pendingSaveKey, letter);
@@ -300,6 +302,8 @@ static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         const bool rightDown = wParam == WM_RBUTTONDOWN;
         const bool rightUp = wParam == WM_RBUTTONUP;
         const bool move = wParam == WM_MOUSEMOVE;
+        if (g_uiWaitSaveUntil && (leftDown || leftUp || rightDown || rightUp))
+            return 1;  // 等待静止帧期间屏蔽鼠标按键（2026-10-05 用户要求）
         if (move && !g_ui.dragging)
             return CallNextHookEx(nullptr, code, wParam, lParam);
         if (leftDown || leftUp || rightDown || rightUp || move) {
@@ -354,6 +358,14 @@ static void EnsureCombatKeyboardHook_()
 
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
 {
+    // 等待静止帧存档期间屏蔽玩家全部输入（2026-10-05 用户要求）：
+    // 键盘/鼠标消息一律吞掉不转发，存档执行完成（或超时强制存）后解除。
+    if (g_uiWaitSaveUntil && msg) {
+        const int cmd = (int)msg->command;
+        if (cmd == (int)eMsgCommand::KEY_DOWN || cmd == (int)eMsgCommand::KEY_UP
+            || cmd == (int)eMsgCommand::MOUSE_BUTTON || cmd == (int)eMsgCommand::MOUSE_OVER)
+            return 1;
+    }
     static DWORD lastInput = 0;
     const DWORD now = GetTickCount();
     if (msg && now - lastInput > 250) {
@@ -430,6 +442,7 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         static bool keyWasDown = false;
         const bool keyDown = !g_ui.awaitingRebind
+            && !g_uiWaitSaveUntil
             && now >= g_ui.rebindGuardUntil
             && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
         if (keyDown && !keyWasDown)
