@@ -183,6 +183,119 @@ static WORD UiRgb8888To565_(DWORD c)
     return UiRgb888To565_((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
 }
 
+static H3LoadedPcx16* g_barBg = nullptr;
+static bool g_barBgFailed = false;
+
+// 加载 DLL 同目录 img\HA_bg.pcx（680x548 24 位 3 平面 PCX）。
+// 解码器移植自 H3Auto PanelGfx LoadPanelPcx24_，校验放宽为不要求固定尺寸。
+static H3LoadedPcx16* UiLoadBarBg_()
+{
+    if (g_barBg || g_barBgFailed)
+        return g_barBg;
+    g_barBgFailed = true;  // 失败只试一次；成功路径最后复位
+
+    wchar_t* wpath = new(std::nothrow) wchar_t[MAX_PATH + 32]();
+    if (!wpath) return nullptr;
+    GetModuleFileNameW(g_hModule, wpath, MAX_PATH + 30);
+    wchar_t* slash = wcsrchr(wpath, L'\\');
+    if (!slash) { delete[] wpath; return nullptr; }
+    wcscpy_s(slash + 1, 24, L"img\\HA_bg.pcx");
+
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, wpath, L"rb") != 0 || !file) {
+        LogWarn("背景图加载失败：img\\HA_bg.pcx");
+        delete[] wpath;
+        return nullptr;
+    }
+    delete[] wpath;
+    fseek(file, 0, SEEK_END);
+    const long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    if (fileSize < 128) { fclose(file); return nullptr; }
+    BYTE* encoded = (BYTE*)malloc((size_t)fileSize);
+    if (!encoded || fread(encoded, 1, (size_t)fileSize, file) != (size_t)fileSize) {
+        if (encoded) free(encoded);
+        fclose(file);
+        return nullptr;
+    }
+    fclose(file);
+
+    const int bpp = encoded[3];
+    const int xmin = *(WORD*)(encoded + 4);
+    const int ymin = *(WORD*)(encoded + 6);
+    const int xmax = *(WORD*)(encoded + 8);
+    const int ymax = *(WORD*)(encoded + 10);
+    const int planes = encoded[65];
+    const int bpl = *(WORD*)(encoded + 66);
+    const int width = xmax - xmin + 1;
+    const int height = ymax - ymin + 1;
+    if (encoded[0] != 0x0A || encoded[2] != 1 || bpp != 8 || planes != 3
+        || width < kUiBarWidth || height < kUiBarHeight || bpl < width) {
+        LogWarn("背景图格式不符：w=%d h=%d bpp=%d planes=%d", width, height, bpp, planes);
+        free(encoded);
+        return nullptr;
+    }
+
+    const size_t rawSize = (size_t)bpl * planes * height;
+    BYTE* raw = (BYTE*)malloc(rawSize);
+    if (!raw) { free(encoded); return nullptr; }
+    size_t srcPos = 128;
+    size_t outPos = 0;
+    while (outPos < rawSize && srcPos < (size_t)fileSize) {
+        const BYTE marker = encoded[srcPos++];
+        if ((marker & 0xC0) == 0xC0) {
+            const int count = marker & 0x3F;
+            if (srcPos >= (size_t)fileSize) break;
+            const BYTE value = encoded[srcPos++];
+            for (int i = 0; i < count && outPos < rawSize; ++i)
+                raw[outPos++] = value;
+        } else {
+            raw[outPos++] = marker;
+        }
+    }
+    free(encoded);
+    if (outPos != rawSize) { free(raw); return nullptr; }
+
+    g_barBg = H3LoadedPcx16::Create(width, height);
+    if (!g_barBg || !g_barBg->buffer) {
+        if (g_barBg) { g_barBg->Destroy(); g_barBg = nullptr; }
+        free(raw);
+        return nullptr;
+    }
+    const bool out32 = H3BitMode::Get() == 4;
+    for (int py = 0; py < height; ++py) {
+        const BYTE* red = raw + (size_t)py * bpl * planes;
+        const BYTE* green = red + bpl;
+        const BYTE* blue = green + bpl;
+        BYTE* row = g_barBg->buffer + (size_t)py * g_barBg->scanlineSize;
+        if (out32) {
+            DWORD* pixels = (DWORD*)row;
+            for (int px = 0; px < width; ++px)
+                pixels[px] = 0xFF000000u | (red[px] << 16) | (green[px] << 8) | blue[px];
+        } else {
+            WORD* pixels = (WORD*)row;
+            for (int px = 0; px < width; ++px)
+                pixels[px] = UiRgb888To565_(red[px], green[px], blue[px]);
+        }
+    }
+    free(raw);
+    g_barBgFailed = false;
+    LogInfo("背景图已加载：%dx%d", width, height);
+    return g_barBg;
+}
+
+// 同位深 pcx16 区域复制（src/dst 均按当前游戏位深分配，行内逐像素等宽）。
+static void UiCopyBgRegion_(H3LoadedPcx16* dst, const H3LoadedPcx16* src,
+    int srcX, int srcY, int w, int h)
+{
+    const size_t px = H3BitMode::Get() == 4 ? 4 : 2;
+    for (int row = 0; row < h; ++row) {
+        const BYTE* s = src->buffer + (size_t)(srcY + row) * src->scanlineSize + (size_t)srcX * px;
+        BYTE* d = dst->buffer + (size_t)row * dst->scanlineSize;
+        memcpy(d, s, (size_t)w * px);
+    }
+}
+
 // 把合成图上部 copyH 高度逐像素写入 backbuffer。禁止 DD Blt（HD 下触发崩溃）。
 static bool UiBltPcx16ToBackBuffer_(H3LoadedPcx16* src, int dstX, int dstY, int copyH)
 {
@@ -281,10 +394,30 @@ static void UiDrawBar_(H3CombatManager* mgr)
         H3LoadedPcx16* c = g_barComposite;
         const int x = g_ui.x;
         const int y = g_ui.y;
+        const int rows = (g_ui.listOpen && !g_ui.entries.empty())
+            ? (g_ui.entries.size() < (size_t)kUiListMaxRows
+                ? (int)g_ui.entries.size() : kUiListMaxRows)
+            : 0;
+        const int usedH = kUiBarHeight + rows * kUiRowHeight;
         // 每帧整图清底，防列表收起后残留旧像素
         c->FillRectangle(0, 0, kUiBarWidth, compositeH, 0, 0, 0);
-        c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
-        c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
+        // 背景：HA_bg.pcx 中央裁切 + 金框（2026-10-05 用户要求）；失败回退纯色
+        H3LoadedPcx16* bg = UiLoadBarBg_();
+        if (bg && bg->buffer && bg->width >= kUiBarWidth && bg->height >= usedH) {
+            UiCopyBgRegion_(c, bg, (bg->width - kUiBarWidth) / 2,
+                (bg->height - usedH) / 2, kUiBarWidth, usedH);
+            c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 220, 200, 110);
+            if (rows > 0)
+                c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 200, 180, 90);
+        }
+        else {
+            c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
+            c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
+            if (rows > 0) {
+                c->FillRectangle(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
+                c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
+            }
+        }
         char label[128] = {};
         if (g_ui.awaitingRebind)
             UiToGbk_("请按新的存档键（Esc 取消）", label, sizeof(label));
@@ -309,14 +442,8 @@ static void UiDrawBar_(H3CombatManager* mgr)
         font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
         c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
-        int usedH = kUiBarHeight;
-        if (g_ui.listOpen && !g_ui.entries.empty()) {
-            const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
-                ? (int)g_ui.entries.size() : kUiListMaxRows;
+        if (rows > 0) {
             const int listY = kUiBarHeight;
-            usedH += rows * kUiRowHeight;
-            c->FillRectangle(0, listY, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
-            c->DrawFrame(0, listY, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
             for (int row = 0; row < rows; ++row) {
                 if (row == g_ui.hoverRow)
                     c->FillRectangle(2, listY + row * kUiRowHeight,

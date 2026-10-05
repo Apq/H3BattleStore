@@ -15,6 +15,12 @@ try {
     Copy-Item "$PSScriptRoot\H3BattleStore.default.ini" $packsDst -Force
     Copy-Item "$PSScriptRoot\使用说明.txt" $packsDst -Force
 
+    $imgDst = Join-Path $packsDst 'img'
+    if (-not (Test-Path $imgDst)) {
+        New-Item -ItemType Directory -Path $imgDst -Force | Out-Null
+    }
+    Copy-Item "$PSScriptRoot\img\HA_bg.pcx" $imgDst -Force
+
     Write-Host "已部署到 $packsDst"
 } catch {
     Write-Host "部署错误: $_"
