@@ -447,7 +447,7 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
             ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey)
             TrySaveOrWait_(mgr, 0);
-        if (g_uiWaitSaveUntil) {
+        if (g_uiWaitSaveUntil && !g_ui.awaitingRebind) {
             const char* waitReason = nullptr;
             if (CombatFullyIdle_(mgr, 0, &waitReason)) {
                 g_uiWaitSaveUntil = 0;

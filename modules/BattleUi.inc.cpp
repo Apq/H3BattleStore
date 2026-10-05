@@ -404,10 +404,8 @@ static void UiDrawBar_(H3CombatManager* mgr)
         const bool logInfo = infoNow - lastDrawInfo > 5000;
         if (logInfo) lastDrawInfo = infoNow;
         H3LoadedPcx16* c = g_barComposite;
-        // 固定右上角（战场框外，2026-10-05 用户要求：拖动残影难以根除，
-        // 悬浮条改为不可拖动、固定屏幕右上角，每帧同位置重画）。
-        if (wnd->screenPcx16 && wnd->screenPcx16->width >= kUiBarWidth + 8)
-            g_ui.x = wnd->screenPcx16->width - kUiBarWidth - 8;
+        // 固定左上角（2026-10-05 用户定稿：不可拖动，每帧同位置重画）。
+        g_ui.x = 8;
         g_ui.y = 8;
         const int x = g_ui.x;
         const int y = g_ui.y;
@@ -625,30 +623,17 @@ static void UiHandleMouse_(H3Msg* msg)
         return;
     }
     if (msg->command != eMsgCommand::MOUSE_BUTTON) return;
+    // 兜底路径与系统钩子并存（游戏轮询合成消息吞不掉）：不再置拖动，
+    // 条上按下只收列表；点击处理统一由系统钩子 → UiHandleFrameClick_ 完成。
     if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && UiHitBar_(msg)) {
-        g_ui.dragging = true;
-        g_ui.dragOffX = px - g_ui.x;
-        g_ui.dragOffY = py - g_ui.y;
         g_ui.listOpen = false;
         return;
     }
-    if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && g_ui.dragging) return;
     if (msg->subtype == eMsgSubtype::LBUTTON_CLICK) {
-        if (g_ui.dragging) {
-            g_ui.dragging = false;
-            H3LoadedPcx16* screen = H3WindowManager::Get()->screenPcx16;
-            if (screen) {
-                if (g_ui.x < 0) g_ui.x = 0;
-                if (g_ui.y < 0) g_ui.y = 0;
-                if (g_ui.x + kUiBarWidth > screen->width) g_ui.x = screen->width - kUiBarWidth;
-                if (g_ui.y + kUiBarHeight > screen->height) g_ui.y = screen->height - kUiBarHeight;
-            }
-            UiSaveBarPosition_();
-            return;
-        }
         if (UiHitBar_(msg)) {
             if (px >= g_ui.x + kUiBarWidth - 52) {
                 g_ui.awaitingRebind = true;
+                g_uiWaitSaveUntil = 0;  // 进改键即放弃未决的存档等待
                 return;
             }
             g_ui.listOpen = !g_ui.listOpen;
@@ -731,6 +716,7 @@ static void UiHandleFrameClick_(int gameX, int gameY)
     if (UiPointInBar_(gameX, gameY)) {
         if (gameX >= g_ui.x + kUiBarWidth - 58) {
             g_ui.awaitingRebind = true;
+            g_uiWaitSaveUntil = 0;  // 进改键即放弃未决的存档等待（2026-10-05）
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else {
             g_ui.listOpen = !g_ui.listOpen;
