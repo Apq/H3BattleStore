@@ -441,11 +441,13 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         if (now < g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         static bool keyWasDown = false;
+        // 改键后按住新键不放：keyWasDown 跟随真实按键状态，guard 窗内不
+        // 产生"新按下"边沿——否则松手前的首次判定会穿透触发存档（表现为
+        // 改完键立刻"等待动画结束"，2026-10-05 用户实测定位）。
         const bool keyDown = !g_ui.awaitingRebind
             && !g_uiWaitSaveUntil
-            && now >= g_ui.rebindGuardUntil
             && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
-        if (keyDown && !keyWasDown)
+        if (keyDown && !keyWasDown && now >= g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
         keyWasDown = keyDown;
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
