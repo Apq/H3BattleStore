@@ -235,6 +235,27 @@ static bool CombatFullyIdle_(const H3CombatManager* mgr, int messageResult, cons
     return true;
 }
 
+// 2026-10-05 实测：actionUndergoing 在背景动画（岩浆/旗帜等）常驻非零，
+// 直接拒绝会让"按 G"看起来无反应。改为等待静止帧：置 3 秒窗口由绘制帧轮询，
+// 静止即存；超时强制存（采集是纯读快照，风险由恢复端指纹校验兜底）。
+// 移动中的部队同理短暂等待。
+static void TrySaveOrWait_(H3CombatManager* mgr, int messageResult)
+{
+    const char* reason = nullptr;
+    if (CombatFullyIdle_(mgr, messageResult, &reason)) {
+        g_uiWaitSaveUntil = 0;
+        TryCaptureCombat_();
+        return;
+    }
+    if (reason && (strcmp(reason, "animation in progress") == 0
+        || strcmp(reason, "creature is moving") == 0)) {
+        g_uiWaitSaveUntil = GetTickCount() + 3000;
+        LogInfo("战斗未静止（%s），等待静止帧存档（最多3秒）", reason);
+        return;
+    }
+    LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
+}
+
 static HHOOK g_combatKeyboardHook = nullptr;
 static HHOOK g_combatMouseHook = nullptr;
 static volatile LONG g_pendingSaveKey = 0;
@@ -370,16 +391,12 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
             UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
             return result;
         }
-        if (pressed && pressed == g_ui.saveKey) {
-            const char* reason = nullptr;
-            if (!CombatFullyIdle_(mgr, result, &reason))
-                LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
-            else
-                TryCaptureCombat_();
-        }
+        if (pressed && pressed == g_ui.saveKey)
+            TrySaveOrWait_(mgr, result);
         return result;
     }
-    UiHandleDragMove_(msg);
+    // 拖动跟随只走系统 WH_MOUSE 钩子：消息钩子对每条消息（含 cmd=0 空帧
+    // position=(0,0)）都更新位置，会把悬浮条拉回 (0,0)，2026-10-05 实测。
     const bool onBar = UiHitBar_(msg);
     const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
     if ((onBar || row >= 0 || g_ui.dragging) && msg) {
@@ -430,12 +447,19 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         if (rightX >= 0 && rightY >= 0)
             UiHandleFrameRightClick_((int)rightX, (int)rightY);
         const char pressed = g_ui.awaitingRebind ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed == g_ui.saveKey) {
-            const char* reason = nullptr;
-            if (!CombatFullyIdle_(mgr, 0, &reason))
-                LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
-            else
+        if (pressed == g_ui.saveKey)
+            TrySaveOrWait_(mgr, 0);
+        if (g_uiWaitSaveUntil) {
+            const char* waitReason = nullptr;
+            if (CombatFullyIdle_(mgr, 0, &waitReason)) {
+                g_uiWaitSaveUntil = 0;
+                LogInfo("动画已结束，执行存档");
                 TryCaptureCombat_();
+            } else if (GetTickCount() >= g_uiWaitSaveUntil) {
+                LogWarn("等待动画超时（%s），强制存档", waitReason ? waitReason : "unsafe");
+                g_uiWaitSaveUntil = 0;
+                TryCaptureCombat_();
+            }
         }
         UiDrawBar_(mgr);
     }

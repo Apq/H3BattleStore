@@ -186,8 +186,8 @@ static WORD UiRgb8888To565_(DWORD c)
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
 
-// 加载 DLL 同目录 img\HA_bg.pcx（680x548 24 位 3 平面 PCX）。
-// 解码器移植自 H3Auto PanelGfx LoadPanelPcx24_，校验放宽为不要求固定尺寸。
+// 加载 DLL 同目录 img\HB_bg.pcx（成品图 360x204，24 位 3 平面 PCX）：
+// 金框/条底分隔线/列表行分隔线/键位小框已离线烘焙进图，运行时只整图粘贴。
 static H3LoadedPcx16* UiLoadBarBg_()
 {
     if (g_barBg || g_barBgFailed)
@@ -199,7 +199,7 @@ static H3LoadedPcx16* UiLoadBarBg_()
     GetModuleFileNameW(g_hModule, wpath, MAX_PATH + 30);
     wchar_t* slash = wcsrchr(wpath, L'\\');
     if (!slash) { delete[] wpath; return nullptr; }
-    wcscpy_s(slash + 1, 24, L"img\\HA_bg.pcx");
+    wcscpy_s(slash + 1, 24, L"img\\HB_bg.pcx");
 
     FILE* file = nullptr;
     if (_wfopen_s(&file, wpath, L"rb") != 0 || !file) {
@@ -230,7 +230,9 @@ static H3LoadedPcx16* UiLoadBarBg_()
     const int width = xmax - xmin + 1;
     const int height = ymax - ymin + 1;
     if (encoded[0] != 0x0A || encoded[2] != 1 || bpp != 8 || planes != 3
-        || width < kUiBarWidth || height < kUiBarHeight || bpl < width) {
+        || width < kUiBarWidth
+        || height < kUiBarHeight + kUiListMaxRows * kUiRowHeight
+        || bpl < width) {
         LogWarn("背景图格式不符：w=%d h=%d bpp=%d planes=%d", width, height, bpp, planes);
         free(encoded);
         return nullptr;
@@ -296,8 +298,10 @@ static void UiCopyBgRegion_(H3LoadedPcx16* dst, const H3LoadedPcx16* src,
     }
 }
 
-// 把合成图上部 copyH 高度逐像素写入 backbuffer。禁止 DD Blt（HD 下触发崩溃）。
-static bool UiBltPcx16ToBackBuffer_(H3LoadedPcx16* src, int dstX, int dstY, int copyH)
+// 把 pcx16 指定区域逐像素写入 backbuffer。禁止 DD Blt（HD 下触发崩溃）。
+// 残影恢复：把 screenPcx16 对应区域原样拷回 backbuffer（源就是战场干净画面）。
+static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
+    int copyW, int copyH, int dstX, int dstY)
 {
     if (!src || !src->buffer) return false;
     LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
@@ -316,12 +320,15 @@ static bool UiBltPcx16ToBackBuffer_(H3LoadedPcx16* src, int dstX, int dstY, int 
         if (dstH <= 0 && wnd && wnd->screenPcx16) dstH = wnd->screenPcx16->height;
         const int bpp = UiBackBufferBpp_(bb);
         const bool src32 = H3BitMode::Get() == 4;
-        int srcX0 = 0;
-        int srcY0 = 0;
-        int copyW = src->width;
-        if (copyH > src->height) copyH = src->height;
-        if (dstX < 0) { srcX0 = -dstX; copyW += dstX; dstX = 0; }
-        if (dstY < 0) { srcY0 = -dstY; copyH += dstY; dstY = 0; }
+        // 源区域边界裁剪
+        if (srcX < 0) { copyW += srcX; dstX -= srcX; srcX = 0; }
+        if (srcY < 0) { copyH += srcY; dstY -= srcY; srcY = 0; }
+        if (srcX + copyW > src->width) copyW = src->width - srcX;
+        if (srcY + copyH > src->height) copyH = src->height - srcY;
+        int srcX0 = srcX;
+        int srcY0 = srcY;
+        if (dstX < 0) { srcX0 -= dstX; copyW += dstX; dstX = 0; }
+        if (dstY < 0) { srcY0 -= dstY; copyH += dstY; dstY = 0; }
         if (dstX + copyW > dstW) copyW = dstW - dstX;
         if (dstY + copyH > dstH) copyH = dstH - dstY;
         if (copyW > 0 && copyH > 0) {
@@ -371,6 +378,9 @@ static bool UiBltPcx16ToBackBuffer_(H3LoadedPcx16* src, int dstX, int dstY, int 
 
 static H3LoadedPcx16* g_barComposite = nullptr;
 
+// 等待静止帧存档的截止时刻（Entry 置位/消费；0=无等待）。绘制层用它显示提示。
+static DWORD g_uiWaitSaveUntil = 0;
+
 static void UiDrawBar_(H3CombatManager* mgr)
 {
     (void)mgr;
@@ -398,29 +408,43 @@ static void UiDrawBar_(H3CombatManager* mgr)
             ? (g_ui.entries.size() < (size_t)kUiListMaxRows
                 ? (int)g_ui.entries.size() : kUiListMaxRows)
             : 0;
-        const int usedH = kUiBarHeight + rows * kUiRowHeight;
+        const int usedH = rows > 0 ? compositeH : kUiBarHeight;
+        // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
+        // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
+        static int lastX = -1;
+        static int lastY = -1;
+        static int lastH = -1;
+        static H3CombatManager* lastMgr = nullptr;
+        if (lastMgr != mgr) {
+            lastX = lastY = lastH = -1;
+            lastMgr = mgr;
+        }
+        const bool rectChanged = lastX != x || lastY != y || lastH != usedH;
         // 每帧整图清底，防列表收起后残留旧像素
         c->FillRectangle(0, 0, kUiBarWidth, compositeH, 0, 0, 0);
-        // 背景：HA_bg.pcx 中央裁切 + 金框（2026-10-05 用户要求）；失败回退纯色
+        // 背景：成品图 HB_bg.pcx 整图粘贴（金框/分隔线已烘焙，2026-10-05 用户
+        // 要求改成品图而非运行时裁切）；加载失败回退纯色 + 代码画框。
         H3LoadedPcx16* bg = UiLoadBarBg_();
-        if (bg && bg->buffer && bg->width >= kUiBarWidth && bg->height >= usedH) {
-            UiCopyBgRegion_(c, bg, (bg->width - kUiBarWidth) / 2,
-                (bg->height - usedH) / 2, kUiBarWidth, usedH);
-            c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 220, 200, 110);
-            if (rows > 0)
-                c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 200, 180, 90);
+        const bool bgOk = bg && bg->buffer
+            && bg->width >= kUiBarWidth && bg->height >= compositeH;
+        if (bgOk) {
+            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, usedH);
         }
         else {
             c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
             c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
             if (rows > 0) {
-                c->FillRectangle(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
-                c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
+                c->FillRectangle(0, kUiBarHeight, kUiBarWidth,
+                    kUiListMaxRows * kUiRowHeight, 10, 10, 30);
+                c->DrawFrame(0, kUiBarHeight, kUiBarWidth,
+                    kUiListMaxRows * kUiRowHeight, 160, 140, 70);
             }
         }
         char label[128] = {};
         if (g_ui.awaitingRebind)
             UiToGbk_("请按新的存档键（Esc 取消）", label, sizeof(label));
+        else if (g_uiWaitSaveUntil)
+            UiToGbk_("等待动画结束…", label, sizeof(label));
         else if (g_ui.lastSavedStamp[0] && GetTickCount() < g_ui.lastSavedUntil) {
             char utf8[96] = {};
             _snprintf(utf8, sizeof(utf8), "已存档 %s", g_ui.lastSavedStamp);
@@ -441,7 +465,8 @@ static void UiDrawBar_(H3CombatManager* mgr)
         UiToGbk_(keyUtf8, key, sizeof(key));
         font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        if (!bgOk)
+            c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
         if (rows > 0) {
             const int listY = kUiBarHeight;
             for (int row = 0; row < rows; ++row) {
@@ -454,10 +479,18 @@ static void UiDrawBar_(H3CombatManager* mgr)
                     kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
             }
         }
-        const bool bltOk = UiBltPcx16ToBackBuffer_(c, x, y, usedH);
+        bool bltOk = false;
         redrawing = true;
+        if (rectChanged && lastX >= 0 && wnd->screenPcx16
+            && UiBltPcx16Region_(wnd->screenPcx16, lastX, lastY, kUiBarWidth, lastH, lastX, lastY)) {
+            wnd->H3Redraw(lastX, lastY, kUiBarWidth, lastH);
+        }
+        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, usedH, x, y);
         wnd->H3Redraw(x, y, kUiBarWidth, usedH);
         redrawing = false;
+        lastX = x;
+        lastY = y;
+        lastH = usedH;
         if (logInfo)
             LogInfo("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
                 c, UiDDBackBuffer_(), x, y, bltOk ? 1 : 0);
@@ -616,13 +649,6 @@ static void UiHandleMouse_(H3Msg* msg)
                 UiReloadEntries_(H3CombatManager::Get());
         }
     }
-}
-
-static void UiHandleDragMove_(H3Msg* msg)
-{
-    if (!g_ui.dragging || !msg) return;
-    g_ui.x = msg->position.x - g_ui.dragOffX;
-    g_ui.y = msg->position.y - g_ui.dragOffY;
 }
 
 static const char* const kUiFreeKeys_ = "BFGKMNUVXY";
