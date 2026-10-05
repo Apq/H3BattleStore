@@ -7,10 +7,33 @@
 
 static void UiToGbk_(const char* utf8, char* out, int outCap)
 {
-    H3Encoding::WCHARPtr wide(H3Encoding::Utf8ToUnicode(utf8));
-    if (!wide.Get()) { out[0] = 0; return; }
-    int n = WideCharToMultiByte(936, 0, wide.Get(), -1, out, outCap, nullptr, nullptr);
-    if (n <= 0) out[0] = 0;
+    if (!utf8 || !out || outCap <= 0) return;
+    out[0] = 0;
+    const int wideCap = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, nullptr, 0);
+    if (wideCap <= 0) return;
+    WCHAR* wide = new (std::nothrow) WCHAR[wideCap]();
+    if (!wide) return;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, wide, wideCap) > 0)
+        WideCharToMultiByte(936, 0, wide, -1, out, outCap, nullptr, nullptr);
+    delete[] wide;
+    out[outCap - 1] = 0;
+}
+
+static char UiVirtualKeyToLetter_(int virtualKey)
+{
+    switch (virtualKey) {
+    case h3::NH3VKey::H3VK_B: return 'B';
+    case h3::NH3VKey::H3VK_F: return 'F';
+    case h3::NH3VKey::H3VK_G: return 'G';
+    case h3::NH3VKey::H3VK_K: return 'K';
+    case h3::NH3VKey::H3VK_M: return 'M';
+    case h3::NH3VKey::H3VK_N: return 'N';
+    case h3::NH3VKey::H3VK_U: return 'U';
+    case h3::NH3VKey::H3VK_V: return 'V';
+    case h3::NH3VKey::H3VK_X: return 'X';
+    case h3::NH3VKey::H3VK_Y: return 'Y';
+    default: return 0;
+    }
 }
 
 static const int kUiBarHeight = 24;
@@ -82,7 +105,7 @@ static void UiLoadBarPosition_()
     g_ui.y = IniReadIntUtf8(g_user_ini_path, "Ui", "BarY", kUiDefaultY);
     char keyText[16] = {};
     IniReadUtf8(g_user_ini_path, "Hotkeys", "SaveKey", "G", keyText, sizeof(keyText));
-    if (keyText[0] >= 'A' && keyText[0] <= 'Z' && keyText[0] != 'Z') g_ui.saveKey = keyText[0];
+    if (UiKeyIsFree_(keyText[0])) g_ui.saveKey = keyText[0];
     else g_ui.saveKey = 'G';
 }
 
@@ -156,8 +179,9 @@ static void UiDrawBar_(H3CombatManager* mgr)
     char keyUtf8[8] = {};
     _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
     UiToGbk_(keyUtf8, key, sizeof(key));
-    font->TextDraw(screen, key, x + kUiBarWidth - 52, y, 46, kUiBarHeight,
+    font->TextDraw(screen, key, x + kUiBarWidth - 58, y, 52, kUiBarHeight,
         eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+    screen->DrawFrame(x + kUiBarWidth - 58, y + 2, 54, kUiBarHeight - 4, 220, 200, 110);
     if (!g_ui.listOpen || g_ui.entries.empty()) return;
     const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
         ? (int)g_ui.entries.size() : kUiListMaxRows;
@@ -325,13 +349,13 @@ static bool UiKeyIsFree_(char key)
     return key >= 'A' && key <= 'Z' && strchr(kUiFreeKeys_, key) != nullptr;
 }
 
-static void UiHandleRebindKey_(int key)
+static void UiHandleRebindKey_(char key, bool escape)
 {
-    if (key == 27) {
+    if (escape) {
         g_ui.awaitingRebind = false;
         return;
     }
-    if (UiKeyIsFree_((char)key)) {
+    if (UiKeyIsFree_(key)) {
         g_ui.saveKey = (char)key;
         UiSaveHotkey_();
         g_ui.awaitingRebind = false;

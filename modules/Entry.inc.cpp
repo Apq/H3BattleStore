@@ -229,12 +229,15 @@ static bool CombatFullyIdle_(const H3CombatManager* mgr, int messageResult, cons
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
 {
     if (msg && msg->command == eMsgCommand::KEY_DOWN) {
+        const char pressed = UiVirtualKeyToLetter_(msg->subtype);
+        LogInfo("战斗按键：virtual=%d letter=%c save=%c", msg->subtype,
+            pressed ? pressed : '?', g_ui.saveKey);
         const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
         if (g_ui.awaitingRebind) {
-            UiHandleRebindKey_(msg->subtype & 0xFF);
+            UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
             return result;
         }
-        if ((msg->subtype & 0xFF) == g_ui.saveKey) {
+        if (pressed && pressed == g_ui.saveKey) {
             const char* reason = nullptr;
             if (!CombatFullyIdle_(mgr, result, &reason))
                 LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
