@@ -264,21 +264,63 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
 
 static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION
-        && (wParam == WM_LBUTTONUP || wParam == WM_RBUTTONUP)) {
-        const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
-        int gameX = 0;
-        int gameY = 0;
-        if (mouse && UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) {
-            if (wParam == WM_LBUTTONUP) {
+    if (code == HC_ACTION) {
+        const bool leftDown = wParam == WM_LBUTTONDOWN;
+        const bool leftUp = wParam == WM_LBUTTONUP;
+        const bool rightDown = wParam == WM_RBUTTONDOWN;
+        const bool rightUp = wParam == WM_RBUTTONUP;
+        const bool move = wParam == WM_MOUSEMOVE;
+        if (leftDown || leftUp || rightDown || rightUp || move) {
+            // 只在真实战斗且悬浮条显示时介入，避免战斗外误吞点击。
+            H3CombatManager* combat = H3CombatManager::Get();
+            if (!CombatIsReadable_(combat) || combat->finished || !combat->dlg)
+                return CallNextHookEx(nullptr, code, wParam, lParam);
+            const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
+            int gameX = 0;
+            int gameY = 0;
+            if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY))
+                return CallNextHookEx(nullptr, code, wParam, lParam);
+            const bool inBar = UiPointInBar_(gameX, gameY);
+            const int row = UiHitRow_(gameX, gameY);
+            const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
+            if (move) {
+                if (g_ui.dragging) {
+                    g_ui.x = gameX - g_ui.dragOffX;
+                    g_ui.y = gameY - g_ui.dragOffY;
+                }
+            } else if (leftDown && inBar) {
+                g_ui.dragging = true;
+                g_ui.dragOffX = gameX - g_ui.x;
+                g_ui.dragOffY = gameY - g_ui.y;
+                g_ui.listOpen = false;
+                return 1;
+            } else if (leftUp && g_ui.dragging) {
+                g_ui.dragging = false;
+                H3WindowManager* wnd = H3WindowManager::Get();
+                if (wnd && wnd->screenPcx16) {
+                    if (g_ui.x < 0) g_ui.x = 0;
+                    if (g_ui.y < 0) g_ui.y = 0;
+                    if (g_ui.x + kUiBarWidth > wnd->screenPcx16->width)
+                        g_ui.x = wnd->screenPcx16->width - kUiBarWidth;
+                    if (g_ui.y + kUiBarHeight > wnd->screenPcx16->height)
+                        g_ui.y = wnd->screenPcx16->height - kUiBarHeight;
+                }
+                UiSaveBarPosition_();
+                LogInfo("悬浮条拖动完成：(%d,%d)", g_ui.x, g_ui.y);
+                return 1;
+            } else if (leftUp && (inBar || hitList)) {
                 InterlockedExchange(&g_pendingClickX, gameX);
                 InterlockedExchange(&g_pendingClickY, gameY);
-            } else {
+                LogInfo("点击已吞并：game=(%d,%d)", gameX, gameY);
+                return 1;
+            } else if (rightDown && (inBar || hitList)) {
+                return 1;
+            } else if (rightUp && hitList) {
                 InterlockedExchange(&g_pendingRightClickX, gameX);
                 InterlockedExchange(&g_pendingRightClickY, gameY);
+                LogInfo("右键已吞并：game=(%d,%d)", gameX, gameY);
+                return 1;
             }
-            LogInfo("系统鼠标松开：%s game=(%d,%d)",
-                wParam == WM_LBUTTONUP ? "左" : "右", gameX, gameY);
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
