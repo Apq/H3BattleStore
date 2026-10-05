@@ -151,80 +151,193 @@ static void UiMarkSaved_(uint64_t timestampUtcMs)
     g_ui.lastSavedUntil = GetTickCount() + 3000;
 }
 
+// ---------- DirectDraw backbuffer 直绘（方案移植自 H3BattleValueInfo，2026-10-05） ----------
+// 21:32 实测教训：TextDraw 直接画 screenPcx16 大缓冲会与 ZCN2 中文渲染钩子互踩崩溃
+// （EXCEPTION_ACCESS_VIOLATION 于 ZCN2.dll+0x1192C，栈经 UiDrawBar_→TextDraw）。
+// BVI 定稿方案：所有绘制画到自建小合成图，Lock backbuffer 手工逐像素 blt，H3Redraw 刷新。
+
+static LPDIRECTDRAWSURFACE UiDDBackBuffer_()
+{
+    return *reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28);
+}
+
+static int UiBackBufferBpp_(LPDIRECTDRAWSURFACE surface)
+{
+    if (!surface) return H3BitMode::Get() == 4 ? 32 : 16;
+    DDPIXELFORMAT pf;
+    memset(&pf, 0, sizeof(pf));
+    pf.dwSize = sizeof(pf);
+    if (SUCCEEDED(surface->GetPixelFormat(&pf))
+        && (pf.dwRGBBitCount == 16 || pf.dwRGBBitCount == 32))
+        return (int)pf.dwRGBBitCount;
+    return H3BitMode::Get() == 4 ? 32 : 16;
+}
+
+static WORD UiRgb888To565_(int r, int g, int b)
+{
+    return (WORD)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3));
+}
+
+static WORD UiRgb8888To565_(DWORD c)
+{
+    return UiRgb888To565_((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+}
+
+// 把合成图上部 copyH 高度逐像素写入 backbuffer。禁止 DD Blt（HD 下触发崩溃）。
+static bool UiBltPcx16ToBackBuffer_(H3LoadedPcx16* src, int dstX, int dstY, int copyH)
+{
+    if (!src || !src->buffer) return false;
+    LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
+    if (!bb) return false;
+    __try {
+        DDSURFACEDESC desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.dwSize = sizeof(desc);
+        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))
+            || !desc.lpSurface)
+            return false;
+        H3WindowManager* wnd = H3WindowManager::Get();
+        int dstW = (int)desc.dwWidth;
+        int dstH = (int)desc.dwHeight;
+        if (dstW <= 0 && wnd && wnd->screenPcx16) dstW = wnd->screenPcx16->width;
+        if (dstH <= 0 && wnd && wnd->screenPcx16) dstH = wnd->screenPcx16->height;
+        const int bpp = UiBackBufferBpp_(bb);
+        const bool src32 = H3BitMode::Get() == 4;
+        int srcX0 = 0;
+        int srcY0 = 0;
+        int copyW = src->width;
+        if (copyH > src->height) copyH = src->height;
+        if (dstX < 0) { srcX0 = -dstX; copyW += dstX; dstX = 0; }
+        if (dstY < 0) { srcY0 = -dstY; copyH += dstY; dstY = 0; }
+        if (dstX + copyW > dstW) copyW = dstW - dstX;
+        if (dstY + copyH > dstH) copyH = dstH - dstY;
+        if (copyW > 0 && copyH > 0) {
+            for (int row = 0; row < copyH; ++row) {
+                BYTE* srcRow = src->buffer + (srcY0 + row) * src->scanlineSize;
+                if (bpp == 32) {
+                    // backbuffer 是 BGRX：只写 B/G/R，X 字节保持原值。
+                    BYTE* d = (BYTE*)desc.lpSurface + (dstY + row) * (int)desc.lPitch + dstX * 4;
+                    if (src32) {
+                        DWORD* s = (DWORD*)srcRow + srcX0;
+                        for (int i = 0; i < copyW; ++i) {
+                            const DWORD c = s[i];
+                            d[i * 4 + 0] = (BYTE)c;
+                            d[i * 4 + 1] = (BYTE)(c >> 8);
+                            d[i * 4 + 2] = (BYTE)(c >> 16);
+                        }
+                    } else {
+                        WORD* s = (WORD*)srcRow + srcX0;
+                        for (int i = 0; i < copyW; ++i) {
+                            const WORD c16 = s[i];
+                            d[i * 4 + 0] = (BYTE)((c16 & 0x1F) << 3);
+                            d[i * 4 + 1] = (BYTE)(((c16 >> 5) & 0x3F) << 2);
+                            d[i * 4 + 2] = (BYTE)(((c16 >> 11) & 0x1F) << 3);
+                        }
+                    }
+                } else {
+                    WORD* d = (WORD*)((BYTE*)desc.lpSurface + (dstY + row) * (int)desc.lPitch) + dstX;
+                    if (src32) {
+                        DWORD* s = (DWORD*)srcRow + srcX0;
+                        for (int i = 0; i < copyW; ++i)
+                            d[i] = UiRgb8888To565_(s[i]);
+                    } else {
+                        WORD* s = (WORD*)srcRow + srcX0;
+                        for (int i = 0; i < copyW; ++i)
+                            d[i] = s[i];
+                    }
+                }
+            }
+        }
+        const bool ok = copyW > 0 && copyH > 0;
+        bb->Unlock(nullptr);
+        return ok;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static H3LoadedPcx16* g_barComposite = nullptr;
+
 static void UiDrawBar_(H3CombatManager* mgr)
 {
-    H3WindowManager* wnd = H3WindowManager::Get();
-    static DWORD lastMissing = 0;
-    static DWORD lastDrawInfo = 0;
-    // 2026-10-05 实测：战斗对话框内部缓冲(+0x44)不上屏；必须画 screenPcx16 并
-    // 调用 H3Redraw 呈现（H3Auto PanelDraw 同款结论）。
-    H3LoadedPcx16* screen = wnd ? wnd->screenPcx16 : nullptr;
-    if (!screen) {
-        const DWORD now = GetTickCount();
-        if (now - lastMissing > 1000) {
-            LogWarn("悬浮条未绘制：窗口屏幕缓冲不可用");
-            lastMissing = now;
+    (void)mgr;
+    static bool broken = false;
+    static bool redrawing = false;
+    if (broken || redrawing) return;
+    __try {
+        H3WindowManager* wnd = H3WindowManager::Get();
+        H3Font* font = H3SmallFont::Get();
+        if (!wnd || !font || !UiDDBackBuffer_()) return;
+        const int compositeH = kUiBarHeight + kUiListMaxRows * kUiRowHeight;
+        if (!g_barComposite || !g_barComposite->buffer) {
+            if (g_barComposite) g_barComposite->Destroy();
+            g_barComposite = H3LoadedPcx16::Create(kUiBarWidth, compositeH);
+            if (!g_barComposite || !g_barComposite->buffer) return;
         }
-        return;
-    }
-    H3Font* font = H3SmallFont::Get();
-    if (!font) {
-        LogWarn("悬浮条未绘制：小字体不可用");
-        return;
-    }
-    const DWORD infoNow = GetTickCount();
-    if (infoNow - lastDrawInfo > 5000) {
-        LogInfo("悬浮条绘制：buf=%p %dx%d pos=(%d,%d)",
-            screen, screen->width, screen->height, g_ui.x, g_ui.y);
-        lastDrawInfo = infoNow;
-    }
-    const int x = g_ui.x;
-    const int y = g_ui.y;
-    screen->FillRectangle(x, y, kUiBarWidth, kUiBarHeight, 20, 20, 20);
-    screen->DrawFrame(x, y, kUiBarWidth, kUiBarHeight, 200, 180, 90);
-    char label[128] = {};
-    if (g_ui.awaitingRebind)
-        UiToGbk_("请按新的存档键（Esc 取消）", label, sizeof(label));
-    else if (g_ui.lastSavedStamp[0] && GetTickCount() < g_ui.lastSavedUntil) {
-        char utf8[96] = {};
-        _snprintf(utf8, sizeof(utf8), "已存档 %s", g_ui.lastSavedStamp);
-        UiToGbk_(utf8, label, sizeof(label));
-    }
-    else if (g_ui.entries.empty())
-        UiToGbk_("[战场存档] 无存档", label, sizeof(label));
-    else {
-        char utf8[96] = {};
-        _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
-        UiToGbk_(utf8, label, sizeof(label));
-    }
-    font->TextDraw(screen, label, x + 6, y, kUiBarWidth - 60, kUiBarHeight,
-        eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
-    char key[16] = {};
-    char keyUtf8[8] = {};
-    _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
-    UiToGbk_(keyUtf8, key, sizeof(key));
-    font->TextDraw(screen, key, x + kUiBarWidth - 58, y, 52, kUiBarHeight,
-        eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-    screen->DrawFrame(x + kUiBarWidth - 58, y + 2, 54, kUiBarHeight - 4, 220, 200, 110);
-    int redrawHeight = kUiBarHeight;
-    if (g_ui.listOpen && !g_ui.entries.empty()) {
-        const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
-            ? (int)g_ui.entries.size() : kUiListMaxRows;
-        const int listY = y + kUiBarHeight;
-        redrawHeight += rows * kUiRowHeight;
-        screen->FillRectangle(x, listY, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
-        screen->DrawFrame(x, listY, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
-        for (int row = 0; row < rows; ++row) {
-            if (row == g_ui.hoverRow)
-                screen->FillRectangle(x + 2, listY + row * kUiRowHeight,
-                    kUiBarWidth - 4, kUiRowHeight, 90, 70, 20);
-            char stamp[32] = {};
-            UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
-            font->TextDraw(screen, stamp, x + 6, listY + row * kUiRowHeight,
-                kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        static DWORD lastDrawInfo = 0;
+        const DWORD infoNow = GetTickCount();
+        const bool logInfo = infoNow - lastDrawInfo > 5000;
+        if (logInfo) lastDrawInfo = infoNow;
+        H3LoadedPcx16* c = g_barComposite;
+        const int x = g_ui.x;
+        const int y = g_ui.y;
+        // 每帧整图清底，防列表收起后残留旧像素
+        c->FillRectangle(0, 0, kUiBarWidth, compositeH, 0, 0, 0);
+        c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
+        c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
+        char label[128] = {};
+        if (g_ui.awaitingRebind)
+            UiToGbk_("请按新的存档键（Esc 取消）", label, sizeof(label));
+        else if (g_ui.lastSavedStamp[0] && GetTickCount() < g_ui.lastSavedUntil) {
+            char utf8[96] = {};
+            _snprintf(utf8, sizeof(utf8), "已存档 %s", g_ui.lastSavedStamp);
+            UiToGbk_(utf8, label, sizeof(label));
         }
+        else if (g_ui.entries.empty())
+            UiToGbk_("[战场存档] 无存档", label, sizeof(label));
+        else {
+            char utf8[96] = {};
+            _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
+            UiToGbk_(utf8, label, sizeof(label));
+        }
+        font->TextDraw(c, label, 6, 0, kUiBarWidth - 60, kUiBarHeight,
+            eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        char key[16] = {};
+        char keyUtf8[8] = {};
+        _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
+        UiToGbk_(keyUtf8, key, sizeof(key));
+        font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
+            eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+        c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        int usedH = kUiBarHeight;
+        if (g_ui.listOpen && !g_ui.entries.empty()) {
+            const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
+                ? (int)g_ui.entries.size() : kUiListMaxRows;
+            const int listY = kUiBarHeight;
+            usedH += rows * kUiRowHeight;
+            c->FillRectangle(0, listY, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
+            c->DrawFrame(0, listY, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
+            for (int row = 0; row < rows; ++row) {
+                if (row == g_ui.hoverRow)
+                    c->FillRectangle(2, listY + row * kUiRowHeight,
+                        kUiBarWidth - 4, kUiRowHeight, 90, 70, 20);
+                char stamp[32] = {};
+                UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
+                font->TextDraw(c, stamp, 6, listY + row * kUiRowHeight,
+                    kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+            }
+        }
+        const bool bltOk = UiBltPcx16ToBackBuffer_(c, x, y, usedH);
+        redrawing = true;
+        wnd->H3Redraw(x, y, kUiBarWidth, usedH);
+        redrawing = false;
+        if (logInfo)
+            LogInfo("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
+                c, UiDDBackBuffer_(), x, y, bltOk ? 1 : 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        broken = true;
+        LogError("悬浮条绘制异常(code=0x%08X)，本会话停画防崩", GetExceptionCode());
     }
-    if (wnd) wnd->H3Redraw(x, y, kUiBarWidth, redrawHeight);
 }
 
 static bool UiPointInBar_(int px, int py)

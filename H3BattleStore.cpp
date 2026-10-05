@@ -4,6 +4,7 @@
 
 #define _H3API_PATCHER_X86_
 #include <H3API.hpp>
+#include <ddraw.h>
 #include <wincrypt.h>
 #include <new>
 #include <stdarg.h>
