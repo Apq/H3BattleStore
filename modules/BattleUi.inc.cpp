@@ -35,7 +35,7 @@ static struct
     bool dragging = false;
     int dragOffX = 0;
     int dragOffY = 0;
-    char saveKey = 'Z';
+    char saveKey = 'G';
     bool awaitingRebind = false;
     char lastSavedStamp[32] = {};
     DWORD lastSavedUntil = 0;
@@ -75,14 +75,15 @@ static void UiSaveBarPosition_()
     IniWriteKeyUtf8(g_user_ini_path, "Ui", "BarY", yText);
 }
 
+static bool UiKeyIsFree_(char key);
 static void UiLoadBarPosition_()
 {
     g_ui.x = IniReadIntUtf8(g_user_ini_path, "Ui", "BarX", kUiDefaultX);
     g_ui.y = IniReadIntUtf8(g_user_ini_path, "Ui", "BarY", kUiDefaultY);
     char keyText[16] = {};
-    IniReadUtf8(g_user_ini_path, "Hotkeys", "SaveKey", "Z", keyText, sizeof(keyText));
-    if (keyText[0] >= 'A' && keyText[0] <= 'Z') g_ui.saveKey = keyText[0];
-    else g_ui.saveKey = 'Z';
+    IniReadUtf8(g_user_ini_path, "Hotkeys", "SaveKey", "G", keyText, sizeof(keyText));
+    if (keyText[0] >= 'A' && keyText[0] <= 'Z' && keyText[0] != 'Z') g_ui.saveKey = keyText[0];
+    else g_ui.saveKey = 'G';
 }
 
 static void UiSaveHotkey_()
@@ -115,10 +116,21 @@ static void UiMarkSaved_(uint64_t timestampUtcMs)
 static void UiDrawBar_(H3CombatManager* mgr)
 {
     H3WindowManager* wnd = H3WindowManager::Get();
-    if (!wnd || !wnd->screenPcx16) return;
+    static DWORD lastMissing = 0;
+    if (!wnd || !wnd->screenPcx16) {
+        const DWORD now = GetTickCount();
+        if (now - lastMissing > 1000) {
+            LogWarn("悬浮条未绘制：窗口管理器或屏幕缓冲不可用");
+            lastMissing = now;
+        }
+        return;
+    }
     H3LoadedPcx16* screen = wnd->screenPcx16;
     H3Font* font = H3SmallFont::Get();
-    if (!font) return;
+    if (!font) {
+        LogWarn("悬浮条未绘制：小字体不可用");
+        return;
+    }
     const int x = g_ui.x;
     const int y = g_ui.y;
     screen->FillRectangle(x, y, kUiBarWidth, kUiBarHeight, 20, 20, 20);
@@ -306,7 +318,7 @@ static void UiHandleDragMove_(H3Msg* msg)
     g_ui.y = msg->position.y - g_ui.dragOffY;
 }
 
-static const char* const kUiFreeKeys_ = "BFGKMNUVXYZ";
+static const char* const kUiFreeKeys_ = "BFGKMNUVXY";
 
 static bool UiKeyIsFree_(char key)
 {

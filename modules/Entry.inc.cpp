@@ -265,9 +265,24 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
 
 static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
 {
+    static DWORD lastFrame = 0;
     const int result = THISCALL_1(int, hook->GetDefaultFunc(), mgr);
-    if (CombatIsReadable_(mgr) && !mgr->finished && mgr->dlg)
+    const DWORD now = GetTickCount();
+    const bool readable = CombatIsReadable_(mgr);
+    if (now - lastFrame > 1000) {
+        LogDebug("战斗绘制帧：mgr=%p readable=%d finished=%d dlg=%p",
+            mgr, readable ? 1 : 0,
+            readable ? (mgr->finished ? 1 : 0) : -1,
+            readable ? mgr->dlg : nullptr);
+        lastFrame = now;
+    }
+    if (readable && !mgr->finished && mgr->dlg)
         UiDrawBar_(mgr);
+    else if (now - lastFrame <= 20)
+        LogInfo("悬浮条跳过绘制：readable=%d finished=%d dlg=%p",
+            readable ? 1 : 0,
+            readable ? (mgr->finished ? 1 : 0) : -1,
+            readable ? mgr->dlg : nullptr);
     return result;
 }
 
