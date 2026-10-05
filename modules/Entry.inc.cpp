@@ -66,8 +66,17 @@ static bool CombatCanCapture_(const H3CombatManager* mgr, const char** reason)
     if (mgr->finished) { if (reason) *reason = "combat finished"; return false; }
     if (mgr->autoCombat) { if (reason) *reason = "auto combat"; return false; }
     if (mgr->action != 0 || mgr->actionParameter || mgr->actionTarget || mgr->actionParameter2) {
-        if (reason) *reason = "action in progress";
-        return false;
+        // 2026-10-05 实测：玩家空闲悬停时该四元组也持续非零（疑似 UI 预备动作），
+        // 不能作为保存门槛；保存是纯读快照，动态风险由 actionUndergoing /
+        // travelingSquares / finished / tacticsPhase 把关。此处仅记录观察值。
+        static DWORD lastActionLog = 0;
+        const DWORD actionNow = GetTickCount();
+        if (actionNow - lastActionLog > 2000) {
+            LogInfo("保存时动作字段非零：action=%d p=%d t=%d p2=%d",
+                (int)mgr->action, (int)(INT_PTR)mgr->actionParameter,
+                (int)(INT_PTR)mgr->actionTarget, (int)(INT_PTR)mgr->actionParameter2);
+            lastActionLog = actionNow;
+        }
     }
     if (mgr->actionUndergoing) { if (reason) *reason = "animation in progress"; return false; }
     return true;

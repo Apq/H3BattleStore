@@ -155,15 +155,14 @@ static void UiDrawBar_(H3CombatManager* mgr)
 {
     H3WindowManager* wnd = H3WindowManager::Get();
     static DWORD lastMissing = 0;
-    const BYTE* dlgBytes = reinterpret_cast<const BYTE*>(mgr ? mgr->dlg : nullptr);
-    H3LoadedPcx16* dlgScreen = dlgBytes
-        ? *reinterpret_cast<H3LoadedPcx16* const*>(dlgBytes + 0x44)
-        : nullptr;
-    H3LoadedPcx16* screen = dlgScreen ? dlgScreen : (wnd ? wnd->screenPcx16 : nullptr);
+    static DWORD lastDrawInfo = 0;
+    // 2026-10-05 实测：战斗对话框内部缓冲(+0x44)不上屏；必须画 screenPcx16 并
+    // 调用 H3Redraw 呈现（H3Auto PanelDraw 同款结论）。
+    H3LoadedPcx16* screen = wnd ? wnd->screenPcx16 : nullptr;
     if (!screen) {
         const DWORD now = GetTickCount();
         if (now - lastMissing > 1000) {
-            LogWarn("悬浮条未绘制：战斗对话框和窗口屏幕缓冲都不可用");
+            LogWarn("悬浮条未绘制：窗口屏幕缓冲不可用");
             lastMissing = now;
         }
         return;
@@ -172,6 +171,12 @@ static void UiDrawBar_(H3CombatManager* mgr)
     if (!font) {
         LogWarn("悬浮条未绘制：小字体不可用");
         return;
+    }
+    const DWORD infoNow = GetTickCount();
+    if (infoNow - lastDrawInfo > 5000) {
+        LogInfo("悬浮条绘制：buf=%p %dx%d pos=(%d,%d)",
+            screen, screen->width, screen->height, g_ui.x, g_ui.y);
+        lastDrawInfo = infoNow;
     }
     const int x = g_ui.x;
     const int y = g_ui.y;
@@ -201,21 +206,25 @@ static void UiDrawBar_(H3CombatManager* mgr)
     font->TextDraw(screen, key, x + kUiBarWidth - 58, y, 52, kUiBarHeight,
         eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
     screen->DrawFrame(x + kUiBarWidth - 58, y + 2, 54, kUiBarHeight - 4, 220, 200, 110);
-    if (!g_ui.listOpen || g_ui.entries.empty()) return;
-    const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
-        ? (int)g_ui.entries.size() : kUiListMaxRows;
-    const int listY = y + kUiBarHeight;
-    screen->FillRectangle(x, listY, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
-    screen->DrawFrame(x, listY, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
-    for (int row = 0; row < rows; ++row) {
-        if (row == g_ui.hoverRow)
-            screen->FillRectangle(x + 2, listY + row * kUiRowHeight,
-                kUiBarWidth - 4, kUiRowHeight, 90, 70, 20);
-        char stamp[32] = {};
-        UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
-        font->TextDraw(screen, stamp, x + 6, listY + row * kUiRowHeight,
-            kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+    int redrawHeight = kUiBarHeight;
+    if (g_ui.listOpen && !g_ui.entries.empty()) {
+        const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
+            ? (int)g_ui.entries.size() : kUiListMaxRows;
+        const int listY = y + kUiBarHeight;
+        redrawHeight += rows * kUiRowHeight;
+        screen->FillRectangle(x, listY, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
+        screen->DrawFrame(x, listY, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
+        for (int row = 0; row < rows; ++row) {
+            if (row == g_ui.hoverRow)
+                screen->FillRectangle(x + 2, listY + row * kUiRowHeight,
+                    kUiBarWidth - 4, kUiRowHeight, 90, 70, 20);
+            char stamp[32] = {};
+            UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
+            font->TextDraw(screen, stamp, x + 6, listY + row * kUiRowHeight,
+                kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        }
     }
+    if (wnd) wnd->H3Redraw(x, y, kUiBarWidth, redrawHeight);
 }
 
 static bool UiPointInBar_(int px, int py)
