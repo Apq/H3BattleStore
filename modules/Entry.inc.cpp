@@ -315,39 +315,10 @@ static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
             const bool inBar = UiPointInBar_(gameX, gameY);
             const int row = UiHitRow_(gameX, gameY);
             const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
-            if (move) {
-                if (g_ui.dragging) {
-                    g_ui.x = gameX - g_ui.dragOffX;
-                    g_ui.y = gameY - g_ui.dragOffY;
-                    UiClampBarToBattleDlg_(combat);
-                }
-            } else if (leftDown && inBar && gameX >= g_ui.x + kUiBarWidth - 58) {
-                // 键位小框：不进拖动，直接转发点击（改键入口，2026-10-05 修复）
-                InterlockedExchange(&g_pendingClickX, gameX);
-                InterlockedExchange(&g_pendingClickY, gameY);
-                return 1;
-            } else if (leftDown && inBar) {
-                g_ui.dragging = true;
-                g_ui.dragOffX = gameX - g_ui.x;
-                g_ui.dragOffY = gameY - g_ui.y;
-                g_ui.dragDownX = gameX;
-                g_ui.dragDownY = gameY;
-                g_ui.listOpen = false;
-                return 1;
-            } else if (leftUp && g_ui.dragging) {
-                g_ui.dragging = false;
-                // 原地点击（未拖动）视为点击：开合列表/改键，不落位置
-                const int movedX = gameX - g_ui.dragDownX;
-                const int movedY = gameY - g_ui.dragDownY;
-                if (movedX >= -3 && movedX <= 3 && movedY >= -3 && movedY <= 3) {
-                    InterlockedExchange(&g_pendingClickX, gameX);
-                    InterlockedExchange(&g_pendingClickY, gameY);
-                    return 1;
-                }
-                UiClampBarToBattleDlg_(combat);
-                UiSaveBarPosition_();
-                LogInfo("悬浮条拖动完成：(%d,%d)", g_ui.x, g_ui.y);
-                return 1;
+            if (move)
+                return CallNextHookEx(nullptr, code, wParam, lParam);
+            if (leftDown && (inBar || hitList)) {
+                return 1;  // 按下先吞并，抬起才转发（悬浮条固定右上角，无拖动）
             } else if (leftUp && (inBar || hitList)) {
                 InterlockedExchange(&g_pendingClickX, gameX);
                 InterlockedExchange(&g_pendingClickY, gameY);
@@ -397,6 +368,8 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
         const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
         if (g_ui.awaitingRebind) {
             UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
+            // 清掉改键残留，防止同键名立即触发一次存档（表现为"等待动画结束"）
+            InterlockedExchange(&g_pendingSaveKey, 0);
             return result;
         }
         if (pressed && pressed == g_ui.saveKey)
@@ -453,8 +426,11 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
     if (readable && !mgr->finished && mgr->dlg) {
         EnsureCombatKeyboardHook_();
         UiPollRebindKey_();
+        if (now < g_ui.rebindGuardUntil)
+            InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         static bool keyWasDown = false;
         const bool keyDown = !g_ui.awaitingRebind
+            && now >= g_ui.rebindGuardUntil
             && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
         if (keyDown && !keyWasDown)
             InterlockedExchange(&g_pendingSaveKey, g_ui.saveKey);
@@ -467,7 +443,8 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         const LONG rightY = InterlockedExchange(&g_pendingRightClickY, -1);
         if (rightX >= 0 && rightY >= 0)
             UiHandleFrameRightClick_((int)rightX, (int)rightY);
-        const char pressed = g_ui.awaitingRebind ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
+        const char pressed = (g_ui.awaitingRebind || now < g_ui.rebindGuardUntil)
+            ? 0 : (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed == g_ui.saveKey)
             TrySaveOrWait_(mgr, 0);
         if (g_uiWaitSaveUntil) {

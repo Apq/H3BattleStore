@@ -79,6 +79,7 @@ static struct
     bool awaitingRebind = false;
     char lastSavedStamp[32] = {};
     DWORD lastSavedUntil = 0;
+    DWORD rebindGuardUntil = 0;  // 改键生效后短窗内忽略该键，防误触发存档
     std::string battleKey;
     std::vector<UiSaveEntry> entries;
     int hoverRow = -1;
@@ -403,6 +404,11 @@ static void UiDrawBar_(H3CombatManager* mgr)
         const bool logInfo = infoNow - lastDrawInfo > 5000;
         if (logInfo) lastDrawInfo = infoNow;
         H3LoadedPcx16* c = g_barComposite;
+        // 固定右上角（战场框外，2026-10-05 用户要求：拖动残影难以根除，
+        // 悬浮条改为不可拖动、固定屏幕右上角，每帧同位置重画）。
+        if (wnd->screenPcx16 && wnd->screenPcx16->width >= kUiBarWidth + 8)
+            g_ui.x = wnd->screenPcx16->width - kUiBarWidth - 8;
+        g_ui.y = 8;
         const int x = g_ui.x;
         const int y = g_ui.y;
         const int rows = (g_ui.listOpen && !g_ui.entries.empty())
@@ -681,12 +687,14 @@ static void UiHandleRebindKey_(char key, bool escape)
 {
     if (escape) {
         g_ui.awaitingRebind = false;
+        g_ui.rebindGuardUntil = GetTickCount() + 400;
         return;
     }
     if (UiKeyIsFree_(key)) {
         g_ui.saveKey = (char)key;
         UiSaveHotkey_();
         g_ui.awaitingRebind = false;
+        g_ui.rebindGuardUntil = GetTickCount() + 400;
     }
 }
 
@@ -699,6 +707,7 @@ static void UiPollRebindKey_()
     const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     if (escDown && !prevDown[escIndex]) {
         g_ui.awaitingRebind = false;
+        g_ui.rebindGuardUntil = GetTickCount() + 400;
         prevDown[escIndex] = escDown;
         return;
     }
@@ -709,6 +718,7 @@ static void UiPollRebindKey_()
             g_ui.saveKey = kUiFreeKeys_[i];
             UiSaveHotkey_();
             g_ui.awaitingRebind = false;
+            g_ui.rebindGuardUntil = GetTickCount() + 400;
             LogInfo("改键完成：%c", g_ui.saveKey);
         }
         prevDown[i] = down;
@@ -724,7 +734,14 @@ static void UiHandleFrameClick_(int gameX, int gameY)
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else {
             g_ui.listOpen = !g_ui.listOpen;
-            if (g_ui.listOpen) UiReloadEntries_(H3CombatManager::Get());
+            if (g_ui.listOpen) {
+                UiReloadEntries_(H3CombatManager::Get());
+            } else {
+                // 关列表：旧列表区在战场框外，恢复源不可靠，请求全屏重绘清场
+                H3WindowManager* w = H3WindowManager::Get();
+                if (w && w->screenPcx16)
+                    w->H3Redraw(0, 0, w->screenPcx16->width, w->screenPcx16->height);
+            }
             LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
         }
         return;
