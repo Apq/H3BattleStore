@@ -75,3 +75,5 @@ Release/
 .cowork-temp
 .hermes-tmp*
 _build_out.txt
+
+_hb_preview.png
