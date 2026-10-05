@@ -73,6 +73,8 @@ static struct
     bool dragging = false;
     int dragOffX = 0;
     int dragOffY = 0;
+    int dragDownX = 0;
+    int dragDownY = 0;
     char saveKey = 'G';
     bool awaitingRebind = false;
     char lastSavedStamp[32] = {};
@@ -496,6 +498,25 @@ static void UiDrawBar_(H3CombatManager* mgr)
         broken = true;
         LogError("悬浮条绘制异常(code=0x%08X)，本会话停画防崩", GetExceptionCode());
     }
+}
+
+// 悬浮条位置夹在战场对话框矩形内（2026-10-05 用户实测：战场框外的呈现/
+// 坐标是另一套方法，screenPcx16 恢复源不可靠，拖出去会产生残影）。
+static void UiClampBarToBattleDlg_(const H3CombatManager* mgr)
+{
+    const H3CombatDlg* dlg = mgr ? mgr->dlg : nullptr;
+    if (!dlg) return;
+    const int dx = dlg->GetX();
+    const int dy = dlg->GetY();
+    const int dw = dlg->GetWidth();
+    const int dh = dlg->GetHeight();
+    if (dw < kUiBarWidth || dh < kUiBarHeight) return;
+    if (g_ui.x < dx) g_ui.x = dx;
+    if (g_ui.y < dy) g_ui.y = dy;
+    if (g_ui.x + kUiBarWidth > dx + dw)
+        g_ui.x = dx + dw - kUiBarWidth;
+    if (g_ui.y + kUiBarHeight > dy + dh)
+        g_ui.y = dy + dh - kUiBarHeight;
 }
 
 static bool UiPointInBar_(int px, int py)

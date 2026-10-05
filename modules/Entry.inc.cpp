@@ -319,24 +319,32 @@ static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
                 if (g_ui.dragging) {
                     g_ui.x = gameX - g_ui.dragOffX;
                     g_ui.y = gameY - g_ui.dragOffY;
+                    UiClampBarToBattleDlg_(combat);
                 }
+            } else if (leftDown && inBar && gameX >= g_ui.x + kUiBarWidth - 58) {
+                // 键位小框：不进拖动，直接转发点击（改键入口，2026-10-05 修复）
+                InterlockedExchange(&g_pendingClickX, gameX);
+                InterlockedExchange(&g_pendingClickY, gameY);
+                return 1;
             } else if (leftDown && inBar) {
                 g_ui.dragging = true;
                 g_ui.dragOffX = gameX - g_ui.x;
                 g_ui.dragOffY = gameY - g_ui.y;
+                g_ui.dragDownX = gameX;
+                g_ui.dragDownY = gameY;
                 g_ui.listOpen = false;
                 return 1;
             } else if (leftUp && g_ui.dragging) {
                 g_ui.dragging = false;
-                H3WindowManager* wnd = H3WindowManager::Get();
-                if (wnd && wnd->screenPcx16) {
-                    if (g_ui.x < 0) g_ui.x = 0;
-                    if (g_ui.y < 0) g_ui.y = 0;
-                    if (g_ui.x + kUiBarWidth > wnd->screenPcx16->width)
-                        g_ui.x = wnd->screenPcx16->width - kUiBarWidth;
-                    if (g_ui.y + kUiBarHeight > wnd->screenPcx16->height)
-                        g_ui.y = wnd->screenPcx16->height - kUiBarHeight;
+                // 原地点击（未拖动）视为点击：开合列表/改键，不落位置
+                const int movedX = gameX - g_ui.dragDownX;
+                const int movedY = gameY - g_ui.dragDownY;
+                if (movedX >= -3 && movedX <= 3 && movedY >= -3 && movedY <= 3) {
+                    InterlockedExchange(&g_pendingClickX, gameX);
+                    InterlockedExchange(&g_pendingClickY, gameY);
+                    return 1;
                 }
+                UiClampBarToBattleDlg_(combat);
                 UiSaveBarPosition_();
                 LogInfo("悬浮条拖动完成：(%d,%d)", g_ui.x, g_ui.y);
                 return 1;
@@ -416,6 +424,19 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
     return THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
 }
 
+// Hook_AfterBlt @ 0x600430（H3BattleValueInfo 同款）：backbuffer Blt 完成后
+// 补画悬浮条。只靠 CycleCombatScreen 画会被后续 Blt 覆盖，表现为战场框内
+// 闪烁（2026-10-05 用户实测）。
+static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
+{
+    (void)h;
+    (void)c;
+    H3CombatManager* mgr = H3CombatManager::Get();
+    if (CombatIsReadable_(mgr) && !mgr->finished && mgr->dlg)
+        UiDrawBar_(mgr);
+    return EXEC_DEFAULT;
+}
+
 static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
 {
     static DWORD lastFrame = 0;
@@ -477,6 +498,7 @@ static void StartPlugin()
     UiLoadBarPosition_();
     _PI->WriteHiHook(0x473A00, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatMessage_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
+    _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
     LogInfo("战斗存档: battle-store build enabled.");
 }
 
