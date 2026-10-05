@@ -52,7 +52,7 @@ static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
 }
 
 static const int kUiBarHeight = 24;
-static const int kUiBarWidth = 360;
+static const int kUiBarWidth = 480;
 static const int kUiRowHeight = 18;
 static const int kUiListMaxRows = 10;
 static const int kUiDefaultX = 16;
@@ -190,7 +190,7 @@ static WORD UiRgb8888To565_(DWORD c)
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
 
-// 加载 DLL 同目录 img\HB_bg.pcx（成品图 360x24，24 位 3 平面 PCX）：
+// 加载 DLL 同目录 img\HB_bg.pcx（成品图 480x24，24 位 3 平面 PCX）：
 // 仅悬浮条本体一行；金框/键位小框已离线烘焙进图，运行时整图粘贴。
 // 下拉列表超出悬浮框，不使用背景图（2026-10-05 用户明确）。
 static H3LoadedPcx16* UiLoadBarBg_()
