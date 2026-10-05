@@ -464,8 +464,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         UiToGbk_(keyUtf8, key, sizeof(key));
         font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        if (!bgOk)
-            c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
         if (rows > 0) {
             const int listY = kUiBarHeight;
             for (int row = 0; row < rows; ++row) {
