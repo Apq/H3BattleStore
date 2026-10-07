@@ -282,14 +282,27 @@ struct RestoreObjects_
                 prepared.constructed = true;
                 if (!PrepareDeque(prepared.bytes.get(), saved.spellIds, error)
                     || !PrepareRelations(prepared.bytes.get(), mgr, saved, error)) return false;
-                if (slot < 20 && saved.occupied && saved.type != 149) {
+                if (slot < 20 && saved.occupied && CodecDefFrameGateApplies_(saved.type)) {
                     H3LoadedDef* def = prepared.replace ? stack->def : mgr->stacks[side][slot].def;
                     if (!RestoreCreatureDefReady_(def, saved)) {
+                        // 2026-10-07: an ammo-cart slot was rejected with no slot
+                        // evidence; name the failing stack for future diagnosis.
+                        LogDebug("[Objects op=%ld] saved def gate side=%d slot=%d type=%d anim=%d/%d def=%p groups=%d replace=%d",
+                            g_diag.id, side, slot, saved.type, saved.animation,
+                            saved.animationFrame, (const void*)def,
+                            Readable_(def, sizeof(*def)) ? (int)def->groupsCount : -1,
+                            prepared.replace ? 1 : 0);
                         if (error) *error = "saved creature DEF frame unavailable";
                         return false;
                     }
                 }
-                if (slot < 20 && old.occupied && old.type != 149 && !RestoreCreatureDefReady_(mgr->stacks[side][slot].def, old)) {
+                if (slot < 20 && old.occupied && CodecDefFrameGateApplies_(old.type)
+                    && !RestoreCreatureDefReady_(mgr->stacks[side][slot].def, old)) {
+                    LogDebug("[Objects op=%ld] rollback def gate side=%d slot=%d type=%d anim=%d/%d def=%p groups=%d",
+                        g_diag.id, side, slot, old.type, old.animation,
+                        old.animationFrame, (const void*)mgr->stacks[side][slot].def,
+                        Readable_(mgr->stacks[side][slot].def, sizeof(H3LoadedDef))
+                            ? (int)mgr->stacks[side][slot].def->groupsCount : -1);
                     if (error) *error = "rollback creature DEF frame unavailable";
                     return false;
                 }

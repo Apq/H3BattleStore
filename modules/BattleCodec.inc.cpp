@@ -403,6 +403,14 @@ static bool CodecSpellControlEnabled_(bool tacticsPhase, bool hasHero,
     return !tacticsPhase && hasHero && (!heroCasted || castOverride) && hasSpellbook;
 }
 
+// 145 catapult .. 148 ammo cart war machines plus the 149 arrow tower use
+// native machine DEFs that never satisfy the strict creature-frame gate;
+// same-battle restore renders them through the DEF the game already draws.
+static bool CodecDefFrameGateApplies_(int32_t type)
+{
+    return type < 145;
+}
+
 static void CodecInvalidateHover_(CodecCapture* capture)
 {
     capture->creatureAtMousePos = -1;

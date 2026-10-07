@@ -60,7 +60,13 @@ static void TestControlStatePolicy_()
         "loading pre-cast state re-enables spellbook gate");
     Expect(!CodecSpellControlEnabled_(false, true, 1, false, true),
         "loading already-cast state keeps spellbook gate closed");
-    printf("PASS control state policy: wait, defend and spellbook gating\n");
+    Expect(CodecDefFrameGateApplies_(0) && CodecDefFrameGateApplies_(132)
+        && CodecDefFrameGateApplies_(144), "creature DEF gate applies to regular creatures");
+    Expect(!CodecDefFrameGateApplies_(145) && !CodecDefFrameGateApplies_(146)
+        && !CodecDefFrameGateApplies_(147) && !CodecDefFrameGateApplies_(148)
+        && !CodecDefFrameGateApplies_(149),
+        "war machines and arrow tower skip the DEF frame gate");
+    printf("PASS control state policy: wait, defend, spellbook and DEF gate\n");
 }
 
 static void TestDisplayCaches_()
