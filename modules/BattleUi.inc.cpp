@@ -1129,7 +1129,18 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
     }
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
     CodecCapture& capture = *captureStorage;
-    if (!CodecDecode(document.sections, &capture, &error) || !RestoreSameBattle_(mgr, capture, key, &error)) {
+    if (!CodecDecode(document.sections, &capture, &error)) {
+        UiRestoreFailure_("rejected", error);
+        return;
+    }
+    // 修复前存量档可能带悬挂瞬态链接（保存于换阵重打的新战斗），解码后同样规范
+    // 化，避免 RestorePolicy_ 用"存档中的电脑行动目标无效"误拒整档（2026-10-07
+    // 玩家日志 Op17-20）。丢弃量进 debug 日志留证。
+    const CodecLinkDropReport_ droppedLinks = CodecNormalizeStaleLinks_(capture);
+    if (droppedLinks.aiTargets || droppedLinks.relationEntries)
+        LogDebug("[Load op=%ld] stale links dropped from archive ai_targets=%u relation_entries=%u",
+            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries);
+    if (!RestoreSameBattle_(mgr, capture, key, &error)) {
         UiRestoreFailure_("rejected", error);
         return;
     }

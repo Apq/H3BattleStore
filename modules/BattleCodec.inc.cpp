@@ -386,6 +386,49 @@ static void CodecReset_(CodecCapture* capture)
     *capture = std::move(*empty);
 }
 
+// 2026-10-07 玩家日志实证：换阵重打的新战斗（同指纹、generation 递增）里，原生
+// aiTarget(+0x538) 可指向当前空置槽（type==-1 但指针仍在管理器 42 格数组内）。
+// 采集合法（StackIdentity_ 只认指针在数组内），RestorePolicy_ 对 before 快照跑同
+// 一检查却会拒绝整个读档。这类悬挂链接是原生瞬态：AI 目标和光环/缠绕关系向量都
+// 可能残留上一场或初始化预置的陈旧指针；重放它们正是 0x43E720 一类陈旧链接崩溃
+// 的来源。采集完成后与旧档解码后统一规范化：只保留指向常规占用槽（side 0..1、
+// slot 0..19 且 occupied）的瞬态链接，其余丢弃并计数，AI 之后自行重算目标。
+struct CodecLinkDropReport_
+{
+    uint32_t aiTargets;
+    uint32_t relationEntries;
+};
+
+static CodecLinkDropReport_ CodecNormalizeStaleLinks_(CodecCapture& capture)
+{
+    CodecLinkDropReport_ report = {0, 0};
+    const auto targetOccupied = [&capture](const CodecIdentity& id) {
+        return id.side >= 0 && id.side <= 1 && id.slot >= 0 && id.slot < 20
+            && capture.stacks[id.side][id.slot].occupied;
+    };
+    for (int side = 0; side < 2; ++side) {
+        for (int slot = 0; slot < 21; ++slot) {
+            CodecStack& stack = capture.stacks[side][slot];
+            if (!stack.occupied) continue;
+            const bool aiMismatched = (stack.aiTarget.side == -1) != (stack.aiTarget.slot == -1);
+            if (aiMismatched || (stack.aiTarget.side != -1 && !targetOccupied(stack.aiTarget))) {
+                stack.aiTarget = {-1, -1};
+                ++report.aiTargets;
+            }
+            for (int vector = 0; vector < 4; ++vector) {
+                std::vector<CodecIdentity>& items = stack.relations[vector];
+                size_t kept = 0;
+                for (size_t i = 0; i < items.size(); ++i) {
+                    if (targetOccupied(items[i])) items[kept++] = items[i];
+                    else ++report.relationEntries;
+                }
+                items.resize(kept);
+            }
+        }
+    }
+    return report;
+}
+
 // Native bottom-control gates, independent of unit action/turn progression.
 static bool CodecWaitControlEnabled_(uint8_t waitPhase, bool tacticsPhase)
 {

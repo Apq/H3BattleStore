@@ -69,6 +69,57 @@ static void TestControlStatePolicy_()
     printf("PASS control state policy: wait, defend, spellbook and DEF gate\n");
 }
 
+static void TestNormalizeStaleLinks_()
+{
+    CodecCapture capture;
+    capture.stacks[0][0].occupied = true;
+    capture.stacks[0][3].occupied = true;
+    capture.stacks[1][2].occupied = true;
+    capture.stacks[0][20].occupied = true; // 保留位也可占用，但不作为链接目标
+
+    // AI 目标：合法保留；指向空槽/保留位 20/半初始化配对的一律清空。
+    capture.stacks[0][0].aiTarget = {1, 2};  // side1 slot2 占用 → 保留
+    capture.stacks[0][3].aiTarget = {0, 5};  // slot5 空置 → 丢弃
+    capture.stacks[1][2].aiTarget = {0, 20}; // slot20 保留位 → 丢弃
+    capture.stacks[0][20].aiTarget = {0, 5}; // 保留位栈的合法瞬态同样规范化：目标空置 → 丢弃
+
+    // 关系向量：仅指向占用槽的条目存活。
+    CodecIdentity keep = {0, 0};
+    CodecIdentity emptySlot = {0, 6};
+    CodecIdentity otherSideEmpty = {1, 3};
+    capture.stacks[1][2].relations[0].push_back(keep);
+    capture.stacks[1][2].relations[0].push_back(emptySlot);
+    capture.stacks[1][2].relations[0].push_back(otherSideEmpty);
+
+    const CodecLinkDropReport_ report = CodecNormalizeStaleLinks_(capture);
+    Expect(report.aiTargets == 3, "stale ai targets counted");
+    Expect(report.relationEntries == 2, "stale relation entries counted");
+    Expect(capture.stacks[0][0].aiTarget.side == 1 && capture.stacks[0][0].aiTarget.slot == 2,
+        "valid ai target kept");
+    Expect(capture.stacks[0][3].aiTarget.side == -1 && capture.stacks[0][3].aiTarget.slot == -1,
+        "ai target to empty slot cleared");
+    Expect(capture.stacks[1][2].aiTarget.side == -1 && capture.stacks[1][2].aiTarget.slot == -1,
+        "ai target to reserved slot cleared");
+    Expect(capture.stacks[0][20].aiTarget.side == -1,
+        "ai target from reserved stack cleared");
+    Expect(capture.stacks[1][2].relations[0].size() == 1
+        && capture.stacks[1][2].relations[0][0].side == 0
+        && capture.stacks[1][2].relations[0][0].slot == 0,
+        "only occupied relation targets survive");
+
+    const CodecLinkDropReport_ again = CodecNormalizeStaleLinks_(capture);
+    Expect(again.aiTargets == 0 && again.relationEntries == 0, "normalization is idempotent");
+
+    // 半初始化配对（side=-1 但 slot>=0）同样清空——策略层对这种形态是拒绝项。
+    capture.stacks[0][3].aiTarget = {-1, 7};
+    const CodecLinkDropReport_ mismatched = CodecNormalizeStaleLinks_(capture);
+    Expect(mismatched.aiTargets == 1
+        && capture.stacks[0][3].aiTarget.side == -1
+        && capture.stacks[0][3].aiTarget.slot == -1,
+        "mismatched ai target pair cleared");
+    printf("PASS stale link normalization: ai targets, relations, idempotence\n");
+}
+
 static void TestDisplayCaches_()
 {
     std::unique_ptr<CodecCapture> saved(new CodecCapture{}), actual(new CodecCapture{});
@@ -202,6 +253,7 @@ static void TestV5Roundtrip_()
 int main()
 {
     TestControlStatePolicy_();
+    TestNormalizeStaleLinks_();
     TestV5Roundtrip_();
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
     CodecCapture& capture = *captureStorage;

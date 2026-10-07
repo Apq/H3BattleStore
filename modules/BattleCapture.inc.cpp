@@ -528,6 +528,13 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             }
         }
     }
+    // 换阵重打的新战斗可能残留指向空置槽的瞬态链接（详见 CodecNormalizeStaleLinks_
+    // 注释）；采集完成后统一丢弃，保证存档与 before 快照策略自洽、恢复永不重放
+    // 悬挂指针。丢弃量进 debug 日志留证。
+    const CodecLinkDropReport_ droppedLinks = CodecNormalizeStaleLinks_(*out);
+    if (droppedLinks.aiTargets || droppedLinks.relationEntries)
+        LogDebug("[Capture op=%ld] stale links dropped ai_targets=%u relation_entries=%u",
+            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries);
     DiagCursor_(-1, -1);
     return true;
 }
