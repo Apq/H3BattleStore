@@ -861,8 +861,10 @@ static bool RestoreSameBattle_(H3CombatManager* mgr, const CodecCapture& capture
     }
     std::unique_ptr<CodecCapture> beforeStorage(new CodecCapture{});
     CodecCapture& before = *beforeStorage;
-    if (!CaptureBattle_(mgr, &before, error) || !RestorePolicy_(capture, error)
-        || !RestorePolicy_(before, error)) return false;
+    // 原则（2026-10-07 用户裁定）：档案校验只看档案自身（RestorePolicy_(capture)），
+    // 当前战场不参与任何语义校验——游戏正常产生的状态一律接受；Before 快照仅作为
+    // 回滚数据源采集（内存不可读仍属硬故障拒绝：没有快照就没有回滚保证）。
+    if (!CaptureBattle_(mgr, &before, error) || !RestorePolicy_(capture, error)) return false;
     for (int side = 0; side < 2; ++side) {
         if (mgr->hero[side] && IsBadWritePtr(&mgr->hero[side]->spellPoints, sizeof(INT16))) {
             if (error) *error = "hero mana not writable"; return false;

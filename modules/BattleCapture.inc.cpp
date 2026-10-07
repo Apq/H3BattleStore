@@ -65,16 +65,24 @@ static bool ReadDequeInts_(const uint8_t* object, std::vector<int32_t>* out)
     return true;
 }
 
-static bool ReadPointerRelations_(const H3CombatManager* mgr, const H3Vector<H3CombatCreature*>& vector, std::vector<CodecIdentity>* out)
+// 原则（2026-10-07 用户裁定）：游戏正常产生的状态不做语义校验。关系向量按可读性
+// 采集任意条数；无法映射到管理器槽位的悬挂条目跳过并计数——原生瞬态，丢弃优于
+// 拒绝（重放悬挂指针是 0x43E720 一类陈旧链接崩溃源）。仍返回 false 的只剩内存
+// 不可读一类硬故障（无法为回滚建立快照）。
+static bool ReadPointerRelations_(const H3CombatManager* mgr, const H3Vector<H3CombatCreature*>& vector,
+    std::vector<CodecIdentity>* out, uint32_t* dropped)
 {
     out->clear();
     const UINT count = vector.Count();
     if (!count) return true;
-    if (count > 42 || !Readable_(vector.CFirst(), count * sizeof(H3CombatCreature*))) return false;
+    if (count > 100000 || !Readable_(vector.CFirst(), count * sizeof(H3CombatCreature*))) return false;
     out->reserve(count);
     for (UINT i = 0; i < count; ++i) {
         CodecIdentity identity = { -1, -1 };
-        if (!StackIdentity_(mgr, vector[i], &identity.side, &identity.slot)) return false;
+        if (!StackIdentity_(mgr, vector[i], &identity.side, &identity.slot)) {
+            ++*dropped;
+            continue;
+        }
         out->push_back(identity);
     }
     return true;
@@ -415,6 +423,7 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
     }
 
     DiagStage_("capture.stacks");
+    uint32_t unresolvable = 0; // 悬挂在管理器之外的 AI 目标/关系指针（丢弃计数）
     for (int side = 0; side < 2; ++side) {
         for (int slot = 0; slot < 21; ++slot) {
             DiagCursor_(side, slot);
@@ -503,9 +512,10 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             }
             const H3CombatCreature* aiTarget = *(H3CombatCreature* const*)(raw + 0x538);
             stack.aiTarget = {-1, -1};
+            // 悬挂 AI 目标（指向管理器之外）同样按丢弃处理，不再拒绝采集。
             if (aiTarget && !StackIdentity_(mgr, aiTarget, &stack.aiTarget.side, &stack.aiTarget.slot)) {
-                if (error) *error = "AI目标指针不属于本战场";
-                return false;
+                stack.aiTarget = {-1, -1};
+                ++unresolvable;
             }
             const uint8_t* rawRelations = (const uint8_t*)&source;
             const H3Vector<H3CombatCreature*>* relations[] = {
@@ -515,9 +525,9 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
                 (const H3Vector<H3CombatCreature*>*)(rawRelations + 0x524)
             };
             for (int relation = 0; relation < 4; ++relation) {
-                if (!ReadPointerRelations_(mgr, *relations[relation], &stack.relations[relation])) {
+                if (!ReadPointerRelations_(mgr, *relations[relation], &stack.relations[relation], &unresolvable)) {
                     LogError("[Capture op=%ld] slot=%d:%d relation=%d offset=%X", g_diag.id, side, slot, relation, 0x4F4 + relation * 0x10);
-                    if (error) *error = "stack relation points outside the combat manager";
+                    if (error) *error = "stack relation is not readable";
                     return false;
                 }
             }
@@ -528,13 +538,13 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             }
         }
     }
-    // 换阵重打的新战斗可能残留指向空置槽的瞬态链接（详见 CodecNormalizeStaleLinks_
-    // 注释）；采集完成后统一丢弃，保证存档与 before 快照策略自洽、恢复永不重放
-    // 悬挂指针。丢弃量进 debug 日志留证。
+    // 换阵重打的新战斗可能残留指向空置槽/管理器之外的瞬态链接（详见
+    // CodecNormalizeStaleLinks_ 注释）；采集完成后统一丢弃，保证存档与恢复永不
+    // 重放悬挂指针。丢弃量进 debug 日志留证。
     const CodecLinkDropReport_ droppedLinks = CodecNormalizeStaleLinks_(*out);
-    if (droppedLinks.aiTargets || droppedLinks.relationEntries)
-        LogDebug("[Capture op=%ld] stale links dropped ai_targets=%u relation_entries=%u",
-            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries);
+    if (droppedLinks.aiTargets || droppedLinks.relationEntries || unresolvable)
+        LogDebug("[Capture op=%ld] stale links dropped ai_targets=%u relation_entries=%u unresolvable=%u",
+            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries, unresolvable);
     DiagCursor_(-1, -1);
     return true;
 }

@@ -551,7 +551,7 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
                 for (int spell : s.spellIds)
                     if (spell < 0 || spell >= 81) return reject("saved spell id invalid");
                 for (int v = 0; v < 4; ++v) {
-                    if (s.relations[v].size() > 42) return reject("saved relation vector too large");
+                    if (s.relations[v].size() > 100000) return reject("saved relation vector too large");
                     for (const CodecIdentity& id : s.relations[v])
                         if (id.side < 0 || id.side > 1 || id.slot < 0 || id.slot >= 20
                             || !saved.stacks[id.side][id.slot].occupied)
