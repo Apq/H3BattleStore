@@ -41,6 +41,21 @@ static void DiagState_(const H3CombatManager* mgr, const char* event)
     if (moving) LogInfo("[State op=%ld] first_moving=%d", g_diag.id, firstMoving);
 }
 
+static void DiagInputState_(const H3CombatManager* mgr, const char* event, int result)
+{
+    if (!CombatIsReadable_(mgr) || !mgr->dlg) return;
+    H3DlgItem* wait = mgr->dlg->GetH3DlgItem(0x7D9);
+    H3DlgItem* defend = mgr->dlg->GetH3DlgItem(0x7DA);
+    LogInfo("[InputState] event=%s result=%d control=%d current=%d:%d active=%p action=%d wait_phase=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
+        event, result, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),
+        mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack, (int)mgr->action,
+        *((const uint8_t*)mgr + 0x13DE4),
+        wait ? (wait->IsEnabled() ? 1 : 0) : -1,
+        wait ? (wait->IsSet(h3::NH3DlgControls::NState::SHADED) ? 1 : 0) : -1,
+        defend ? (defend->IsEnabled() ? 1 : 0) : -1,
+        defend ? (defend->IsSet(h3::NH3DlgControls::NState::SHADED) ? 1 : 0) : -1);
+}
+
 static void DiagBegin_(const char* kind, const char* origin, const H3CombatManager* mgr)
 {
     if (g_diag.id) LogWarn("[Op %ld] replaced by new request stage=%s writing=%d", g_diag.id, g_diag.stage, g_diag.writing ? 1 : 0);

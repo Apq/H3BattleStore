@@ -70,7 +70,7 @@ static const int kUiLogLevelRows = 5;
 static const int kUiLogLevelBlockH = kUiBarHeight;
 static const int kUiBarTopOffset = kUiBarHeight;
 static const int kUiBgHeight = 2 * kUiBarHeight;
-static const char* const kUiLogLevelNames_[5] = {"trace", "debug", "info", "warn", "error"};
+
 
 struct UiSaveEntry
 {
@@ -579,7 +579,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
             }
             char itemUtf8[24] = {};
             const char* mark = i == levelNow ? "(*) " : "( ) ";
-            _snprintf(itemUtf8, sizeof(itemUtf8), "%s%s", mark, kUiLogLevelNames_[i]);
+            _snprintf(itemUtf8, sizeof(itemUtf8), "%s%s", mark, LogLevelDisplayName_(i));
             char itemGbk[32] = {};
             UiToGbk_(itemUtf8, itemGbk, sizeof(itemGbk));
             font->TextDraw(c, itemGbk, cellX + 4, cellY, kUiLogLevelCellWidth - 8,
@@ -717,6 +717,9 @@ static void UiPackLogs_()
     char reason[192] = {};
     if (PackRecentLogs_(nullptr, 0, reason, sizeof(reason))) {
         UiMarkNoticeHighlight_("日志已打包并复制，可粘贴发送");
+        wchar_t message[512] = {};
+        Utf8ToWide_(kLogPackSuccess_, message, (int)_countof(message));
+        MessageBoxW(nullptr, message, L"日志已打包", MB_OK | MB_ICONINFORMATION);
     } else {
         UiMarkNotice_("日志打包失败，详见提示");
         LogWarn("[LogPack] 打包失败：%s", reason);
@@ -744,11 +747,11 @@ static void UiSelectLogLevel_(int level)
     if (!SaveLogLevel_(level)) {
         UiMarkNotice_("日志配置保存失败，等级未改变");
         LogError("[Config] 保存日志等级失败：target=%s keep=%s",
-            kUiLogLevelNames_[level], LogLevelName_(previous));
+            LogLevelName_(level), LogLevelName_(previous));
         return;
     }
     LogInfo("[Config] 日志等级已切换并写入用户配置：%s -> %s",
-        LogLevelName_(previous), kUiLogLevelNames_[level]);
+        LogLevelName_(previous), LogLevelName_(level));
     UiMarkNotice_("日志等级已保存");
 }
 

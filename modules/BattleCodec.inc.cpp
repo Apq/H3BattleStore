@@ -386,8 +386,17 @@ static void CodecReset_(CodecCapture* capture)
     *capture = std::move(*empty);
 }
 
-// Hover intent belongs to the current mouse, not the saved combat timeline.
-// Neither shallow shade cache nor the native path cache is hover intent.
+// Native bottom-control gates, independent of unit action/turn progression.
+static bool CodecWaitControlEnabled_(uint8_t waitPhase, bool tacticsPhase)
+{
+    return waitPhase == 0 && !tacticsPhase;
+}
+
+static bool CodecDefendControlEnabled_(bool tacticsPhase)
+{
+    return !tacticsPhase;
+}
+
 static void CodecInvalidateHover_(CodecCapture* capture)
 {
     capture->creatureAtMousePos = -1;

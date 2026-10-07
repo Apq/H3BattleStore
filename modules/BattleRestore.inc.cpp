@@ -739,6 +739,26 @@ static bool RestoreCreatureDefReady_(H3LoadedDef* def, const CodecStack& stack)
         && Readable_(group->frames[stack.animationFrame], sizeof(H3DefFrame));
 }
 
+// Rebuild only the two bottom controls whose native state gates keyboard input.
+// Calling the full native refresh would also enter turn/auto-cast logic.
+static void RestoreBottomControls_(H3CombatManager* mgr)
+{
+    if (!mgr || !mgr->dlg) return;
+    const bool waitEnabled = CodecWaitControlEnabled_(*((const uint8_t*)mgr + 0x13DE4), mgr->tacticsPhase != 0);
+    const bool defendEnabled = CodecDefendControlEnabled_(mgr->tacticsPhase != 0);
+    mgr->dlg->SendCommandToItem(waitEnabled ? 6 : 5, 0x7D9, 0x1000);
+    mgr->dlg->SendCommandToItem(defendEnabled ? 6 : 5, 0x7DA, 0x1000);
+    H3DlgItem* wait = mgr->dlg->GetH3DlgItem(0x7D9);
+    H3DlgItem* defend = mgr->dlg->GetH3DlgItem(0x7DA);
+    LogInfo("[Controls op=%ld] restored wait=%d defend=%d control=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
+        g_diag.id, waitEnabled ? 1 : 0, defendEnabled ? 1 : 0,
+        *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),
+        wait ? (wait->IsEnabled() ? 1 : 0) : -1,
+        wait ? (wait->IsSet(h3::NH3DlgControls::NState::SHADED) ? 1 : 0) : -1,
+        defend ? (defend->IsEnabled() ? 1 : 0) : -1,
+        defend ? (defend->IsSet(h3::NH3DlgControls::NState::SHADED) ? 1 : 0) : -1);
+}
+
 static void RestoreRenderSeed_(H3CombatManager* mgr, const CodecCapture& capture)
 {
     const int marked = RestoreMarkCreatureFrames_(mgr, capture);
@@ -765,6 +785,7 @@ static void RestoreRenderSeed_(H3CombatManager* mgr, const CodecCapture& capture
     // the actual bytes. This does not attribute cache writes to the log routine.
     RestoreDisplayCaches_(mgr, capture);
     RestoreManagerExtraBytes_(mgr, capture, 0x1402F, 2);
+    RestoreBottomControls_(mgr);
     DiagStage_("restore.rng");
     kRngSet(capture.rngTlsSeed);
     *(uint32_t*)0x67FBE4 = capture.rngMirrorSeed;

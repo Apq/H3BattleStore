@@ -76,6 +76,20 @@ int wmain(int argc, wchar_t** argv)
     SetPath(g_user_ini_path, root + L"\\H3BattleStore.user.ini");
     Check(ParseLogLevel_(nullptr) == LOG_INFO && ParseLogLevel_("garbage") == LOG_INFO,
         "missing and invalid levels default to info");
+    Check(std::strcmp(LogLevelName_(LOG_TRACE), "trace") == 0
+        && std::strcmp(LogLevelName_(LOG_ERROR), "error") == 0,
+        "persisted level names remain English");
+    Check(std::strcmp(LogLevelDisplayName_(LOG_TRACE), "全部") == 0
+        && std::strcmp(LogLevelDisplayName_(LOG_DEBUG), "调试") == 0
+        && std::strcmp(LogLevelDisplayName_(LOG_INFO), "信息") == 0
+        && std::strcmp(LogLevelDisplayName_(LOG_WARN), "警告") == 0
+        && std::strcmp(LogLevelDisplayName_(LOG_ERROR), "错误") == 0,
+        "display level names are Chinese");
+    Check(std::strstr(kLogFeedbackContacts_, "1042362808")
+        && std::strstr(kLogFeedbackContacts_, "740338251")
+        && std::strstr(kLogFeedbackContacts_, "712999712")
+        && std::strstr(kLogPackSuccess_, "00_说明.txt"),
+        "pack feedback contacts are present");
     ReadConfig();
     Check(g_log_level == LOG_INFO, "missing layered config defaults to info");
     for (int i = 0; i < 5; ++i) {

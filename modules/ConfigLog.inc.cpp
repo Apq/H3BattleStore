@@ -168,6 +168,12 @@ static const char* LogLevelName_(int level)
     }
 }
 
+static const char* LogLevelDisplayName_(int level)
+{
+    static const char* const names[] = {"全部", "调试", "信息", "警告", "错误"};
+    return names[level >= LOG_TRACE && level <= LOG_ERROR ? level : LOG_INFO];
+}
+
 static int ParseLogLevel_(const char* name)
 {
     if (!name || !name[0]) return LOG_INFO;

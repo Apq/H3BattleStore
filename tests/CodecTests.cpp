@@ -40,6 +40,16 @@ static void SetExtraWord_(CodecStack& stack, uint32_t offset, uint32_t word)
     Expect(false, "extra float offset belongs to numeric range");
 }
 
+static void TestControlStatePolicy_()
+{
+    Expect(CodecWaitControlEnabled_(0, false), "wait control enabled in normal player phase");
+    Expect(!CodecWaitControlEnabled_(1, false), "wait control disabled after waiting");
+    Expect(!CodecWaitControlEnabled_(0, true), "wait control disabled in tactics phase");
+    Expect(CodecDefendControlEnabled_(false), "defend control enabled outside tactics");
+    Expect(!CodecDefendControlEnabled_(true), "defend control disabled in tactics");
+    printf("PASS control state policy: wait and defend gating\n");
+}
+
 static void TestDisplayCaches_()
 {
     std::unique_ptr<CodecCapture> saved(new CodecCapture{}), actual(new CodecCapture{});
@@ -172,6 +182,7 @@ static void TestV5Roundtrip_()
 
 int main()
 {
+    TestControlStatePolicy_();
     TestV5Roundtrip_();
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
     CodecCapture& capture = *captureStorage;

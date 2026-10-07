@@ -11,6 +11,12 @@
 
 // DROPFILES 头大小（4+8+4+4=20，x86 自然对齐无 padding）。
 static const size_t kDropFilesSize_ = 20;
+static const char kLogFeedbackContacts_[] =
+    "QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。";
+static const char kLogPackSuccess_[] =
+    "日志已打包成 .7z 并复制为文件，可直接粘贴到 QQ 聊天框发送。\r\n"
+    "QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。\r\n"
+    "反馈时请附上问题描述，联系方式也已写入包内 00_说明.txt。";
 
 // CRC32（IEEE 802.3 多项式），表运行时生成一次。
 static DWORD s_logpack_crc_table[256];
@@ -321,7 +327,7 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     // 发送说明使用 UTF-8 BOM，沿用 H3Auto 的 CRLF 展开方式。
     {
         char note[512];
-        _snprintf(note, sizeof(note) - 1, "%s", "H3BattleStore 战场存档日志包。|包含最近五份完整日志，保留开场初始化信息。|请将压缩包与问题描述一同发送给协助排查的人。");
+        _snprintf(note, sizeof(note) - 1, "H3BattleStore 战场存档日志包。|包含最近五份完整日志，保留开场初始化信息。|请将压缩包与问题描述发送到：|%s", kLogFeedbackContacts_);
         note[sizeof(note) - 1] = 0;
         char expanded[768];
         int elen = 0;

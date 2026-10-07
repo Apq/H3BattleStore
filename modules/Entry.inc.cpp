@@ -634,6 +634,9 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
             __try {
                 if (!g_restoreBusy && !g_restoreFatal && g_messageDepth == 1) {
                     CombatMessageAfter_(mgr, msg, result);
+                    if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)
+                        && msg->subtype == h3::NH3VKey::H3VK_SPACEBAR && BattleMainDialog_(mgr))
+                        DiagInputState_(mgr, msg->command == eMsgCommand::KEY_DOWN ? "space-down" : "space-up", result);
                     UiProcessRestore_(mgr, result);
                 }
             }
