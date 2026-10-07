@@ -6,6 +6,10 @@ static char* g_ini_path = new char[kPathCap_];        // H3BattleStore.default.i
 static char* g_user_ini_path = new char[kPathCap_](); // H3BattleStore.user.ini（可不存在）
 static char* g_log_path = new char[kPathCap_];
 static wchar_t* g_log_path_w = new wchar_t[kPathCap_ / 2];
+// 本 DLL 日志文件名基名（UTF-8，= DLL 文件名去扩展名）。日志器/旧日志清理/
+// 日志打包三处同源：DLL 被整合包改名后，打包仍只匹配自己的日志，
+// 不会因与其他插件（如 H3Auto）同目录而抓错文件。
+static char g_log_base[64] = "";
 
 // 分层读取：先默认层，再叠加玩家层（键存在且非空才覆盖）。两层都未命中 → fallback。
 static bool IniReadUtf8Layered(const char* section, const char* key,
@@ -98,6 +102,7 @@ static void SetupDatedLogPathAndCleanup(HMODULE hModule)
     if (g_disable_log) {
         g_log_path[0] = 0;
         g_log_path_w[0] = 0;
+        g_log_base[0] = 0;
         return;
     }
 
@@ -122,6 +127,9 @@ static void SetupDatedLogPathAndCleanup(HMODULE hModule)
     wcsncpy_s(base, cap, name, _TRUNCATE);
     wchar_t* dot = wcsrchr(base, L'.');
     if (dot) *dot = 0;
+    WideCharToMultiByte(CP_UTF8, 0, base, -1, g_log_base,
+        sizeof(g_log_base), nullptr, nullptr);
+    g_log_base[sizeof(g_log_base) - 1] = 0;
 
     SYSTEMTIME st;
     GetLocalTime(&st);
