@@ -1,5 +1,6 @@
 #pragma once
 #include "../modules/UiLayout.hpp"
+#include "../modules/BattleInputPolicy.hpp"
 
 namespace hbs_ui_test {
 constexpr auto normal = hbs_ui::ForFont(16);
@@ -30,4 +31,23 @@ constexpr bool TextureValid(int height) {
 static_assert(TextureValid(24) && TextureValid(30) && TextureValid(64));
 static_assert(hbs_ui::TextureY(0, 30) == 0 && hbs_ui::TextureY(29, 30) == 23);
 static_assert(hbs_ui::TextureY(30, 30) == 24 && hbs_ui::TextureY(59, 30) == 47);
+static_assert(hbs_ui::StatusLampX + hbs_ui::StatusLampRadius + 1 < hbs_ui::HotkeyX);
+static_assert(6 + hbs_ui::StatusLabelWidth < hbs_ui::StatusLampX - hbs_ui::StatusLampRadius - 1);
+static_assert(hbs_ui::StatusLampY(normal) - hbs_ui::StatusLampRadius - 1 > normal.bandHeight);
+static_assert(hbs_ui::StatusLampY(tall) + hbs_ui::StatusLampRadius + 1 < tall.ListTop());
+static_assert(hbs_ui::LampHalfWidth(0, 7) == 7 && hbs_ui::LampHalfWidth(7, 7) == 0);
+static_assert(hbs_ui::StatusLampColor(true).g > hbs_ui::StatusLampColor(true).r);
+static_assert(hbs_ui::StatusLampColor(false).r > hbs_ui::StatusLampColor(false).g);
+constexpr bool StorageWindowTruthTable() {
+    for (unsigned mask = 0; mask < (1u << 11); ++mask) {
+        const BattleStorageWindowState_ state = {
+            (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0,
+            (mask & 8) != 0, (mask & 16) != 0, (mask & 32) != 0,
+            (mask & 64) != 0, (mask & 128) != 0, (mask & 256) != 0,
+            (mask & 512) != 0, (mask & 1024) != 0};
+        if (BattleStorageAllowed_(state) != (mask == (1u | 4u | 512u | 1024u))) return false;
+    }
+    return true;
+}
+static_assert(StorageWindowTruthTable());
 }

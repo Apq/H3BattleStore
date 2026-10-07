@@ -10,6 +10,7 @@
 #include "../modules/IniUtf8.inc.cpp"
 #include "../modules/ConfigLog.inc.cpp"
 #include "../modules/BattleInputPolicy.hpp"
+#include "UiLayoutRegression.hpp"
 
 // Exercise the real CF_HDROP payload without changing the user's clipboard.
 static bool clipboardFail = false;

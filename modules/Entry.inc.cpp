@@ -363,20 +363,16 @@ static bool TryCaptureCombat_()
 }
 
 // 2026-10-06 用户裁定：保存窗口 = 轮到该玩家行动且尚未下令。
-// 窗口外按存档键立即拒绝并提示，不等待动画、不加输入锁。
+// 窗口外按存档键静默丢弃，不等待动画、不加输入锁。
 // Native path cache (+0x14031) is not an executor busy flag. H3API's
 // travelingSquares member starts one byte early; do not use it as a gate.
 static bool CombatPlayerWindow_(const H3CombatManager* mgr, int messageResult, const char** reason)
 {
     if (messageResult == 2) { if (reason) *reason = "battle message closes manager"; return false; }
-    if (!CombatCanCapture_(mgr, reason)) return false;
-    if (g_restoreBusy || g_restoreFatal || g_executorDepth || *(const int*)0x698A3C
-        || !BattleMainDialog_(mgr) || (int)mgr->action != 0) {
-        if (reason) *reason = "not at player input boundary"; return false;
+    if (g_restoreBusy || g_restoreRequest.pending || !CombatStorageWindow_(mgr)) {
+        if (reason) *reason = "not at player input boundary";
+        return false;
     }
-    if (mgr->tacticsPhase) { if (reason) *reason = "tactics phase"; return false; }
-    // 等价 H3API IsHumanTurn()（= isHuman[currentActiveSide]），字段直读以保持 const。
-    if (mgr->currentActiveSide < 0 || mgr->currentActiveSide > 1 || !mgr->isHuman[mgr->currentActiveSide]) { if (reason) *reason = "not player turn"; return false; }
     return true;
 }
 
@@ -391,16 +387,11 @@ static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin
         LogDebug("[Input] duplicate edge suppressed origin=%s", origin);
         return;
     }
+    if (!CombatPlayerWindow_(mgr, messageResult, nullptr)) return;
     DiagBegin_("save", origin, mgr);
     LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
         g_ui.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
-    const char* reason = nullptr;
-    if (CombatPlayerWindow_(mgr, messageResult, &reason)) {
-        if (!TryCaptureCombat_()) UiMarkNotice_("保存失败：详见日志");
-        return;
-    }
-    UiMarkNotice_("仅可在己方待行动时保存");
-    DiagEnd_("rejected", reason);
+    if (!TryCaptureCombat_()) UiMarkNotice_("保存失败：详见日志");
 }
 
 static HHOOK g_combatKeyboardHook = nullptr;
@@ -440,8 +431,13 @@ static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
                 up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_ui.saveKey,
                 g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
                 (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
-        if (letter && !up && !repeat)
-            InterlockedExchange(&g_pendingSaveKey, letter);
+        if (letter && !up && !repeat) {
+            if (g_ui.awaitingRebind || letter != g_ui.saveKey
+                || CombatPlayerWindow_(H3CombatManager::Get(), 0, nullptr))
+                InterlockedExchange(&g_pendingSaveKey, letter);
+            else
+                InterlockedExchange(&g_saveEdgeConsumed, 1);
+        }
     }
     return false;
 }
@@ -516,6 +512,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
             if (leftDown && swallow) {
                 return true;  // 固定左上角，无拖动；抬起才执行点击。
             } else if (leftUp && swallow) {
+                if (hitList && !CombatPlayerWindow_(combat, 0, nullptr)) return true;
                 InterlockedExchange(&g_pendingClickX, gameX);
                 InterlockedExchange(&g_pendingClickY, gameY);
                 LogDebug("点击已吞并：game=(%d,%d)", gameX, gameY);

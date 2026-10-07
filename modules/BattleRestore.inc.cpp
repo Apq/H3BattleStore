@@ -133,18 +133,26 @@ static bool BattleMainDialog_(const H3CombatManager* mgr)
     return CombatIsReadable_(mgr) && mgr->dlg && wnd && wnd->lastDlg == mgr->dlg;
 }
 
-static bool RestoreWindow_(const H3CombatManager* mgr)
+// Shared by the status lamp and both input paths; message depth is execution-only.
+static bool CombatStorageWindow_(const H3CombatManager* mgr)
 {
-    return g_battleInitialized && !g_restoreFatal && GetCurrentThreadId() == g_battleThread
-        && g_messageDepth == 1 && !g_executorDepth && BattleMainDialog_(mgr) && !mgr->finished
-        && !mgr->autoCombat && !mgr->tacticsPhase && (int)mgr->action == 0
-        && !*(const int*)0x698A3C
-        && mgr->currentMonSide >= 0 && mgr->currentMonSide < 2
+    if (!CombatIsReadable_(mgr)) return false;
+    const bool humanTurn = mgr->currentActiveSide >= 0 && mgr->currentActiveSide < 2
+        && mgr->isHuman[mgr->currentActiveSide];
+    const bool activeReady = mgr->currentMonSide >= 0 && mgr->currentMonSide < 2
         && mgr->currentMonIndex >= 0 && mgr->currentMonIndex < 20
-        && mgr->currentActiveSide >= 0 && mgr->currentActiveSide < 2
-        && mgr->isHuman[mgr->currentActiveSide]
         && mgr->activeStack == &mgr->stacks[mgr->currentMonSide][mgr->currentMonIndex]
         && mgr->activeStack->numberAlive > 0;
+    return BattleStorageAllowed_({g_battleInitialized, g_restoreFatal, BattleMainDialog_(mgr),
+        mgr->finished != 0, mgr->autoCombat != 0, mgr->tacticsPhase != 0,
+        (int)mgr->action != 0, g_executorDepth != 0, *(const int*)0x698A3C != 0,
+        humanTurn, activeReady});
+}
+
+static bool RestoreWindow_(const H3CombatManager* mgr)
+{
+    return GetCurrentThreadId() == g_battleThread && g_messageDepth == 1
+        && CombatStorageWindow_(mgr);
 }
 
 // ---------- v4 obstacle rebuild ----------

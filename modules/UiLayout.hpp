@@ -13,6 +13,20 @@ struct Layout {
     }
 };
 constexpr Layout ForFont(int fontHeight) { return { Max(24, fontHeight), Max(18, fontHeight) }; }
+constexpr int HotkeyX = 480 - 58;
+constexpr int StatusLampRadius = 7;
+constexpr int StatusLampX = HotkeyX - 16;
+constexpr int StatusLabelWidth = StatusLampX - StatusLampRadius - 12;
+constexpr int StatusLampY(Layout layout) { return layout.bandHeight + layout.bandHeight / 2; }
+struct LampColor { unsigned char r, g, b; };
+constexpr LampColor StatusLampColor(bool allowed) {
+    return allowed ? LampColor{64, 230, 112} : LampColor{245, 64, 64};
+}
+constexpr int LampHalfWidth(int y, int radius) {
+    int x = 0;
+    while ((x + 1) * (x + 1) + y * y <= radius * radius) ++x;
+    return x;
+}
 // Keep each source texture band's outer borders when extending its interior.
 constexpr int TextureY(int y, int bandHeight) {
     const int band = y / bandHeight;

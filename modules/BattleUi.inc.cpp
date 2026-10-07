@@ -106,6 +106,14 @@ static struct
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
 
+static struct {
+    bool pending = false;
+    unsigned generation = 0;
+    DWORD requested = 0;
+    std::string battleKey;
+    UiSaveEntry entry;
+} g_restoreRequest;
+
 static int UiOriginY_() { return g_uiLayout.OriginY(g_ui.y); }
 
 static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
@@ -572,15 +580,35 @@ static void UiDrawBar_(H3CombatManager* mgr)
             _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
             UiToGbk_(utf8, label, sizeof(label));
         }
-        font->TextDraw(c, label, 6, UiBandHeight_(), kUiBarWidth - 58 - 10, UiBandHeight_(),
+        while (font->GetMaxLineWidth(label) > hbs_ui::StatusLabelWidth && label[0]) {
+            char* end = label + strlen(label);
+            *CharPrevExA(936, label, end, 0) = 0;
+        }
+        font->TextDraw(c, label, 6, UiBandHeight_(), hbs_ui::StatusLabelWidth, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
+        const bool storageAllowed = !g_restoreBusy && !g_restoreRequest.pending
+            && CombatStorageWindow_(mgr);
+        const hbs_ui::LampColor lamp = hbs_ui::StatusLampColor(storageAllowed);
+        const int lampX = hbs_ui::StatusLampX;
+        const int lampY = hbs_ui::StatusLampY(g_uiLayout);
+        const int radius = hbs_ui::StatusLampRadius;
+        for (int dy = -radius - 1; dy <= radius + 1; ++dy) {
+            const int half = hbs_ui::LampHalfWidth(dy, radius + 1);
+            c->FillRectangle(lampX - half, lampY + dy, 2 * half + 1, 1, 30, 30, 30);
+        }
+        for (int dy = -radius; dy <= radius; ++dy) {
+            const int half = hbs_ui::LampHalfWidth(dy, radius);
+            c->FillRectangle(lampX - half, lampY + dy, 2 * half + 1, 1,
+                lamp.r, lamp.g, lamp.b);
+        }
+        c->FillRectangle(lampX - 3, lampY - 3, 3, 2, 220, 245, 225);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
         UiToGbk_(keyUtf8, key, sizeof(key));
-        font->TextDraw(c, key, kUiBarWidth - 58, UiBandHeight_(), 52, UiBandHeight_(),
+        font->TextDraw(c, key, hbs_ui::HotkeyX, UiBandHeight_(), 52, UiBandHeight_(),
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiBarWidth - 58, UiBandHeight_() + 2, 54, UiBandHeight_() - 4, 220, 200, 110);
+        c->DrawFrame(hbs_ui::HotkeyX, UiBandHeight_() + 2, 54, UiBandHeight_() - 4, 220, 200, 110);
         // 固定横排五级，不展开收起；选中与悬停只重绘同一矩形。
         const int levelNow = (g_log_level >= LOG_TRACE && g_log_level <= LOG_ERROR)
             ? g_log_level : LOG_INFO;
@@ -769,14 +797,6 @@ static void UiPackLogs_()
     packing = false;
 }
 
-static struct {
-    bool pending = false;
-    unsigned generation = 0;
-    DWORD requested = 0;
-    std::string battleKey;
-    UiSaveEntry entry;
-} g_restoreRequest;
-
 
 static void UiSelectLogLevel_(int level)
 {
@@ -802,7 +822,8 @@ static void UiCancelRebind_(const char* reason)
 
 static void UiConfirmAndRestore_(const UiSaveEntry& entry)
 {
-    if (g_restoreBusy || g_restoreFatal || g_restoreRequest.pending || !g_battleInitialized) return;
+    if (g_restoreBusy || g_restoreRequest.pending
+        || !CombatStorageWindow_(H3CombatManager::Get())) return;
     UiCancelRebind_("读档请求");
     // Copy before any dialog or redraw can invalidate the entries vector.
     g_restoreRequest.entry = entry;
@@ -1063,11 +1084,9 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
     if (g_restoreFatal) return;
     if (!confirmed) { DiagEnd_("cancelled", "玩家取消读档确认"); return; }
     std::string key, error;
-    if (generation != g_battleGeneration) {
-        UiRestoreFailure_("rejected", "battle generation changed"); return;
-    }
-    if (!RestoreWindow_(mgr)) {
-        UiRestoreFailure_("rejected", "restore window changed"); return;
+    if (generation != g_battleGeneration || !RestoreWindow_(mgr)) {
+        DiagEnd_("cancelled", "restore timing no longer available");
+        return;
     }
     if (!BattleFingerprint_(mgr, &key, &error)) {
         UiRestoreFailure_("rejected", error.empty() ? "battle fingerprint failed" : error); return;
@@ -1160,9 +1179,13 @@ static void UiProcessRestore_(H3CombatManager* mgr, int result)
     if (result == 2 || g_restoreRequest.generation != g_battleGeneration
         || GetTickCount() - g_restoreRequest.requested > 5000) {
         g_restoreRequest.pending = false;
-        LogWarn("[Load] cancelled: battle changed, closing or wait timeout"); return;
+        return;
     }
-    if (RestoreWindow_(mgr)) UiExecuteRestore_(mgr);
+    if (!RestoreWindow_(mgr)) {
+        g_restoreRequest.pending = false;
+        return;
+    }
+    UiExecuteRestore_(mgr);
 }
 static void UiHandleMouse_(H3Msg* msg)
 {
@@ -1250,7 +1273,7 @@ static void UiHandleFrameClick_(int gameX, int gameY)
         return;
     }
     if (UiPointInBar_(gameX, gameY)) {
-        if (gameX >= g_ui.x + kUiBarWidth - 58) {
+        if (gameX >= g_ui.x + hbs_ui::HotkeyX) {
             g_ui.awaitingRebind = true;
             CancelSaveWait_("rebind entered");
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
