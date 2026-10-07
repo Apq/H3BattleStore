@@ -391,8 +391,67 @@ static void TestDeleteFailure()
     RemoveTree(root);
 }
 
+static uint64_t UtcStamp_(WORD year, WORD month, WORD day, WORD hour, WORD minute, WORD second)
+{
+    SYSTEMTIME utc = {};
+    utc.wYear = year; utc.wMonth = month; utc.wDay = day;
+    utc.wHour = hour; utc.wMinute = minute; utc.wSecond = second;
+    FILETIME ft = {};
+    Expect(SystemTimeToFileTime(&utc, &ft) != FALSE, "construct UTC fixture");
+    const uint64_t ticks = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    return (ticks - 116444736000000000ull) / 10000ull;
+}
+
+static void TestLocalStamp()
+{
+    printf("local display time\n");
+    const uint64_t stamp = UtcStamp_(2026, 10, 7, 16, 15, 26);
+    TIME_ZONE_INFORMATION zone = {};
+    zone.Bias = -480;
+    char text[32] = {};
+    Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), &zone)
+        && strcmp(text, "20261008-001526") == 0, "UTC+8 display crosses midnight");
+    zone.Bias = 420;
+    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 1, 1, 2, 3, 4), text, sizeof(text), &zone)
+        && strcmp(text, "20251231-190304") == 0, "UTC-7 display crosses year boundary");
+    zone.Bias = -330;
+    Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), &zone)
+        && strcmp(text, "20261007-214526") == 0, "half-hour timezone is not rounded");
+    zone = {};
+    zone.Bias = 300;
+    zone.DaylightBias = -60;
+    zone.DaylightDate.wMonth = 3; zone.DaylightDate.wDay = 2;
+    zone.DaylightDate.wDayOfWeek = 0; zone.DaylightDate.wHour = 2;
+    zone.StandardDate.wMonth = 11; zone.StandardDate.wDay = 1;
+    zone.StandardDate.wDayOfWeek = 0; zone.StandardDate.wHour = 2;
+    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 7, 1, 12, 0, 0), text, sizeof(text), &zone)
+        && strcmp(text, "20260701-080000") == 0, "summer daylight saving offset");
+    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 1, 1, 12, 0, 0), text, sizeof(text), &zone)
+        && strcmp(text, "20260101-070000") == 0, "winter standard offset");
+    SYSTEMTIME expected = {};
+    Expect(hbs::detail::UtcMsToLocalSystemTime(stamp, expected), "system local conversion");
+    char expectedText[32] = {};
+    _snprintf_s(expectedText, sizeof(expectedText), _TRUNCATE, "%04u%02u%02u-%02u%02u%02u",
+        (unsigned)expected.wYear, (unsigned)expected.wMonth, (unsigned)expected.wDay,
+        (unsigned)expected.wHour, (unsigned)expected.wMinute, (unsigned)expected.wSecond);
+    Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), nullptr)
+        && strcmp(text, expectedText) == 0, "display uses host timezone when zone is null");
+    const std::string key = Key('a', 'b');
+    std::wstring name = hbs::detail::MakeArchiveName(stamp, key, 1);
+    std::wstring filenameTime = name.substr(65, 15);
+    filenameTime[8] = L'-';
+    Expect(filenameTime == std::wstring(text, text + strlen(text)), "filename and UI share local conversion");
+    char tinyBuffer[4] = {};
+    Expect(!hbs::detail::FormatLocalArchiveStamp(stamp, tinyBuffer, sizeof(tinyBuffer), nullptr)
+        && tinyBuffer[3] == 0, "short display buffer is terminated");
+    Expect(!hbs::detail::FormatLocalArchiveStamp(~uint64_t(0), text, sizeof(text), nullptr)
+        && text[0] == 0, "overflow timestamp rejected instead of wrapping");
+    Expect(!hbs::detail::FormatLocalArchiveStamp(stamp, nullptr, 0, nullptr), "null output rejected");
+}
+
 int main()
 {
+    TestLocalStamp();
     TestCodec();
     TestRejects();
     TestStoreLimits();

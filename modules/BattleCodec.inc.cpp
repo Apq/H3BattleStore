@@ -397,6 +397,12 @@ static bool CodecDefendControlEnabled_(bool tacticsPhase)
     return !tacticsPhase;
 }
 
+static bool CodecSpellControlEnabled_(bool tacticsPhase, bool hasHero,
+    uint32_t heroCasted, bool castOverride, bool hasSpellbook)
+{
+    return !tacticsPhase && hasHero && (!heroCasted || castOverride) && hasSpellbook;
+}
+
 static void CodecInvalidateHover_(CodecCapture* capture)
 {
     capture->creatureAtMousePos = -1;

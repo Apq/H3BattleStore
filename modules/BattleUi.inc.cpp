@@ -4,6 +4,8 @@
 
 #include <ctime>
 #include <string>
+#include "UiLayout.hpp"
+#include "../tests/UiLayoutRegression.hpp"
 
 static void UiToGbk_(const char* utf8, char* out, int outCap)
 {
@@ -51,12 +53,13 @@ static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
     }
 }
 
-static const int kUiBarHeight = 24;
+static hbs_ui::Layout g_uiLayout = hbs_ui::ForFont(0);
+static int UiBandHeight_() { return g_uiLayout.bandHeight; }
 static const int kUiBarWidth = 480;
 // 常驻列表宽度：能显示完时间即可，不跟悬浮条同宽。
 // 内容只有 "yyyymmdd-hhmmss" 15 字符，小字体约 6px/字符，136px 含边距足够。
 static const int kUiListWidth = 136;
-static const int kUiRowHeight = 18;
+static int UiRowHeight_() { return g_uiLayout.rowHeight; }
 static const int kUiListMaxRows = 10;
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
@@ -65,11 +68,8 @@ static const int kUiLogPackX = 392;
 static const int kUiLogPackWidth = 84;
 static const int kUiLogLevelCellWidth = 76;
 static const int kUiLogLevelPerRow = 5;
-static const int kUiLogLevelRowHeight = kUiBarHeight;
 static const int kUiLogLevelRows = 5;
-static const int kUiLogLevelBlockH = kUiBarHeight;
-static const int kUiBarTopOffset = kUiBarHeight;
-static const int kUiBgHeight = 2 * kUiBarHeight;
+static const int kUiBgHeight = 48; // Source asset size, not the runtime two-band height.
 
 
 struct UiSaveEntry
@@ -105,6 +105,8 @@ static struct
     int logLevelHover = -1;
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
+
+static int UiOriginY_() { return g_uiLayout.OriginY(g_ui.y); }
 
 static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
 static const int GUARD_COPY = GuardRegisterHook_("BattleStore.CopyPixels");
@@ -177,14 +179,9 @@ static void UiSaveHotkey_()
 
 static void UiFormatStamp_(const UiSaveEntry& entry, char* out, size_t cap)
 {
-    const uint64_t ms = entry.timestampUtcMs;
-    const uint64_t seconds = ms / 1000;
-    struct tm value = {};
-    time_t clock = (time_t)seconds;
-    value = *gmtime(&clock);
-    _snprintf(out, cap, "%04d%02d%02d-%02d%02d%02d",
-        value.tm_year + 1900, value.tm_mon + 1, value.tm_mday,
-        value.tm_hour, value.tm_min, value.tm_sec);
+    if (!hbs::detail::FormatLocalArchiveStamp(entry.timestampUtcMs, out, cap, nullptr)
+        && out && cap > 0)
+        _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }
 
 static void UiMarkSaved_(uint64_t timestampUtcMs)
@@ -467,12 +464,15 @@ static void UiDrawBar_(H3CombatManager* mgr)
         H3WindowManager* wnd = H3WindowManager::Get();
         H3Font* font = H3SmallFont::Get();
         if (!wnd || !font || !UiDDBackBuffer_()) return;
-        const int compositeH = kUiLogLevelBlockH + kUiBarHeight + kUiListMaxRows * kUiRowHeight;
-        if (!g_barComposite || !g_barComposite->buffer) {
+        const hbs_ui::Layout layout = hbs_ui::ForFont(font->height);
+        const int compositeH = layout.Height(kUiListMaxRows);
+        if (!g_barComposite || !g_barComposite->buffer
+            || g_barComposite->height != compositeH || g_barComposite->width != kUiBarWidth) {
             if (g_barComposite) g_barComposite->Destroy();
             g_barComposite = H3LoadedPcx16::Create(kUiBarWidth, compositeH);
             if (!g_barComposite || !g_barComposite->buffer) return;
         }
+        g_uiLayout = layout;
         static DWORD lastDrawInfo = 0;
         const DWORD infoNow = GetTickCount();
         const bool logInfo = LogEnabled_(LOG_TRACE) && infoNow - lastDrawInfo >= 30000;
@@ -482,37 +482,41 @@ static void UiDrawBar_(H3CombatManager* mgr)
         g_ui.x = 8;
         g_ui.y = 8;
         const int x = g_ui.x;
-        const int y = g_ui.y;
+        const int y = UiOriginY_();
         const int rows = (!g_ui.entries.empty())
             ? (g_ui.entries.size() < (size_t)kUiListMaxRows
                 ? (int)g_ui.entries.size() : kUiListMaxRows)
             : 0;
         // 列表高度随实际行数自适应（2026-10-05 用户实测纠正：固定满高会显示
         // 一堆空行背景板）；成品图行分隔线在每行底部，任意行数展开底边闭合。
-        const int usedH = kUiLogLevelBlockH + kUiBarHeight + rows * kUiRowHeight;
+        const int usedH = UiBandHeight_() + UiBandHeight_() + rows * UiRowHeight_();
         // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
         // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
         static int lastX = -1;
         static int lastY = -1;
         static int lastH = -1;
+        static int lastBlockH = -1;
         static H3CombatManager* lastMgr = nullptr;
         if (lastMgr != mgr) {
-            lastX = lastY = lastH = -1;
+            lastX = lastY = lastH = lastBlockH = -1;
             lastMgr = mgr;
         }
         // 两行悬浮框矩形恒定，残影跟踪只跟随存档列表行数。
         const int totalH = usedH;
-        const bool rectChanged = lastX != x || lastY != y || lastH != totalH;
+        const bool rectChanged = lastX != x || lastY != y || lastH != totalH
+            || lastBlockH != g_uiLayout.ListTop();
         // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
-        c->FillRectangle(0, 0, kUiBarWidth, kUiLogLevelBlockH, 0, 0, 0);
-        c->FillRectangle(0, kUiBarTopOffset, kUiBarWidth, kUiBarHeight, 0, 0, 0);
-        c->FillRectangle(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
-            kUiListMaxRows * kUiRowHeight, 0, 0, 0);
+        c->FillRectangle(0, 0, kUiBarWidth, UiBandHeight_(), 0, 0, 0);
+        c->FillRectangle(0, UiBandHeight_(), kUiBarWidth, UiBandHeight_(), 0, 0, 0);
+        c->FillRectangle(0, UiBandHeight_() + UiBandHeight_(), kUiListWidth,
+            kUiListMaxRows * UiRowHeight_(), 0, 0, 0);
         H3LoadedPcx16* bg = UiLoadBarBg_();
         const bool bgOk = bg && bg->buffer
             && bg->width == kUiBarWidth && bg->height == kUiBgHeight;
         if (bgOk) {
-            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, kUiBgHeight, 0);
+            for (int py = 0; py < g_uiLayout.ListTop(); ++py)
+                UiCopyBgRegion_(c, bg, 0, hbs_ui::TextureY(py, UiBandHeight_()),
+                    kUiBarWidth, 1, py);
             // 下拉列表底色 = 背景图主色（2026-10-06 用户裁定：选项底色接近背景图，
             // 不要黑蓝对比）。稀疏采样均值做主色，两行图仍仅千余点。
             long sumR = 0, sumG = 0, sumB = 0;
@@ -534,15 +538,15 @@ static void UiDrawBar_(H3CombatManager* mgr)
             }
         }
         else {
-            c->FillRectangle(0, 0, kUiBarWidth, kUiBgHeight, 20, 20, 20);
-            c->DrawFrame(0, 0, kUiBarWidth, kUiBgHeight, 200, 180, 90);
+            c->FillRectangle(0, 0, kUiBarWidth, g_uiLayout.ListTop(), 20, 20, 20);
+            c->DrawFrame(0, 0, kUiBarWidth, g_uiLayout.ListTop(), 200, 180, 90);
             g_ui.listR = 20; g_ui.listG = 20; g_ui.listB = 20;
         }
         if (rows > 0) {
-            c->FillRectangle(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
+            c->FillRectangle(0, UiBandHeight_() + UiBandHeight_(), kUiListWidth, rows * UiRowHeight_(),
                 (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
-            c->DrawFrame(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
-                rows * kUiRowHeight, 160, 140, 70);
+            c->DrawFrame(0, UiBandHeight_() + UiBandHeight_(), kUiListWidth,
+                rows * UiRowHeight_(), 160, 140, 70);
         }
         char label[128] = {};
         eTextColor labelColor = eTextColor::WHITE;
@@ -568,27 +572,27 @@ static void UiDrawBar_(H3CombatManager* mgr)
             _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
             UiToGbk_(utf8, label, sizeof(label));
         }
-        font->TextDraw(c, label, 6, kUiBarTopOffset, kUiBarWidth - 58 - 10, kUiBarHeight,
+        font->TextDraw(c, label, 6, UiBandHeight_(), kUiBarWidth - 58 - 10, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
         UiToGbk_(keyUtf8, key, sizeof(key));
-        font->TextDraw(c, key, kUiBarWidth - 58, kUiBarTopOffset, 52, kUiBarHeight,
+        font->TextDraw(c, key, kUiBarWidth - 58, UiBandHeight_(), 52, UiBandHeight_(),
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiBarWidth - 58, kUiBarTopOffset + 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        c->DrawFrame(kUiBarWidth - 58, UiBandHeight_() + 2, 54, UiBandHeight_() - 4, 220, 200, 110);
         // 固定横排五级，不展开收起；选中与悬停只重绘同一矩形。
         const int levelNow = (g_log_level >= LOG_TRACE && g_log_level <= LOG_ERROR)
             ? g_log_level : LOG_INFO;
         for (int i = 0; i < kUiLogLevelRows; ++i) {
             const int cellX = (i % kUiLogLevelPerRow) * kUiLogLevelCellWidth;
-            const int cellY = (i / kUiLogLevelPerRow) * kUiLogLevelRowHeight;
+            const int cellY = (i / kUiLogLevelPerRow) * UiBandHeight_();
             if (i == g_ui.logLevelHover || i == levelNow) {
                 const int fillR = i == g_ui.logLevelHover ? 90 : 70;
                 const int fillG = i == g_ui.logLevelHover ? 70 : 55;
                 const int fillB = i == g_ui.logLevelHover ? 20 : 25;
                 c->FillRectangle(cellX + 3, cellY + 3, kUiLogLevelCellWidth - 6,
-                    kUiLogLevelRowHeight - 6, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
+                    UiBandHeight_() - 6, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
             }
             char itemUtf8[24] = {};
             const char* mark = i == levelNow ? "(*) " : "( ) ";
@@ -596,46 +600,61 @@ static void UiDrawBar_(H3CombatManager* mgr)
             char itemGbk[32] = {};
             UiToGbk_(itemUtf8, itemGbk, sizeof(itemGbk));
             font->TextDraw(c, itemGbk, cellX + 4, cellY, kUiLogLevelCellWidth - 8,
-                kUiLogLevelRowHeight,
+                UiBandHeight_(),
                 i == levelNow ? eTextColor::LIGHT_GREEN : eTextColor::WHITE,
                 eTextAlignment::MIDDLE_CENTER);
         }
         char packLabel[32] = {};
         UiToGbk_("打包日志", packLabel, sizeof(packLabel));
         font->TextDraw(c, packLabel, kUiLogPackX + 2, 0, kUiLogPackWidth - 4,
-            kUiBarHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiLogPackX, 3, kUiLogPackWidth, kUiBarHeight - 6, 220, 200, 110);
+            UiBandHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+        c->DrawFrame(kUiLogPackX, 3, kUiLogPackWidth, UiBandHeight_() - 6, 220, 200, 110);
         if (rows > 0) {
-            const int listY = kUiBarTopOffset + kUiBarHeight;
+            const int listY = UiBandHeight_() + UiBandHeight_();
             for (int row = 0; row < rows; ++row) {
                 if (row == g_ui.hoverRow)
-                    c->FillRectangle(2, listY + row * kUiRowHeight,
-                        kUiListWidth - 4, kUiRowHeight, 90, 70, 20);
+                    c->FillRectangle(2, listY + row * UiRowHeight_(),
+                        kUiListWidth - 4, UiRowHeight_(), 90, 70, 20);
                 char stamp[32] = {};
                 UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
-                font->TextDraw(c, stamp, 6, listY + row * kUiRowHeight,
-                    kUiListWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+                font->TextDraw(c, stamp, 6, listY + row * UiRowHeight_(),
+                    kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
             }
         }
         bool bltOk = false;
         redrawing = true;
-        if (rectChanged && lastX >= 0 && lastH > totalH && wnd->screenPcx16) {
+        if (rectChanged && lastX >= 0 && lastY != y && wnd->screenPcx16) {
+            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, lastY, kUiBarWidth,
+                lastBlockH, lastX, lastY)) wnd->H3Redraw(lastX, lastY, kUiBarWidth, lastBlockH);
+            if (lastH > lastBlockH && UiBltPcx16Region_(wnd->screenPcx16,
+                lastX, lastY + lastBlockH, kUiListWidth, lastH - lastBlockH,
+                lastX, lastY + lastBlockH))
+                wnd->H3Redraw(lastX, lastY + lastBlockH, kUiListWidth, lastH - lastBlockH);
+        }
+        if (rectChanged && lastX >= 0 && lastY == y && lastBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
+            const int tailY = lastY + g_uiLayout.ListTop();
+            const int tailH = lastBlockH - g_uiLayout.ListTop();
+            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiBarWidth,
+                tailH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiBarWidth, tailH);
+        }
+        if (rectChanged && lastX >= 0 && lastY == y && lastH > totalH && wnd->screenPcx16) {
             const int tailY = lastY + totalH;
             if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiListWidth,
                 lastH - totalH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiListWidth, lastH - totalH);
         }
         // 两行悬浮框整块呈现，存档列表仅覆盖自身窄矩形。
-        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, kUiBgHeight, x, y);
+        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, g_uiLayout.ListTop(), x, y);
         if (rows > 0)
-            bltOk = UiBltPcx16Region_(c, 0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
-                rows * kUiRowHeight, x, y + kUiBarTopOffset + kUiBarHeight) && bltOk;
-        wnd->H3Redraw(x, y, kUiBarWidth, kUiBgHeight);
-        if (rows > 0) wnd->H3Redraw(x, y + kUiBarTopOffset + kUiBarHeight,
-            kUiListWidth, rows * kUiRowHeight);
+            bltOk = UiBltPcx16Region_(c, 0, UiBandHeight_() + UiBandHeight_(), kUiListWidth,
+                rows * UiRowHeight_(), x, y + UiBandHeight_() + UiBandHeight_()) && bltOk;
+        wnd->H3Redraw(x, y, kUiBarWidth, g_uiLayout.ListTop());
+        if (rows > 0) wnd->H3Redraw(x, y + UiBandHeight_() + UiBandHeight_(),
+            kUiListWidth, rows * UiRowHeight_());
         redrawing = false;
         lastX = x;
         lastY = y;
         lastH = totalH;
+        lastBlockH = g_uiLayout.ListTop();
         static LogFailureWindow_ bltFailures;
         unsigned skipped = 0;
         const int bltReport = bltFailures.Observe(!bltOk, infoNow, 30000, &skipped);
@@ -662,27 +681,28 @@ static void UiClampBarToBattleDlg_(const H3CombatManager* mgr)
     const int dy = dlg->GetY();
     const int dw = dlg->GetWidth();
     const int dh = dlg->GetHeight();
-    if (dw < kUiBarWidth || dh < kUiLogLevelBlockH + kUiBarHeight) return;
+    if (dw < kUiBarWidth || dh < UiBandHeight_() + UiBandHeight_()) return;
     if (g_ui.x < dx) g_ui.x = dx;
-    if (g_ui.y < dy) g_ui.y = dy;
+    const int bleed = (UiBandHeight_() - 24) / 2;
+    if (UiOriginY_() < dy) g_ui.y = dy + bleed;
     if (g_ui.x + kUiBarWidth > dx + dw)
         g_ui.x = dx + dw - kUiBarWidth;
-    if (g_ui.y + kUiLogLevelBlockH + kUiBarHeight > dy + dh)
-        g_ui.y = dy + dh - kUiLogLevelBlockH - kUiBarHeight;
+    if (UiOriginY_() + UiBandHeight_() + UiBandHeight_() > dy + dh)
+        g_ui.y = dy + dh - g_uiLayout.ListTop() + bleed;
 }
 
 static bool UiPointInBar_(int px, int py)
 {
     return px >= g_ui.x && px < g_ui.x + kUiBarWidth
-        && py >= g_ui.y + kUiBarTopOffset
-        && py < g_ui.y + kUiBarTopOffset + kUiBarHeight;
+        && py >= UiOriginY_() + UiBandHeight_()
+        && py < UiOriginY_() + UiBandHeight_() + UiBandHeight_();
 }
 
 // 悬浮框体系整块（等级行+条本体）区域，用于鼠标吞并与外点判定。
 static bool UiPointInUiBlock_(int px, int py)
 {
     return px >= g_ui.x && px < g_ui.x + kUiBarWidth
-        && py >= g_ui.y && py < g_ui.y + kUiBarTopOffset + kUiBarHeight;
+        && py >= UiOriginY_() && py < UiOriginY_() + UiBandHeight_() + UiBandHeight_();
 }
 
 static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
@@ -702,28 +722,25 @@ static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
 
 static int UiHitRow_(int px, int py)
 {
-    const int top = g_ui.y + kUiBarTopOffset + kUiBarHeight;
-    if (px < g_ui.x || px >= g_ui.x + kUiListWidth || py < top) return -1;
-    int row = (py - top) / kUiRowHeight;
+    if (px < g_ui.x || px >= g_ui.x + kUiListWidth) return -1;
     const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
         ? (int)g_ui.entries.size() : kUiListMaxRows;
-    if (row >= rows) return -1;
-    return row;
+    return g_uiLayout.HitRow(py - UiOriginY_(), rows);
 }
 
 static int UiHitLogLevelItem_(int px, int py)
 {
     const int dx = px - g_ui.x;
-    const int dy = py - g_ui.y;
+    const int dy = py - UiOriginY_();
     if (dx < 0 || dx >= kUiLogLevelRows * kUiLogLevelCellWidth
-        || dy < 0 || dy >= kUiLogLevelRowHeight) return -1;
+        || dy < 0 || dy >= UiBandHeight_()) return -1;
     return dx / kUiLogLevelCellWidth;
 }
 
 static bool UiHitLogPack_(int px, int py)
 {
     return px >= g_ui.x + kUiLogPackX && px < g_ui.x + kUiLogPackX + kUiLogPackWidth
-        && py >= g_ui.y && py < g_ui.y + kUiBarHeight;
+        && py >= UiOriginY_() && py < UiOriginY_() + UiBandHeight_();
 }
 
 static void UiPackLogs_()

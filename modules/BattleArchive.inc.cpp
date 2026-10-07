@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <algorithm>
@@ -631,18 +632,38 @@ inline bool WideHexEquals(const wchar_t* text, const std::string& key)
 
 // ===== 命名层 v2（2026-10-06 用户需求）=====
 // 文件名 = <64hex 战斗指纹>_<yyyymmdd>_<hhmmss>[_<撞名序号2..999>].hbs
-// 时间为存档时刻本地时间，与文件头内 timestampUtcMs 同源互校（秒精度，容差 ±2s）；
+// 时间为存档时刻本地时间；文件头内 timestampUtcMs 为排序和身份权威，不按文件名反算；
 // 同指纹同秒多次保存追加 _2、_3…；sequence/targetKey 不再进入文件名（头内保留）。
 
-inline bool UtcMsToLocalSystemTime(uint64_t utcMs, SYSTEMTIME& local)
+inline bool UtcMsToLocalSystemTime(uint64_t utcMs, SYSTEMTIME& local,
+                                    const TIME_ZONE_INFORMATION* zone)
 {
+    local = {};
+    if (utcMs > (0x7FFFFFFFFFFFFFFFull - 116444736000000000ull) / 10000ull) return false;
     const uint64_t ftv = utcMs * 10000ull + 116444736000000000ull;
     FILETIME ft = {};
     ft.dwLowDateTime = static_cast<DWORD>(ftv & 0xFFFFFFFFull);
     ft.dwHighDateTime = static_cast<DWORD>(ftv >> 32);
     SYSTEMTIME utc = {};
     if (!FileTimeToSystemTime(&ft, &utc)) return false;
-    return SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local) != FALSE;
+    return SystemTimeToTzSpecificLocalTime(zone, &utc, &local) != FALSE;
+}
+
+inline bool UtcMsToLocalSystemTime(uint64_t utcMs, SYSTEMTIME& local)
+{
+    return UtcMsToLocalSystemTime(utcMs, local, nullptr);
+}
+
+inline bool FormatLocalArchiveStamp(uint64_t utcMs, char* out, size_t cap,
+                                   const TIME_ZONE_INFORMATION* zone)
+{
+    if (!out || cap == 0) return false;
+    out[0] = 0;
+    SYSTEMTIME local = {};
+    if (!UtcMsToLocalSystemTime(utcMs, local, zone)) return false;
+    return _snprintf_s(out, cap, _TRUNCATE, "%04u%02u%02u-%02u%02u%02u",
+        (unsigned)local.wYear, (unsigned)local.wMonth, (unsigned)local.wDay,
+        (unsigned)local.wHour, (unsigned)local.wMinute, (unsigned)local.wSecond) >= 0;
 }
 
 inline bool LocalSystemTimeToUtcMs(SYSTEMTIME& local, uint64_t& utcMs)
@@ -689,7 +710,7 @@ inline std::wstring MakeArchiveName(uint64_t timestampUtcMs,
         name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(battleKey[i])));
     SYSTEMTIME local = {};
     if (!UtcMsToLocalSystemTime(timestampUtcMs, local)) {
-        // UTC 毫秒异常时仍生成合法结构（时间字段全零），由 ParseGeneratedName 的一致性校验兜底
+        // Invalid UTC produces zero date fields, rejected by ParseGeneratedName.
     }
     name.push_back(L'_');
     AppendDec4_(name, local.wYear);

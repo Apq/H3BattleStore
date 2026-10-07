@@ -739,17 +739,30 @@ static bool RestoreCreatureDefReady_(H3LoadedDef* def, const CodecStack& stack)
         && Readable_(group->frames[stack.animationFrame], sizeof(H3DefFrame));
 }
 
-// Rebuild only the two bottom controls whose native state gates keyboard input.
-// Calling the full native refresh would also enter turn/auto-cast logic.
+// Rebuild bottom input gates only; full refresh also enters turn/auto-cast logic.
 static void RestoreBottomControls_(H3CombatManager* mgr)
 {
     if (!mgr || !mgr->dlg) return;
     const bool waitEnabled = CodecWaitControlEnabled_(*((const uint8_t*)mgr + 0x13DE4), mgr->tacticsPhase != 0);
     const bool defendEnabled = CodecDefendControlEnabled_(mgr->tacticsPhase != 0);
+    const int side = mgr->currentActiveSide;
+    H3Hero* hero = side >= 0 && side < 2 ? mgr->hero[side] : nullptr;
+    const uint32_t casted = hero ? (uint32_t)mgr->heroCasted[side] : 0;
+    const bool castOverride = *((const uint8_t*)mgr + 0x13D74) != 0;
+    // WearsArtifact(0) is the native read-only spellbook check, not a cast.
+    const bool hasSpellbook = hero && hero->WearsArtifact(0) != 0;
+    const bool spellEnabled = CodecSpellControlEnabled_(mgr->tacticsPhase != 0,
+        hero != nullptr, casted, castOverride, hasSpellbook);
+    mgr->dlg->SendCommandToItem(spellEnabled ? 6 : 5, 0x7D8, 0x1000);
     mgr->dlg->SendCommandToItem(waitEnabled ? 6 : 5, 0x7D9, 0x1000);
     mgr->dlg->SendCommandToItem(defendEnabled ? 6 : 5, 0x7DA, 0x1000);
+    H3DlgItem* spell = mgr->dlg->GetH3DlgItem(0x7D8);
     H3DlgItem* wait = mgr->dlg->GetH3DlgItem(0x7D9);
     H3DlgItem* defend = mgr->dlg->GetH3DlgItem(0x7DA);
+    LogDebug("[SpellControl op=%ld] side=%d hero=%p casted=%u override=%d spellbook=%d expected=%d enabled=%d shaded=%d",
+        g_diag.id, side, hero, casted, castOverride ? 1 : 0, hasSpellbook ? 1 : 0,
+        spellEnabled ? 1 : 0, spell ? (spell->IsEnabled() ? 1 : 0) : -1,
+        spell ? (spell->IsSet(h3::NH3DlgControls::NState::SHADED) ? 1 : 0) : -1);
     LogDebug("[Controls op=%ld] restored wait=%d defend=%d control=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
         g_diag.id, waitEnabled ? 1 : 0, defendEnabled ? 1 : 0,
         *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),

@@ -47,7 +47,20 @@ static void TestControlStatePolicy_()
     Expect(!CodecWaitControlEnabled_(0, true), "wait control disabled in tactics phase");
     Expect(CodecDefendControlEnabled_(false), "defend control enabled outside tactics");
     Expect(!CodecDefendControlEnabled_(true), "defend control disabled in tactics");
-    printf("PASS control state policy: wait and defend gating\n");
+    for (int tactics = 0; tactics < 2; ++tactics)
+        for (int hero = 0; hero < 2; ++hero)
+            for (int casted = 0; casted < 2; ++casted)
+                for (int overrideCast = 0; overrideCast < 2; ++overrideCast)
+                    for (int book = 0; book < 2; ++book)
+                        Expect(CodecSpellControlEnabled_(tactics != 0, hero != 0,
+                            casted ? 0xFFFFFFFFu : 0, overrideCast != 0, book != 0)
+                            == (!tactics && hero && (!casted || overrideCast) && book),
+                            "native spell control predicate truth table");
+    Expect(CodecSpellControlEnabled_(false, true, 0, false, true),
+        "loading pre-cast state re-enables spellbook gate");
+    Expect(!CodecSpellControlEnabled_(false, true, 1, false, true),
+        "loading already-cast state keeps spellbook gate closed");
+    printf("PASS control state policy: wait, defend and spellbook gating\n");
 }
 
 static void TestDisplayCaches_()
@@ -236,7 +249,17 @@ int main()
     Expect(decoded.fortWallsHp[17] == 900, "fort hp");
     Expect(decoded.stacks[0][2].numberAlive == 18, "stack count");
     Expect(decoded.stacks[0][2].infoFlags == 0x1234ABCDu, "info flags width");
-    Expect(decoded.heroCasted[1] == 0xFFFFFFFFu, "hero casted bool32");
+    Expect(decoded.heroCasted[0] == 1 && decoded.heroCasted[1] == 0xFFFFFFFFu, "hero casted bool32");
+    std::unique_ptr<CodecCapture> preCast(new CodecCapture(capture)), preCastRead(new CodecCapture{});
+    preCast->heroCasted[0] = preCast->heroCasted[1] = 0;
+    std::vector<hbs::ArchiveSection> preCastSections;
+    Expect(CodecEncode(*preCast, &preCastSections, &error)
+        && CodecDecode(preCastSections, preCastRead.get(), &error)
+        && preCastRead->heroCasted[0] == 0 && preCastRead->heroCasted[1] == 0,
+        "unspent hero cast flags survive archive codec");
+    Expect(CodecSpellControlEnabled_(false, true, preCastRead->heroCasted[0], false, true)
+        && !CodecSpellControlEnabled_(false, true, decoded.heroCasted[0], false, true),
+        "decoded pre-cast and spent snapshots produce opposite spellbook gates");
     for (int i = 0; i < 8; ++i)
         Expect(decoded.stacks[0][2].infoCombat[i] == 100 + i, "combat info numeric fields");
     Expect(decoded.stacks[0][2].defendingDelta == 7 && decoded.stacks[0][2].animationSpeed == 120,
