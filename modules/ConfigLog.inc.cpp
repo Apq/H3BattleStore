@@ -179,6 +179,15 @@ static int ParseLogLevel_(const char* name)
     return LOG_INFO;
 }
 
+static bool SaveLogLevel_(int level)
+{
+    if (level < LOG_TRACE || level > LOG_ERROR) return false;
+    if (!IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", LogLevelName_(level)))
+        return false;
+    g_log_level = level;
+    return true;
+}
+
 static void LogTrace(const char* fmt, ...);
 static void LogDebug(const char* fmt, ...);
 static void LogInfo(const char* fmt, ...);
@@ -190,6 +199,7 @@ static void ReadConfig()
     char lv[16] = {};
     IniReadUtf8Layered("Logging", "MinLevel", "info", lv, sizeof(lv));
     g_log_level = ParseLogLevel_(lv);
+    // Invalid user values never disable logging: unknown text parses as info.
     LogInfo("配置加载：MinLevel=%s", LogLevelName_(g_log_level));
 }
 
