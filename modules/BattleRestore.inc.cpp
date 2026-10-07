@@ -15,40 +15,6 @@ static RefreshFieldFn const kRefreshField = (RefreshFieldFn)0x493FC0;
 
 static RngSetFn kRngSet = (RngSetFn)0x61841F;
 
-static bool RestoreCaptureValid_(const CodecCapture& capture, std::string* error)
-{
-    if (capture.version != kCodecVersion) { if (error) *error = "capture version"; return false; }
-    if (capture.currentMonSide < 0 || capture.currentMonSide > 1
-        || capture.currentMonIndex < 0 || capture.currentMonIndex > 20) {
-        if (error) *error = "active stack index";
-        return false;
-    }
-    int occupied = 0;
-    for (int side = 0; side < 2; ++side) {
-        for (int slot = 0; slot < 21; ++slot) {
-            const CodecStack& stack = capture.stacks[side][slot];
-            if (!stack.occupied) continue;
-            ++occupied;
-            if (stack.type < 0 || stack.type > 0x95 || !CodecStackPositionValid_(stack)) {
-                if (error) *error = "stack identity";
-                return false;
-            }
-            for (int vector = 0; vector < 4; ++vector) {
-                for (size_t i = 0; i < stack.relations[vector].size(); ++i) {
-                    const CodecIdentity& id = stack.relations[vector][i];
-                    if (id.side < 0 || id.side > 1 || id.slot < 0 || id.slot >= 20
-                        || !capture.stacks[id.side][id.slot].occupied) {
-                        if (error) *error = "relation target";
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-    if (!occupied) { if (error) *error = "empty capture"; return false; }
-    return true;
-}
-
 
 
 static void RestoreStackScalars_(H3CombatCreature* target, const CodecStack& source)
@@ -880,8 +846,12 @@ static bool RestoreSameBattle_(H3CombatManager* mgr, const CodecCapture& capture
     const std::string& expectedKey, std::string* error)
 {
     DiagStage_("restore.preflight");
-    if (!RestoreWindow_(mgr) || !RestoreCaptureValid_(capture, error)) {
-        if (error && error->empty()) *error = "not at outer player message boundary";
+    // 2026-10-07 用户裁定砍掉重复自检层：原 RestoreCaptureValid_ 的全部条件
+    // （version/活动栈索引/栈身份/关系目标/非空）均被 RestorePolicy_ 覆盖且后者
+    // 更严（currentMonIndex<20 vs <=20），只保留写入窗口检查；坏档在解码侧策略
+    // 层拒绝，代价只是多跑一次 Before 采集。
+    if (!RestoreWindow_(mgr)) {
+        if (error) *error = "not at outer player message boundary";
         return false;
     }
     std::string key;
