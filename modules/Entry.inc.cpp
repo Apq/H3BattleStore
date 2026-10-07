@@ -508,6 +508,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
             const bool swallow = inBar || hitList || hitLevelItem || hitUiBlock;
             if (move)
                 return false;
+            if (leftDown && !swallow) UiCancelRebind_("outside mouse click");
             if (leftDown && swallow) {
                 return true;  // 固定左上角，无拖动；抬起才执行点击。
             } else if (leftUp && swallow) {
@@ -572,20 +573,13 @@ static bool CombatMessageBefore_(H3Msg* msg)
                 g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
         return false;
     }
+    // Native hotkeys become 0x200 item commands, not overlay mouse clicks.
+    if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
     const bool onBar = UiHitBar_(msg, true);
     const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
-    if ((onBar || row >= 0 || g_ui.dragging) && msg) {
-        if (msg->command == eMsgCommand::MOUSE_BUTTON) {
-            UiHandleMouse_(msg);
-            return true;
-        }
-        if (msg->command == eMsgCommand::MOUSE_OVER) {
-            UiHandleMouse_(msg);
-            return true;
-        }
-    } else if (msg && msg->command == eMsgCommand::MOUSE_BUTTON
-        && msg->subtype == eMsgSubtype::LBUTTON_DOWN) {
-        if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
+    if (onBar || row >= 0 || g_ui.dragging) {
+        UiHandleMouse_(msg);
+        return true;
     }
     return false;
 }
@@ -622,21 +616,31 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
 {
     ++g_messageDepth;
     int result = 0;
+    H3Msg keyboardInput = {};
+    bool hasKeyboardInput = false;
     __try {
         bool failed = false, consumed = false;
         __try {
-            if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr))
+            if (msg && BattleIsKeyboardMessage_((int)msg->command)) {
+                keyboardInput = *msg;
+                hasKeyboardInput = true;
+            }
+            if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr)) {
+                if (hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR)
+                    DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-before-down" : "space-before-up", 0);
                 consumed = CombatMessageBefore_(msg);
+            }
         }
         __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { failed = true; DiagHookFault_(); }
         result = consumed ? 1 : THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
         if (!failed) {
             __try {
                 if (!g_restoreBusy && !g_restoreFatal && g_messageDepth == 1) {
-                    CombatMessageAfter_(mgr, msg, result);
-                    if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)
-                        && msg->subtype == h3::NH3VKey::H3VK_SPACEBAR && BattleMainDialog_(mgr))
-                        DiagInputState_(mgr, msg->command == eMsgCommand::KEY_DOWN ? "space-down" : "space-up", result);
+                    // The native dialog mutates msg into item commands in place.
+                    if (hasKeyboardInput) CombatMessageAfter_(mgr, &keyboardInput, result);
+                    if (hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
+                        && BattleMainDialog_(mgr))
+                        DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
                     UiProcessRestore_(mgr, result);
                 }
             }
@@ -675,6 +679,9 @@ static void BattleReset_()
     g_ui.battleKey.clear();
     g_ui.hoverRow = -1;
     g_ui.logLevelHover = -1;
+    UiCancelRebind_("battle reset");
+    g_ui.rebindKey = 0;
+    g_ui.rebindGuardUntil = 0;
 
     ClearBattleInputs_();
 }

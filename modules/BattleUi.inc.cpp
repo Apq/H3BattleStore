@@ -755,9 +755,17 @@ static void UiSelectLogLevel_(int level)
     UiMarkNotice_("日志等级已保存");
 }
 
+static void UiCancelRebind_(const char* reason)
+{
+    if (!g_ui.awaitingRebind) return;
+    g_ui.awaitingRebind = false;
+    LogInfo("改键状态已取消：%s", reason ? reason : "unknown");
+}
+
 static void UiConfirmAndRestore_(const UiSaveEntry& entry)
 {
     if (g_restoreBusy || g_restoreFatal || g_restoreRequest.pending || !g_battleInitialized) return;
+    UiCancelRebind_("读档请求");
     // Copy before any dialog or redraw can invalidate the entries vector.
     g_restoreRequest.entry = entry;
     g_restoreRequest.battleKey = g_ui.battleKey;
@@ -1087,6 +1095,7 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
         UiRestoreFailure_("rejected", error);
         return;
     }
+    UiCancelRebind_("读档完成");
     DiagEnd_("serialized-equal", "第五版快照已恢复并通过数据一致性校验；实机轨迹验收仍待验证");
     // Success notice (2026-10-07 用户裁定)：本插件悬浮框醒目色显示几秒，
     // 到时自动回常规状态行；模态弹窗只留给失败。
@@ -1117,49 +1126,8 @@ static void UiHandleMouse_(H3Msg* msg)
         g_ui.logLevelHover = UiHitLogLevelItem_(px, py);
         return;
     }
-    if (msg->command != eMsgCommand::MOUSE_BUTTON) return;
-    // 兜底路径与系统钩子并存（游戏轮询合成消息吞不掉）：不再置拖动，
-    // 常驻列表不切换显隐；点击处理统一由系统钩子 → UiHandleFrameClick_ 完成。
-    if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && UiHitBar_(msg)) {
-        return;
-    }
-    if (msg->subtype == eMsgSubtype::LBUTTON_CLICK) {
-        if (UiHitLogPack_(px, py)) {
-            UiPackLogs_();
-            return;
-        }
-        const int levelItem = UiHitLogLevelItem_(px, py);
-        if (levelItem >= 0) {
-            UiSelectLogLevel_(levelItem);
-            return;
-        }
-        if (UiHitBar_(msg)) {
-            if (px >= g_ui.x + kUiBarWidth - 52) {
-                g_ui.awaitingRebind = true;
-                CancelSaveWait_("rebind entered");
-                return;
-            }
-            UiReloadEntries_(H3CombatManager::Get());
-            return;
-        }
-        const int row = UiHitRow_(px, py);
-        if (row >= 0 && row < (int)g_ui.entries.size()) {
-            UiConfirmAndRestore_(g_ui.entries[row]);
-            return;
-        }
-        return;
-    }
-    if (msg->subtype == eMsgSubtype::RBUTTON_DOWN) {
-        const int row = UiHitRow_(px, py);
-        if (row >= 0 && row < (int)g_ui.entries.size()) {
-            hbs::ArchiveStore store(ArchiveRoot_());
-            hbs::ArchiveRecord record;
-            record.path = g_ui.entries[row].path;
-            std::wstring storeError;
-            if (store.Delete(record, storeError))
-                UiReloadEntries_(H3CombatManager::Get());
-        }
-    }
+    // Do not dispatch 0x200 here: native button hotkeys share that command.
+    // Actual clicks are handled exclusively by the system mouse hook.
 }
 
 static const char* const kUiFreeKeys_ = "BFGKMNUVXY";

@@ -9,6 +9,7 @@
 #include <string>
 #include "../modules/IniUtf8.inc.cpp"
 #include "../modules/ConfigLog.inc.cpp"
+#include "../modules/BattleInputPolicy.hpp"
 
 // Exercise the real CF_HDROP payload without changing the user's clipboard.
 static bool clipboardFail = false;
@@ -66,6 +67,17 @@ static void WriteFixture(const std::wstring& path, int index)
 }
 int wmain(int argc, wchar_t** argv)
 {
+    Check(BattleIsKeyboardMessage_(1) && BattleIsKeyboardMessage_(2)
+        && !BattleIsKeyboardMessage_(0x200), "only original key messages are keyboard input");
+    Check(!BattleUiMayConsumeMessage_(1) && !BattleUiMayConsumeMessage_(2),
+        "Space and other keyboard messages bypass overlay click routing");
+    Check(!BattleUiMayConsumeMessage_(0x200),
+        "Defend/Wait item clicks, hotkeys and redraw commands bypass overlay routing");
+    Check(!BattleUiMayConsumeMessage_(8) && !BattleUiMayConsumeMessage_(16)
+        && !BattleUiMayConsumeMessage_(32) && !BattleUiMayConsumeMessage_(64),
+        "raw mouse transitions are handled only by the system mouse hook");
+    Check(BattleUiMayConsumeMessage_(4), "hover can update overlay state");
+    std::puts("PASS: native commands and keyboard input never enter overlay click routing");
     Check(argc == 2, "fixture directory argument");
     const std::wstring root = argv[1];
     Check(CreateDirectoryW(root.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS,

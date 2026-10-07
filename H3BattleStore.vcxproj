@@ -76,6 +76,7 @@
     <ClInclude Include="modules\BattleRestore.inc.cpp" />
     <ClInclude Include="modules\BattleObjects.inc.cpp" />
     <ClInclude Include="modules\BattleSiege.inc.cpp" />
+    <ClInclude Include="modules\BattleInputPolicy.hpp" />
     <ClInclude Include="modules\BattleUi.inc.cpp" />
     <ClInclude Include="modules\Entry.inc.cpp" />
     <ClInclude Include="resource.h" />
