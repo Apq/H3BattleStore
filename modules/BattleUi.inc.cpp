@@ -109,20 +109,32 @@ static struct
 static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
 static const int GUARD_COPY = GuardRegisterHook_("BattleStore.CopyPixels");
 
+static LogRepeatGate_ g_listFailureLog;
+static void UiListFailure_(const char* phase, const std::string& error)
+{
+    unsigned skipped = 0;
+    if (g_listFailureLog.Admit(GetTickCount(), 30000, &skipped))
+        LogWarn("[List op=%ld] phase=%s failed reason=%s suppressed=%u", g_diag.id, phase, error.c_str(), skipped);
+}
+
 // 返回 true = 指纹与扫描都成功（entries 可信）；false = 本次加载失败（调用方可重试）。
 static bool UiReloadEntries_(const H3CombatManager* mgr)
 {
     g_ui.entries.clear();
     std::string battleKey;
     std::string error;
-    if (!BattleFingerprint_(mgr, &battleKey, &error)) { LogWarn("[List op=%ld] fingerprint failed: %s", g_diag.id, error.c_str()); return false; }
+    if (!BattleFingerprint_(mgr, &battleKey, &error)) { UiListFailure_("fingerprint", error); return false; }
     g_ui.battleKey = battleKey;
     hbs::ArchiveStore store(ArchiveRoot_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
-    if (!store.List(battleKey, "", records, storeError)) { LogWarn("[List op=%ld] scan failed: %s", g_diag.id, DiagUtf8_(storeError).c_str()); return false; }
+    if (!store.List(battleKey, "", records, storeError)) { UiListFailure_("scan", DiagUtf8_(storeError)); return false; }
     if (!storeError.empty()) LogWarn("[List op=%ld] scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
-    LogInfo("[List op=%ld] battle=%s records=%u", g_diag.id, battleKey.c_str(), (unsigned)records.size());
+    LogDebug("[List op=%ld] battle=%s records=%u", g_diag.id, battleKey.c_str(), (unsigned)records.size());
+    if (g_listFailureLog.seen) {
+        LogInfo("[List] recovered suppressed=%u", g_listFailureLog.suppressed);
+        g_listFailureLog = {};
+    }
     g_ui.entries.reserve(records.size());
     for (size_t i = 0; i < records.size(); ++i) {
         UiSaveEntry entry;
@@ -159,7 +171,8 @@ static void UiSaveHotkey_()
 {
     char keyText[8] = {};
     _snprintf(keyText, sizeof(keyText), "%c", g_ui.saveKey);
-    IniWriteKeyUtf8(g_user_ini_path, "Hotkeys", "SaveKey", keyText);
+    if (!IniWriteKeyUtf8(g_user_ini_path, "Hotkeys", "SaveKey", keyText))
+        LogError("[Config] SaveKey persistence failed runtime_key=%c", g_ui.saveKey);
 }
 
 static void UiFormatStamp_(const UiSaveEntry& entry, char* out, size_t cap)
@@ -462,7 +475,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         }
         static DWORD lastDrawInfo = 0;
         const DWORD infoNow = GetTickCount();
-        const bool logInfo = infoNow - lastDrawInfo > 5000;
+        const bool logInfo = LogEnabled_(LOG_TRACE) && infoNow - lastDrawInfo >= 30000;
         if (logInfo) lastDrawInfo = infoNow;
         H3LoadedPcx16* c = g_barComposite;
         // 固定左上角（2026-10-05 用户定稿：不可拖动，每帧同位置重画）。
@@ -623,9 +636,17 @@ static void UiDrawBar_(H3CombatManager* mgr)
         lastX = x;
         lastY = y;
         lastH = totalH;
-        if (logInfo)
-            LogDebug("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
-                c, UiDDBackBuffer_(), x, y, bltOk ? 1 : 0);
+        static LogFailureWindow_ bltFailures;
+        unsigned skipped = 0;
+        const int bltReport = bltFailures.Observe(!bltOk, infoNow, 30000, &skipped);
+        if (bltReport == 1)
+            LogWarn("[Draw] blt failed pos=%d,%d rows=%d suppressed=%u", x, y, rows, skipped);
+        else if (bltReport == 2)
+            LogInfo("[Draw] blt recovered stable_ms=30000 suppressed=%u", skipped);
+        if (rectChanged || logInfo)
+            WriteLogLv(rectChanged ? LOG_DEBUG : LOG_TRACE,
+                "[Draw] composite=%p backbuffer=%p pos=%d,%d rows=%d blt=%d",
+                c, UiDDBackBuffer_(), x, y, rows, bltOk ? 1 : 0);
     } __except (GuardCrashFilter_(GUARD_DRAW, GetExceptionInformation())) {
         redrawing = false;
     }
@@ -995,7 +1016,7 @@ static std::string UiArchiveRestoreReason_(const std::wstring& error, DWORD code
 static void UiRestoreFailure_(const char* outcome, const std::string& raw)
 {
     const std::string reason = UiRestoreReasonZh_(raw);
-    LogWarn("[Load op=%ld] raw=%s reason_zh=%s fatal=%d", g_diag.id, raw.c_str(), reason.c_str(), g_restoreFatal ? 1 : 0);
+    WriteLogLv(g_restoreFatal ? LOG_ERROR : LOG_WARN, "[Load op=%ld] raw=%s reason_zh=%s fatal=%d", g_diag.id, raw.c_str(), reason.c_str(), g_restoreFatal ? 1 : 0);
     // Keep the fatal diagnostic write context; never show a dialog in that state.
     if (g_restoreFatal) return;
     DiagEnd_(outcome, reason.c_str());
@@ -1096,7 +1117,7 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
         return;
     }
     UiCancelRebind_("读档完成");
-    DiagEnd_("serialized-equal", "第五版快照已恢复并通过数据一致性校验；实机轨迹验收仍待验证");
+    DiagEnd_("serialized-equal", "快照已恢复并通过白名单数据校验；实机轨迹验收仍待验证");
     // Success notice (2026-10-07 用户裁定)：本插件悬浮框醒目色显示几秒，
     // 到时自动回常规状态行；模态弹窗只留给失败。
     char done[96] = {};
@@ -1140,7 +1161,7 @@ static bool UiKeyIsFree_(char key)
 static void UiHandleRebindKey_(char key, bool escape)
 {
     if (escape) {
-        g_ui.awaitingRebind = false;
+        UiCancelRebind_("escape");
         g_ui.rebindGuardUntil = GetTickCount() + 400;
         return;
     }
@@ -1150,6 +1171,7 @@ static void UiHandleRebindKey_(char key, bool escape)
         g_ui.awaitingRebind = false;
         g_ui.rebindKey = g_ui.saveKey;  // 该键松开前不触发存档
         g_ui.rebindGuardUntil = GetTickCount() + 400;
+        LogInfo("改键完成：%c source=game", g_ui.saveKey);
     }
 }
 
@@ -1161,7 +1183,7 @@ static void UiPollRebindKey_()
     const int escIndex = (int)strlen(kUiFreeKeys_);
     const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     if (escDown && !prevDown[escIndex]) {
-        g_ui.awaitingRebind = false;
+        UiCancelRebind_("escape-poll");
         g_ui.rebindGuardUntil = GetTickCount() + 400;
         prevDown[escIndex] = escDown;
         return;
@@ -1192,11 +1214,11 @@ static void UiHandleFrameClick_(int gameX, int gameY)
     const int levelItem = UiHitLogLevelItem_(gameX, gameY);
     if (levelItem >= 0) {
         UiSelectLogLevel_(levelItem);
-        LogInfo("点击日志等级行：%d", levelItem);
+        LogDebug("点击日志等级行：%d", levelItem);
         return;
     }
     if (UiPointInUiBlock_(gameX, gameY) && !UiPointInBar_(gameX, gameY)) {
-        LogInfo("点击日志等级块空位（无动作）：(%d,%d)", gameX, gameY);
+        LogDebug("点击日志等级块空位（无动作）：(%d,%d)", gameX, gameY);
         return;
     }
     if (UiPointInBar_(gameX, gameY)) {
@@ -1206,7 +1228,7 @@ static void UiHandleFrameClick_(int gameX, int gameY)
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else {
             UiReloadEntries_(H3CombatManager::Get());
-            LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
+            LogDebug("点击存档列表区域：(%d,%d)", gameX, gameY);
         }
         return;
     }
@@ -1233,6 +1255,7 @@ static void UiHandleFrameRightClick_(int gameX, int gameY)
         UiReloadEntries_(H3CombatManager::Get());
         LogInfo("已删除存档行：%d", row);
     } else {
-        LogError("删除存档失败：行 %d", row);
+        LogError("删除存档失败：行=%d path=%s reason=%s", row,
+            DiagUtf8_(record.path).c_str(), DiagUtf8_(storeError).c_str());
     }
 }

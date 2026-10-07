@@ -65,6 +65,74 @@ static void WriteFixture(const std::wstring& path, int index)
     Check(SetFileTime(h, nullptr, nullptr, &time) != 0, "set fixture ordering");
     CloseHandle(h);
 }
+static std::string ReadFixtureText_(const std::wstring& path)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(file != INVALID_HANDLE_VALUE, "read log fixture");
+    DWORD size = GetFileSize(file, nullptr), read = 0;
+    std::string text(size, '\0');
+    Check(ReadFile(file, &text[0], size, &read, nullptr) && read == size, "read complete log fixture");
+    CloseHandle(file);
+    return text;
+}
+
+static void TestLogPolicies_(const std::wstring& root)
+{
+    Check(LogStageLevel_("capture.stacks") == LOG_DEBUG
+        && LogStageLevel_("restore.commit-objects") == LOG_INFO
+        && LogStageLevel_("restore.rollback") == LOG_WARN, "phase severity policy");
+    Check(LogOutcomeLevel_("rejected", false) == LOG_INFO
+        && LogOutcomeLevel_("cancelled", false) == LOG_INFO
+        && LogOutcomeLevel_("failed", false) == LOG_ERROR
+        && LogOutcomeLevel_("rejected", true) == LOG_ERROR, "outcome severity policy");
+    LogRepeatGate_ gate;
+    unsigned skipped = 0;
+    Check(gate.Admit(0, 30000, &skipped) && skipped == 0, "first error is immediate");
+    Check(!gate.Admit(1, 30000, &skipped) && !gate.Admit(29999, 30000, &skipped), "repeats are suppressed");
+    Check(gate.Admit(30000, 30000, &skipped) && skipped == 2, "interval reports suppressed count");
+    gate = {};
+    Check(gate.Admit(0xFFFFFFF0u, 100, &skipped)
+        && !gate.Admit(0x20u, 100, &skipped)
+        && gate.Admit(0x60u, 100, &skipped) && skipped == 1, "rate limit survives tick wrap");
+    LogFailureWindow_ failure;
+    Check(failure.Observe(true, 0, 30000, &skipped) == 1, "first drawing failure reports");
+    for (DWORD i = 1; i < 30000; ++i)
+        Check(failure.Observe((i & 1) == 0, i, 30000, &skipped) == 0,
+            "alternating failure/success cannot reset rate limit");
+    Check(failure.Observe(true, 30000, 30000, &skipped) == 1 && skipped == 14999,
+        "flapping failures report aggregate once per interval");
+    Check(failure.Observe(false, 59999, 30000, &skipped) == 0
+        && failure.Observe(false, 60000, 30000, &skipped) == 2,
+        "recovery requires continuous quiet interval");
+    LogKeyEdges_ keys;
+    Check(keys.Level(57, true) == LOG_DEBUG && keys.Level(57, true) == LOG_TRACE
+        && keys.Level(57, false) == LOG_DEBUG && keys.Level(57, true) == LOG_DEBUG,
+        "repeat keydowns trace, release and next press debug");
+    Check(keys.Level(58, true) == LOG_DEBUG && keys.Level(57, true) == LOG_TRACE
+        && keys.Level(-1, true) == LOG_TRACE, "independent key latches and invalid key");
+    const std::wstring path = root + L"\\severity-test.txt";
+    Check(path.size() < kPathCap_ / 2, "test log path capacity");
+    wcscpy_s(g_log_path_w, kPathCap_ / 2, path.c_str());
+    g_disable_log = false;
+    g_log_level = LOG_INFO;
+    LogTrace("FILTER_TRACE_HIDDEN"); LogDebug("FILTER_DEBUG_HIDDEN");
+    LogInfo("FILTER_INFO_VISIBLE"); LogWarn("FILTER_WARN_VISIBLE"); LogError("FILTER_ERROR_VISIBLE");
+    g_log_level = LOG_DEBUG;
+    LogDebug("FILTER_DEBUG_VISIBLE"); LogTrace("FILTER_TRACE_STILL_HIDDEN");
+    g_disable_log = true;
+    LogError("FILTER_DISABLED_HIDDEN");
+    const std::string text = ReadFixtureText_(path);
+    Check(text.find("FILTER_INFO_VISIBLE") != std::string::npos
+        && text.find("FILTER_WARN_VISIBLE") != std::string::npos
+        && text.find("FILTER_ERROR_VISIBLE") != std::string::npos
+        && text.find("FILTER_DEBUG_VISIBLE") != std::string::npos
+        && text.find("HIDDEN") == std::string::npos, "real writer filters info/debug/trace/DisableLog");
+    g_log_path_w[0] = 0;
+    g_log_level = LOG_INFO;
+    std::puts("PASS: severity policy, repeat aggregation, tick wrap, actual log level filtering");
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     Check(BattleIsKeyboardMessage_(1) && BattleIsKeyboardMessage_(2)
@@ -82,6 +150,7 @@ int wmain(int argc, wchar_t** argv)
     const std::wstring root = argv[1];
     Check(CreateDirectoryW(root.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS,
         "fixture directory");
+    TestLogPolicies_(root);
     g_disable_log = true;
     g_log_path_w[0] = 0;
     SetPath(g_ini_path, root + L"\\H3BattleStore.default.ini");

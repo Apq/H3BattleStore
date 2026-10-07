@@ -66,6 +66,7 @@
     <ClInclude Include="..\H3API\single_header\H3API.hpp" />
     <ClInclude Include="modules\IniUtf8.inc.cpp" />
     <ClInclude Include="modules\ConfigLog.inc.cpp" />
+    <ClInclude Include="modules\LogPolicy.hpp" />
     <ClInclude Include="modules\LogPack.inc.cpp" />
     <ClInclude Include="modules\CrashGuard.hpp" />
     <ClInclude Include="modules\CrashGuardCore.hpp" />

@@ -6,6 +6,8 @@
 static const int GUARD_KEYBOARD = GuardRegisterHook_("BattleStore.Keyboard");
 static const int GUARD_MOUSE = GuardRegisterHook_("BattleStore.Mouse");
 static const int GUARD_MESSAGE = GuardRegisterHook_("BattleStore.Message");
+static const int GUARD_EXECUTE = GuardRegisterHook_("BattleStore.Execute");
+static LogKeyEdges_ g_commandKeys;
 static const int GUARD_CYCLE = GuardRegisterHook_("BattleStore.Cycle");
 static const int GUARD_BLT = GuardRegisterHook_("BattleStore.AfterBlt");
 static const int GUARD_INIT = GuardRegisterHook_("BattleStore.Init");
@@ -17,11 +19,13 @@ static const char* g_waitReason = nullptr;
 
 static void LogSelfVersion_()
 {
-    wchar_t wpath[MAX_PATH] = {};
-    GetModuleFileNameW(g_hModule, wpath, MAX_PATH);
-    char utf8[MAX_PATH * 3] = {};
+    std::unique_ptr<wchar_t[]> path(new wchar_t[kPathCap_ / 2]());
+    wchar_t* wpath = path.get();
+    GetModuleFileNameW(g_hModule, wpath, kPathCap_ / 2);
+    std::unique_ptr<char[]> utf8Path(new char[kPathCap_]());
+    char* utf8 = utf8Path.get();
     WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utf8,
-        (int)sizeof(utf8), nullptr, nullptr);
+        kPathCap_, nullptr, nullptr);
     char ver[64] = "?";
     DWORD handle = 0;
     const DWORD size = GetFileVersionInfoSizeW(wpath, &handle);
@@ -49,7 +53,7 @@ static void LogSelfVersion_()
     LogInfo("诊断构建=%s compiled=%s %s pid=%lu archive=%u codec=%u ptr=%u mgrSize=%u stackSize=%u",
         kDiagnosticBuild_, __DATE__, __TIME__, GetCurrentProcessId(), (unsigned)hbs::kFormatVersion,
         kCodecVersion, (unsigned)sizeof(void*), (unsigned)sizeof(H3CombatManager), (unsigned)sizeof(H3CombatCreature));
-    LogWarn("[Coverage] codec v3 stable-topology restore; serialized mismatch rollback; runtime/UI/RNG trajectory acceptance pending");
+    LogInfo("[Coverage] codec=%u transactional same-battle restore; mismatch rollback; runtime/UI/RNG trajectory acceptance pending", kCodecVersion);
 }
 
 static bool CombatIsReadable_(const H3CombatManager* mgr)
@@ -296,7 +300,7 @@ static bool TryCaptureCombat_()
         DiagEnd_("failed", error.c_str());
         return false;
     }
-    LogInfo("[Archive op=%ld] battle=%s target=placeholder-zero", g_diag.id, document.battleKey.c_str());
+    LogDebug("[Archive op=%ld] battle=%s target=placeholder-zero", g_diag.id, document.battleKey.c_str());
     DiagStage_("save.encode");
     CodecInvalidateHover_(&capture);
     if (!CodecEncode(capture, &document.sections, &error)) {
@@ -317,7 +321,7 @@ static bool TryCaptureCombat_()
     std::wstring storeError;
     hbs::ArchiveRecord committed;
     DiagStage_("save.write");
-    LogInfo("[Archive op=%ld] root=%s timestamp=%llu", g_diag.id,
+    LogDebug("[Archive op=%ld] root=%s timestamp=%llu", g_diag.id,
         DiagUtf8_(ArchiveRoot_()).c_str(), document.timestampUtcMs);
     if (!store.Save(document, storeError, &committed)) {
         DiagEnd_("failed", DiagUtf8_(storeError).c_str());
@@ -337,7 +341,7 @@ static bool TryCaptureCombat_()
         const hbs::ArchiveSection* actual = FindSection_(readback.sections, document.sections[i].id);
         equal = equal && actual && CodecSectionEqual_(document.sections[i], *actual, nullptr);
     }
-    LogInfo("[Archive op=%ld] readback_crc=ok payload_equal=%d", g_diag.id, equal ? 1 : 0);
+    WriteLogLv(equal ? LOG_INFO : LOG_ERROR, "[Archive op=%ld] readback_crc=ok payload_equal=%d", g_diag.id, equal ? 1 : 0);
     equal = equal && readback.battleKey == committed.battleKey
         && readback.targetKey == committed.targetKey
         && readback.timestampUtcMs == committed.timestampUtcMs
@@ -384,11 +388,11 @@ static volatile LONG g_saveEdgeConsumed = 0;
 static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin)
 {
     if (InterlockedExchange(&g_saveEdgeConsumed, 1)) {
-        LogInfo("[Input] duplicate edge suppressed origin=%s", origin);
+        LogDebug("[Input] duplicate edge suppressed origin=%s", origin);
         return;
     }
     DiagBegin_("save", origin, mgr);
-    LogInfo("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
+    LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
         g_ui.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
     const char* reason = nullptr;
     if (CombatPlayerWindow_(mgr, messageResult, &reason)) {
@@ -432,7 +436,7 @@ static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
         const bool up = (lParam & 0x80000000) != 0;
         const bool repeat = (lParam & 0x40000000) != 0;
         if (letter && (letter == g_ui.saveKey || g_ui.awaitingRebind))
-            LogInfo("[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+            WriteLogLv(repeat && !up ? LOG_TRACE : LOG_DEBUG, "[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
                 up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_ui.saveKey,
                 g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
                 (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
@@ -514,14 +518,14 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
             } else if (leftUp && swallow) {
                 InterlockedExchange(&g_pendingClickX, gameX);
                 InterlockedExchange(&g_pendingClickY, gameY);
-                LogInfo("点击已吞并：game=(%d,%d)", gameX, gameY);
+                LogDebug("点击已吞并：game=(%d,%d)", gameX, gameY);
                 return true;
             } else if (rightDown && swallow) {
                 return true;
             } else if (rightUp && hitList) {
                 InterlockedExchange(&g_pendingRightClickX, gameX);
                 InterlockedExchange(&g_pendingRightClickY, gameY);
-                LogInfo("右键已吞并：game=(%d,%d)", gameX, gameY);
+                LogDebug("右键已吞并：game=(%d,%d)", gameX, gameY);
                 return true;
             } else if (rightUp && swallow) {
                 return true;
@@ -546,14 +550,26 @@ static void EnsureCombatKeyboardHook_()
     const DWORD threadId = GetWindowThreadProcessId(gameWindow, nullptr);
     if (!threadId) return;
     g_combatKeyboardHook = SetWindowsHookExA(WH_KEYBOARD, CombatKeyboardHook_, g_hModule, threadId);
-    if (!g_combatMouseHook)
+    const DWORD keyboardError = g_combatKeyboardHook ? ERROR_SUCCESS : GetLastError();
+    DWORD mouseError = ERROR_SUCCESS;
+    if (!g_combatMouseHook) {
         g_combatMouseHook = SetWindowsHookExA(WH_MOUSE, CombatMouseHook_, g_hModule, threadId);
-    LogInfo("战斗输入钩子：键盘=%s 鼠标=%s hwnd=%p",
-        g_combatKeyboardHook ? "已安装" : "安装失败",
-        g_combatMouseHook ? "已安装" : "安装失败", gameWindow);
+        if (!g_combatMouseHook) mouseError = GetLastError();
+    }
+    static LogRepeatGate_ hookFailures;
+    const bool installed = g_combatKeyboardHook && g_combatMouseHook;
+    unsigned skipped = 0;
+    if (installed || hookFailures.Admit(GetTickCount(), 30000, &skipped)) {
+        if (installed) skipped = hookFailures.suppressed;
+        WriteLogLv(installed ? LOG_INFO : LOG_ERROR,
+            "[Hooks] keyboard=%d mouse=%d keyboard_error=%lu mouse_error=%lu hwnd=%p tid=%lu suppressed=%u",
+            g_combatKeyboardHook ? 1 : 0, g_combatMouseHook ? 1 : 0,
+            keyboardError, mouseError, gameWindow, threadId, skipped);
+    }
+    if (installed) hookFailures = {};
 }
 
-static bool CombatMessageBefore_(H3Msg* msg)
+static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
 {
     if (g_uiWaitSaveUntil && msg) {
         const int cmd = (int)msg->command;
@@ -566,7 +582,7 @@ static bool CombatMessageBefore_(H3Msg* msg)
     if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
         const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
         if (pressed == g_ui.saveKey || g_ui.awaitingRebind)
-            LogInfo("[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+            WriteLogLv(inputLevel, "[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
                 msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
                 (int)msg->subtype, pressed ? pressed : '?', g_ui.saveKey,
                 (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
@@ -584,7 +600,7 @@ static bool CombatMessageBefore_(H3Msg* msg)
     return false;
 }
 
-static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result)
+static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result, int inputLevel)
 {
     if (!msg || (msg->command != eMsgCommand::KEY_DOWN && msg->command != eMsgCommand::KEY_UP)) return;
     const DWORD now = GetTickCount();
@@ -599,17 +615,31 @@ static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result)
         const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
         if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
             if (!downNow) g_ui.rebindKey = 0;
-            LogInfo("[Input] save suppressed source=game reason=rebind-latch");
+            WriteLogLv(inputLevel, "[Input] save suppressed source=game reason=rebind-latch");
         } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
             && now >= g_ui.rebindGuardUntil) {
             TrySave_(mgr, result, "game-message");
         } else {
-            LogInfo("[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
+            WriteLogLv(inputLevel, "[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
                 downNow ? 1 : 0, msgKeyWasDown ? 1 : 0, g_uiWaitSaveUntil ? 1 : 0,
                 now < g_ui.rebindGuardUntil ? 1 : 0);
         }
         msgKeyWasDown = downNow;
     }
+}
+
+static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
+    const H3Msg* translated, const char* phase, int result, int level)
+{
+    if (!LogEnabled_(level) || !CombatIsReadable_(mgr)) return;
+    WriteLogLv(level, "[Command] phase=%s generation=%u depth=%d cmd=%d subtype=%d item=%d pos=%d,%d translated=%d/%d/%d result=%d action=%d/%d/%d/%d current=%d:%d activeSide=%d rebind=%d control=%d",
+        phase, g_battleGeneration, g_messageDepth, (int)input.command, (int)input.subtype,
+        input.itemId, input.position.x, input.position.y,
+        translated ? (int)translated->command : -1, translated ? (int)translated->subtype : -1,
+        translated ? translated->itemId : -1, result, (int)mgr->action,
+        mgr->actionParameter, mgr->actionTarget, mgr->actionParameter2,
+        mgr->currentMonSide, mgr->currentMonIndex, mgr->currentActiveSide,
+        g_ui.awaitingRebind ? 1 : 0, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)));
 }
 
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
@@ -618,27 +648,40 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
     int result = 0;
     H3Msg keyboardInput = {};
     bool hasKeyboardInput = false;
+    H3Msg commandInput = {};
+    bool hasCommandInput = false;
+    int inputLevel = LOG_DEBUG;
     __try {
         bool failed = false, consumed = false;
         __try {
             if (msg && BattleIsKeyboardMessage_((int)msg->command)) {
                 keyboardInput = *msg;
                 hasKeyboardInput = true;
+                inputLevel = g_commandKeys.Level((int)keyboardInput.subtype,
+                    keyboardInput.command == eMsgCommand::KEY_DOWN);
             }
             if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr)) {
-                if (hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR)
+                if (LogEnabled_(LOG_DEBUG) && msg
+                    && (hasKeyboardInput || ((int)msg->command == 0x200
+                        && ((int)msg->subtype == 0xC || (int)msg->subtype == 0xD)))) {
+                    commandInput = *msg;
+                    hasCommandInput = true;
+                    DiagCommand_(mgr, commandInput, nullptr, "before", 0, inputLevel);
+                }
+                if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR)
                     DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-before-down" : "space-before-up", 0);
-                consumed = CombatMessageBefore_(msg);
+                consumed = CombatMessageBefore_(msg, inputLevel);
             }
         }
         __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { failed = true; DiagHookFault_(); }
         result = consumed ? 1 : THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
         if (!failed) {
             __try {
+                if (hasCommandInput) DiagCommand_(mgr, commandInput, msg, consumed ? "overlay-consumed" : "after", result, inputLevel);
                 if (!g_restoreBusy && !g_restoreFatal && g_messageDepth == 1) {
                     // The native dialog mutates msg into item commands in place.
-                    if (hasKeyboardInput) CombatMessageAfter_(mgr, &keyboardInput, result);
-                    if (hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
+                    if (hasKeyboardInput) CombatMessageAfter_(mgr, &keyboardInput, result, inputLevel);
+                    if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
                         && BattleMainDialog_(mgr))
                         DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
                     UiProcessRestore_(mgr, result);
@@ -660,8 +703,28 @@ static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int
 {
     ++g_executorDepth;
     int result = 0;
+    int actionBefore = -1;
     // finally only repairs depth; exceptions from the original still propagate.
-    __try { result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter); }
+    __try {
+        __try {
+            if (LogEnabled_(LOG_DEBUG) && CombatIsReadable_(mgr)) {
+                actionBefore = (int)mgr->action;
+                LogDebug("[Execute] begin generation=%u depth=%d action=%d/%d/%d/%d turn=%d current=%d:%d active=%p",
+                    g_battleGeneration, g_executorDepth, actionBefore, mgr->actionParameter,
+                    mgr->actionTarget, mgr->actionParameter2, mgr->turn,
+                    mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack);
+            }
+        }
+        __except (GuardCrashFilter_(GUARD_EXECUTE, GetExceptionInformation())) {}
+        result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter);
+        __try {
+            if (actionBefore >= 0 && CombatIsReadable_(mgr))
+                LogDebug("[Execute] end generation=%u depth=%d action_before=%d action_after=%d result=%d turn=%d current=%d:%d active=%p",
+                    g_battleGeneration, g_executorDepth, actionBefore, (int)mgr->action,
+                    result, mgr->turn, mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack);
+        }
+        __except (GuardCrashFilter_(GUARD_EXECUTE, GetExceptionInformation())) {}
+    }
     __finally { --g_executorDepth; }
     return result;
 }
@@ -679,6 +742,9 @@ static void BattleReset_()
     g_ui.battleKey.clear();
     g_ui.hoverRow = -1;
     g_ui.logLevelHover = -1;
+    if (g_listFailureLog.seen) LogWarn("[List] reset suppressed=%u", g_listFailureLog.suppressed);
+    g_listFailureLog = {};
+    g_commandKeys = {};
     UiCancelRebind_("battle reset");
     g_ui.rebindKey = 0;
     g_ui.rebindGuardUntil = 0;
@@ -693,17 +759,25 @@ static int __stdcall Hook_BattleStart_(HiHook* hook, H3CombatManager* mgr, int p
         BattleReset_();
         g_battleThread = GetCurrentThreadId();
         if (BattleInitialFingerprint_(mgr, &g_preBattleKey_, nullptr)) g_preBattleManager_ = mgr;
+        else LogWarn("[Battle] fingerprint failed generation=%u mgr=%p", g_battleGeneration, mgr);
     }
     __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
     const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter);
-    __try { g_battleInitialized = CombatIsReadable_(mgr) && mgr->dlg && !mgr->finished; }
+    __try {
+        g_battleInitialized = CombatIsReadable_(mgr) && mgr->dlg && !mgr->finished;
+        LogInfo("[Battle] start generation=%u mgr=%p initialized=%d result=%d key=%s",
+            g_battleGeneration, mgr, g_battleInitialized ? 1 : 0, result, g_preBattleKey_.c_str());
+    }
     __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
     return result;
 }
 
 static void __stdcall Hook_BattleStop_(HiHook* hook, H3CombatManager* mgr)
 {
-    __try { BattleReset_(); }
+    __try {
+        LogInfo("[Battle] stop generation=%u mgr=%p pending_load=%d", g_battleGeneration, mgr, g_restoreRequest.pending ? 1 : 0);
+        BattleReset_();
+    }
     __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
     THISCALL_1(void, hook->GetDefaultFunc(), mgr);
 }
@@ -734,15 +808,22 @@ static void UiPollLogLevelHover_()
 static void CombatCycleAfter_(H3CombatManager* mgr, int result)
 {
     static DWORD lastFrame = 0;
-
+    static H3CombatManager* lastManager = nullptr;
+    static H3CombatDlg* lastDialog = nullptr;
+    static unsigned lastGeneration = ~0u;
     const DWORD now = GetTickCount();
     const bool readable = CombatIsReadable_(mgr);
-    if (now - lastFrame > 1000) {
-        LogDebug("战斗绘制帧：mgr=%p readable=%d finished=%d dlg=%p cycleResult=%d",
-            mgr, readable ? 1 : 0,
-            readable ? (mgr->finished ? 1 : 0) : -1,
-            readable ? mgr->dlg : nullptr, result);
+    H3CombatDlg* dialog = readable ? mgr->dlg : nullptr;
+    const bool changed = mgr != lastManager || dialog != lastDialog || g_battleGeneration != lastGeneration;
+    if (changed || (LogEnabled_(LOG_TRACE) && now - lastFrame >= 30000)) {
+        WriteLogLv(changed ? LOG_DEBUG : LOG_TRACE,
+            "[Frame] generation=%u mgr=%p readable=%d finished=%d dlg=%p cycleResult=%d",
+            g_battleGeneration, mgr, readable ? 1 : 0,
+            readable ? (mgr->finished ? 1 : 0) : -1, dialog, result);
         lastFrame = now;
+        lastManager = mgr;
+        lastDialog = dialog;
+        lastGeneration = g_battleGeneration;
     }
     if (readable && !mgr->finished && mgr->dlg) {
         if (g_battleInitialized && g_battleListDirty && BattleMainDialog_(mgr)) {
@@ -776,9 +857,10 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed) LogInfo("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
+        if (pressed) LogDebug("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
             pressed, g_ui.saveKey, (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0,
-            keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-');
+            keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
+            g_uiWaitSaveUntil ? 1 : 0);
         if (pressed == g_ui.saveKey && !g_ui.awaitingRebind) {
             const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
             if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
@@ -819,7 +901,7 @@ static void StartPlugin()
     _PI->WriteHiHook(0x473A00, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatMessage_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
     _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
-    LogInfo("战斗存档：第五版可逆事务已启用，实机恢复验收尚未完成。");
+    LogInfo("战斗存档：codec=%u 可逆事务已启用，实机恢复验收尚未完成。", kCodecVersion);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)

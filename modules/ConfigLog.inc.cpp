@@ -156,6 +156,12 @@ enum LogLevel {
     LOG_ERROR = 4,
 };
 static int g_log_level = LOG_INFO;
+#include "LogPolicy.hpp"
+
+static bool LogEnabled_(int level)
+{
+    return !g_disable_log && level >= g_log_level;
+}
 
 static const char* LogLevelName_(int level)
 {
@@ -206,6 +212,9 @@ static void ReadConfig()
     IniReadUtf8Layered("Logging", "MinLevel", "info", lv, sizeof(lv));
     g_log_level = ParseLogLevel_(lv);
     // Invalid user values never disable logging: unknown text parses as info.
+    if (_stricmp(lv, "trace") && _stricmp(lv, "debug") && _stricmp(lv, "info")
+        && _stricmp(lv, "warn") && _stricmp(lv, "warning") && _stricmp(lv, "error"))
+        LogWarn("[Config] invalid MinLevel=%s; fallback=info", lv);
     LogInfo("配置加载：MinLevel=%s", LogLevelName_(g_log_level));
 }
 

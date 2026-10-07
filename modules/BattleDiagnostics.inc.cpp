@@ -1,5 +1,5 @@
 // 单游戏线程操作上下文。仅在请求/阶段变化时落盘，不逐帧刷战场状态。
-static const char* kDiagnosticBuild_ = "battle-diag-20261007-shadow-layout-v6";
+static const char* kDiagnosticBuild_ = "battle-diag-20261007-log-audit-v6";
 static LONG g_diagSequence = 0;
 static struct {
     LONG id;
@@ -33,21 +33,21 @@ static void DiagState_(const H3CombatManager* mgr, const char* event)
         if (firstMoving < 0) firstMoving = i;
         ++moving;
     }
-    LogInfo("[State op=%ld] event=%s mgr=%p dlg=%p turn=%d current=%d:%d active=%p activeSide=%d finished=%d auto=%d tactics=%d wait=%d undergoing=%d moving=%d action=%d/%d/%d/%d",
+    LogDebug("[State op=%ld] event=%s mgr=%p dlg=%p turn=%d current=%d:%d active=%p activeSide=%d finished=%d auto=%d tactics=%d wait=%d any_action_taken=%d path_nonzero=%d action=%d/%d/%d/%d",
         g_diag.id, event, mgr, mgr->dlg, mgr->turn, mgr->currentMonSide, mgr->currentMonIndex,
         mgr->activeStack, mgr->currentActiveSide, (int)mgr->finished, (int)mgr->autoCombat,
         (int)mgr->tacticsPhase, mgr->waitPhase, (int)*((const uint8_t*)mgr + 0x14030), moving,
         (int)mgr->action, (int)mgr->actionParameter, (int)mgr->actionTarget, (int)mgr->actionParameter2);
-    if (moving) LogInfo("[State op=%ld] first_moving=%d", g_diag.id, firstMoving);
+    if (moving) LogDebug("[State op=%ld] first_path_nonzero=%d", g_diag.id, firstMoving);
 }
 
 static void DiagInputState_(const H3CombatManager* mgr, const char* event, int result)
 {
-    if (!CombatIsReadable_(mgr) || !mgr->dlg) return;
+    if (!LogEnabled_(LOG_DEBUG) || !CombatIsReadable_(mgr) || !mgr->dlg) return;
     H3DlgItem* wait = mgr->dlg->GetH3DlgItem(0x7D9);
     H3DlgItem* defend = mgr->dlg->GetH3DlgItem(0x7DA);
-    LogInfo("[InputState] event=%s result=%d control=%d current=%d:%d active=%p action=%d wait_phase=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
-        event, result, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),
+    LogDebug("[InputState op=%ld] event=%s result=%d control=%d current=%d:%d active=%p action=%d wait_phase=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
+        g_diag.id, event, result, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),
         mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack, (int)mgr->action,
         *((const uint8_t*)mgr + 0x13DE4),
         wait ? (wait->IsEnabled() ? 1 : 0) : -1,
@@ -72,7 +72,7 @@ static void DiagBegin_(const char* kind, const char* origin, const H3CombatManag
 static void DiagStage_(const char* stage)
 {
     const DWORD now = GetTickCount();
-    LogInfo("[Op %ld] stage=%s previous=%s previous_ms=%lu elapsed_ms=%lu writing=%d",
+    WriteLogLv(LogStageLevel_(stage), "[Op %ld] stage=%s previous=%s previous_ms=%lu elapsed_ms=%lu writing=%d",
         g_diag.id, stage, g_diag.stage ? g_diag.stage : "none",
         now - g_diag.stageStarted, now - g_diag.started, g_diag.writing ? 1 : 0);
     g_diag.stage = stage;
@@ -88,7 +88,7 @@ static void DiagCursor_(int side, int slot)
 
 static void DiagEnd_(const char* outcome, const char* reason)
 {
-    WriteLogLv(strcmp(outcome, "ok") == 0 || strcmp(outcome, "cancelled") == 0 || strcmp(outcome, "serialized-equal") == 0 ? LOG_INFO : LOG_WARN,
+    WriteLogLv(LogOutcomeLevel_(outcome, g_diag.writing),
         "[Op %ld] end kind=%s outcome=%s stage=%s side=%d slot=%d elapsed_ms=%lu writing=%d reason=%s",
         g_diag.id, g_diag.kind ? g_diag.kind : "none", outcome,
         g_diag.stage ? g_diag.stage : "none", g_diag.side, g_diag.slot,
@@ -123,9 +123,10 @@ static void DiagSummary_(const CodecCapture& capture, const char* event)
 
 static void DiagSections_(const std::vector<hbs::ArchiveSection>& sections, const char* event)
 {
+    if (!LogEnabled_(LOG_DEBUG)) return;
     for (size_t i = 0; i < sections.size(); ++i) {
         const hbs::ArchiveSection& s = sections[i];
-        LogInfo("[Section op=%ld] event=%s id=%u bytes=%u crc32=%08X", g_diag.id, event, s.id,
+        LogDebug("[Section op=%ld] event=%s id=%u bytes=%u crc32=%08X", g_diag.id, event, s.id,
             (unsigned)s.bytes.size(), hbs::detail::Crc32(s.bytes.data(), s.bytes.size()));
     }
 }
@@ -156,7 +157,7 @@ static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& e
         const hbs::ArchiveSection* got = FindSection_(current, saved[i].id);
         size_t first = 0;
         const bool match = got && CodecSectionEqual_(saved[i], *got, &first);
-        WriteLogLv(match ? LOG_INFO : LOG_WARN,
+        WriteLogLv(match ? LOG_DEBUG : LOG_WARN,
             "[Verify op=%ld] section=%u equal=%d expected_bytes=%u actual_bytes=%u first_diff=%u expected_crc=%08X actual_crc=%08X",
             g_diag.id, saved[i].id, match ? 1 : 0, (unsigned)saved[i].bytes.size(),
             got ? (unsigned)got->bytes.size() : 0, (unsigned)first,
@@ -182,6 +183,7 @@ static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& e
         }
         equal = equal && match;
     }
+    WriteLogLv(equal ? LOG_INFO : LOG_WARN, "[Verify op=%ld] sections=%u serialized_equal=%d", g_diag.id, (unsigned)saved.size(), equal ? 1 : 0);
     DiagState_(mgr, "after-restore");
     return equal;
 }

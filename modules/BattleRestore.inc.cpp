@@ -492,7 +492,7 @@ struct RestoreObstacleResources_
                 }
             }
         }
-        LogInfo("[Restore op=%ld] obstacle resources pinned=%u for forward/rollback", g_diag.id, (unsigned)owned.size());
+        LogDebug("[Restore op=%ld] obstacle resources pinned=%u for forward/rollback", g_diag.id, (unsigned)owned.size());
         return true;
     }
 };
@@ -750,7 +750,7 @@ static void RestoreBottomControls_(H3CombatManager* mgr)
     mgr->dlg->SendCommandToItem(defendEnabled ? 6 : 5, 0x7DA, 0x1000);
     H3DlgItem* wait = mgr->dlg->GetH3DlgItem(0x7D9);
     H3DlgItem* defend = mgr->dlg->GetH3DlgItem(0x7DA);
-    LogInfo("[Controls op=%ld] restored wait=%d defend=%d control=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
+    LogDebug("[Controls op=%ld] restored wait=%d defend=%d control=%d wait_enabled=%d wait_shaded=%d defend_enabled=%d defend_shaded=%d",
         g_diag.id, waitEnabled ? 1 : 0, defendEnabled ? 1 : 0,
         *((const int32_t*)((const uint8_t*)mgr + 0x132B4)),
         wait ? (wait->IsEnabled() ? 1 : 0) : -1,
@@ -764,7 +764,7 @@ static void RestoreRenderSeed_(H3CombatManager* mgr, const CodecCapture& capture
     const int marked = RestoreMarkCreatureFrames_(mgr, capture);
     for (int tower = 0; tower < 3; ++tower)
         *((uint8_t*)mgr + 0x1402C + tower) = capture.towers[tower].defName[0] ? 1 : 0;
-    LogInfo("[Render op=%ld] creature_frames=%d empty_or_reserved_skipped=%d", g_diag.id, marked, 42 - marked);
+    LogDebug("[Render op=%ld] creature_frames=%d empty_or_reserved_skipped=%d", g_diag.id, marked, 42 - marked);
     DiagStage_("restore.render-creatures");
     kRefreshCreature(mgr);
     DiagStage_("restore.render-field");
