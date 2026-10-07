@@ -60,11 +60,16 @@ static const int kUiRowHeight = 18;
 static const int kUiListMaxRows = 10;
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
-// 日志等级常驻单选列表：条内小框显示当前等级，条下五行选项固定可见。
-static const int kUiLogLevelWidth = 62;
-static const int kUiLogLevelX = kUiBarWidth - 58 - kUiLogLevelWidth - 4;
-static const int kUiLogLevelRows = 5;  // trace..error
-static const int kUiLogLevelRowHeight = 18;
+// HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
+static const int kUiLogPackX = 392;
+static const int kUiLogPackWidth = 84;
+static const int kUiLogLevelCellWidth = 76;
+static const int kUiLogLevelPerRow = 5;
+static const int kUiLogLevelRowHeight = kUiBarHeight;
+static const int kUiLogLevelRows = 5;
+static const int kUiLogLevelBlockH = kUiBarHeight;
+static const int kUiBarTopOffset = kUiBarHeight;
+static const int kUiBgHeight = 2 * kUiBarHeight;
 static const char* const kUiLogLevelNames_[5] = {"trace", "debug", "info", "warn", "error"};
 
 struct UiSaveEntry
@@ -229,25 +234,26 @@ static WORD UiRgb8888To565_(DWORD c)
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
 
-// 加载 DLL 同目录 img\HB_bg.pcx（成品图 480x24，24 位 3 平面 PCX）：
-// 仅悬浮条本体一行；金框/键位小框已离线烘焙进图，运行时整图粘贴。
-// 下拉列表超出悬浮框，不使用背景图（2026-10-05 用户明确）。
-static H3LoadedPcx16* UiLoadBarBg_()
+// 单张两行底图，沿用 RGB 三平面 PCX 解码与游戏位深转换路径。
+static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached, bool& failed)
 {
-    if (g_barBg || g_barBgFailed)
-        return g_barBg;
-    g_barBgFailed = true;  // 失败只试一次；成功路径最后复位
+    if (cached || failed) return cached;
+    failed = true;
 
-    wchar_t* wpath = new(std::nothrow) wchar_t[MAX_PATH + 32]();
+    const size_t pathCap = kPathCap_ / 2;
+    wchar_t* wpath = new(std::nothrow) wchar_t[pathCap]();
     if (!wpath) return nullptr;
-    GetModuleFileNameW(g_hModule, wpath, MAX_PATH + 30);
+    const DWORD length = GetModuleFileNameW(g_hModule, wpath, (DWORD)pathCap);
+    if (!length || length >= pathCap) { delete[] wpath; return nullptr; }
     wchar_t* slash = wcsrchr(wpath, L'\\');
-    if (!slash) { delete[] wpath; return nullptr; }
-    wcscpy_s(slash + 1, 24, L"img\\HB_bg.pcx");
+    if (!slash || wcscpy_s(slash + 1, pathCap - (slash + 1 - wpath), filename) != 0) {
+        delete[] wpath;
+        return nullptr;
+    }
 
     FILE* file = nullptr;
     if (_wfopen_s(&file, wpath, L"rb") != 0 || !file) {
-        LogWarn("背景图加载失败：img\\HA_bg.pcx");
+        LogWarn("背景图加载失败：%ls", filename);
         delete[] wpath;
         return nullptr;
     }
@@ -274,7 +280,7 @@ static H3LoadedPcx16* UiLoadBarBg_()
     const int width = xmax - xmin + 1;
     const int height = ymax - ymin + 1;
     if (encoded[0] != 0x0A || encoded[2] != 1 || bpp != 8 || planes != 3
-        || width < kUiBarWidth || height < kUiBarHeight || bpl < width) {
+        || width != kUiBarWidth || height != kUiBgHeight || bpl < width) {
         LogWarn("背景图格式不符：w=%d h=%d bpp=%d planes=%d", width, height, bpp, planes);
         free(encoded);
         return nullptr;
@@ -300,9 +306,9 @@ static H3LoadedPcx16* UiLoadBarBg_()
     free(encoded);
     if (outPos != rawSize) { free(raw); return nullptr; }
 
-    g_barBg = H3LoadedPcx16::Create(width, height);
-    if (!g_barBg || !g_barBg->buffer) {
-        if (g_barBg) { g_barBg->Destroy(); g_barBg = nullptr; }
+    cached = H3LoadedPcx16::Create(width, height);
+    if (!cached || !cached->buffer) {
+        if (cached) { cached->Destroy(); cached = nullptr; }
         free(raw);
         return nullptr;
     }
@@ -311,7 +317,7 @@ static H3LoadedPcx16* UiLoadBarBg_()
         const BYTE* red = raw + (size_t)py * bpl * planes;
         const BYTE* green = red + bpl;
         const BYTE* blue = green + bpl;
-        BYTE* row = g_barBg->buffer + (size_t)py * g_barBg->scanlineSize;
+        BYTE* row = cached->buffer + (size_t)py * cached->scanlineSize;
         if (out32) {
             DWORD* pixels = (DWORD*)row;
             for (int px = 0; px < width; ++px)
@@ -323,19 +329,25 @@ static H3LoadedPcx16* UiLoadBarBg_()
         }
     }
     free(raw);
-    g_barBgFailed = false;
-    LogInfo("背景图已加载：%dx%d", width, height);
-    return g_barBg;
+    failed = false;
+    LogInfo("背景图已加载：%ls %dx%d", filename, width, height);
+    return cached;
+}
+
+// HB_bg.pcx: centered HA_bg texture with baked gold border, one 480x48 image.
+static H3LoadedPcx16* UiLoadBarBg_()
+{
+    return UiLoadBg_(L"img\\HB_bg.pcx", g_barBg, g_barBgFailed);
 }
 
 // 同位深 pcx16 区域复制（src/dst 均按当前游戏位深分配，行内逐像素等宽）。
 static void UiCopyBgRegion_(H3LoadedPcx16* dst, const H3LoadedPcx16* src,
-    int srcX, int srcY, int w, int h)
+    int srcX, int srcY, int w, int h, int dstY)
 {
     const size_t px = H3BitMode::Get() == 4 ? 4 : 2;
     for (int row = 0; row < h; ++row) {
         const BYTE* s = src->buffer + (size_t)(srcY + row) * src->scanlineSize + (size_t)srcX * px;
-        BYTE* d = dst->buffer + (size_t)row * dst->scanlineSize;
+        BYTE* d = dst->buffer + (size_t)(dstY + row) * dst->scanlineSize;
         memcpy(d, s, (size_t)w * px);
     }
 }
@@ -442,8 +454,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         H3WindowManager* wnd = H3WindowManager::Get();
         H3Font* font = H3SmallFont::Get();
         if (!wnd || !font || !UiDDBackBuffer_()) return;
-        const int compositeH = kUiBarHeight + kUiListMaxRows * kUiRowHeight
-            + kUiLogLevelRows * kUiLogLevelRowHeight;
+        const int compositeH = kUiLogLevelBlockH + kUiBarHeight + kUiListMaxRows * kUiRowHeight;
         if (!g_barComposite || !g_barComposite->buffer) {
             if (g_barComposite) g_barComposite->Destroy();
             g_barComposite = H3LoadedPcx16::Create(kUiBarWidth, compositeH);
@@ -465,7 +476,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
             : 0;
         // 列表高度随实际行数自适应（2026-10-05 用户实测纠正：固定满高会显示
         // 一堆空行背景板）；成品图行分隔线在每行底部，任意行数展开底边闭合。
-        const int usedH = kUiBarHeight + rows * kUiRowHeight;
+        const int usedH = kUiLogLevelBlockH + kUiBarHeight + rows * kUiRowHeight;
         // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
         // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
         static int lastX = -1;
@@ -476,23 +487,21 @@ static void UiDrawBar_(H3CombatManager* mgr)
             lastX = lastY = lastH = -1;
             lastMgr = mgr;
         }
-        // 日志等级列表矩形固定（五行恒在），残影跟踪只需跟随存档列表行数。
-        const int totalH = kUiBarHeight + rows * kUiRowHeight;
+        // 两行悬浮框矩形恒定，残影跟踪只跟随存档列表行数。
+        const int totalH = usedH;
         const bool rectChanged = lastX != x || lastY != y || lastH != totalH;
         // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
-        c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 0, 0, 0);
-        c->FillRectangle(0, kUiBarHeight, kUiListWidth, kUiListMaxRows * kUiRowHeight, 0, 0, 0);
-        c->FillRectangle(kUiLogLevelX, kUiBarHeight, kUiLogLevelWidth - 2,
-            kUiLogLevelRows * kUiLogLevelRowHeight, 0, 0, 0);
-        // 背景：成品图 HB_bg.pcx 只贴悬浮条本体一行（金框已烘焙）；
-        // 下拉列表超出悬浮框，不用背景图（2026-10-05 用户明确），纯色+代码框。
+        c->FillRectangle(0, 0, kUiBarWidth, kUiLogLevelBlockH, 0, 0, 0);
+        c->FillRectangle(0, kUiBarTopOffset, kUiBarWidth, kUiBarHeight, 0, 0, 0);
+        c->FillRectangle(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
+            kUiListMaxRows * kUiRowHeight, 0, 0, 0);
         H3LoadedPcx16* bg = UiLoadBarBg_();
         const bool bgOk = bg && bg->buffer
-            && bg->width >= kUiBarWidth && bg->height >= kUiBarHeight;
+            && bg->width == kUiBarWidth && bg->height == kUiBgHeight;
         if (bgOk) {
-            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, kUiBarHeight);
+            UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, kUiBgHeight, 0);
             // 下拉列表底色 = 背景图主色（2026-10-06 用户裁定：选项底色接近背景图，
-            // 不要黑蓝对比）。稀疏采样均值做主色；480x24 图 /3 /8 仅数百点，每帧可算。
+            // 不要黑蓝对比）。稀疏采样均值做主色，两行图仍仅千余点。
             long sumR = 0, sumG = 0, sumB = 0;
             long count = 0;
             const bool src32 = H3BitMode::Get() == 4;
@@ -512,15 +521,15 @@ static void UiDrawBar_(H3CombatManager* mgr)
             }
         }
         else {
-            c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
-            c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
-            // 无背景图时退回悬浮条暗色系
+            c->FillRectangle(0, 0, kUiBarWidth, kUiBgHeight, 20, 20, 20);
+            c->DrawFrame(0, 0, kUiBarWidth, kUiBgHeight, 200, 180, 90);
             g_ui.listR = 20; g_ui.listG = 20; g_ui.listB = 20;
         }
         if (rows > 0) {
-            c->FillRectangle(0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
+            c->FillRectangle(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
                 (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
-            c->DrawFrame(0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight, 160, 140, 70);
+            c->DrawFrame(0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
+                rows * kUiRowHeight, 160, 140, 70);
         }
         char label[128] = {};
         eTextColor labelColor = eTextColor::WHITE;
@@ -546,49 +555,45 @@ static void UiDrawBar_(H3CombatManager* mgr)
             _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_ui.entries.size());
             UiToGbk_(utf8, label, sizeof(label));
         }
-        font->TextDraw(c, label, 6, 0, kUiLogLevelX - 10, kUiBarHeight,
+        font->TextDraw(c, label, 6, kUiBarTopOffset, kUiBarWidth - 58 - 10, kUiBarHeight,
             labelColor, eTextAlignment::MIDDLE_LEFT);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
         UiToGbk_(keyUtf8, key, sizeof(key));
-        // 日志等级状态框：仅显示当前等级；选择在条下常驻单选列表完成，点击无动作。
+        font->TextDraw(c, key, kUiBarWidth - 58, kUiBarTopOffset, 52, kUiBarHeight,
+            eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+        c->DrawFrame(kUiBarWidth - 58, kUiBarTopOffset + 2, 54, kUiBarHeight - 4, 220, 200, 110);
+        // 固定横排五级，不展开收起；选中与悬停只重绘同一矩形。
         const int levelNow = (g_log_level >= LOG_TRACE && g_log_level <= LOG_ERROR)
             ? g_log_level : LOG_INFO;
-        char levelGbk[16] = {};
-        UiToGbk_(kUiLogLevelNames_[levelNow], levelGbk, sizeof(levelGbk));
-        font->TextDraw(c, levelGbk, kUiLogLevelX, 0, kUiLogLevelWidth - 6,
-            kUiBarHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiLogLevelX, 2, kUiLogLevelWidth - 2, kUiBarHeight - 4, 220, 200, 110);
-        font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
-            eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
-        // 常驻单选列表：固定五行，当前项绿色标注，悬停行浅色高亮。
-        // 不做展开/收起——每帧 blt 矩形稳定，从源头避免开合残影（2026-10-07 用户裁定）。
-        {
-            const int listY = kUiBarHeight;
-            const int popX = kUiLogLevelX;
-            for (int i = 0; i < kUiLogLevelRows; ++i) {
-                const int fillR = i == g_ui.logLevelHover ? 90
-                    : (i == levelNow ? 70 : g_ui.listR);
-                const int fillG = i == g_ui.logLevelHover ? 70
-                    : (i == levelNow ? 55 : g_ui.listG);
-                const int fillB = i == g_ui.logLevelHover ? 20
-                    : (i == levelNow ? 25 : g_ui.listB);
-                c->FillRectangle(popX, listY + i * kUiLogLevelRowHeight,
-                    kUiLogLevelWidth - 2, kUiLogLevelRowHeight, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
-                char itemGbk[16] = {};
-                UiToGbk_(kUiLogLevelNames_[i], itemGbk, sizeof(itemGbk));
-                font->TextDraw(c, itemGbk, popX + 2, listY + i * kUiLogLevelRowHeight,
-                    kUiLogLevelWidth - 8, kUiLogLevelRowHeight,
-                    i == levelNow ? eTextColor::LIGHT_GREEN : eTextColor::WHITE,
-                    eTextAlignment::MIDDLE_LEFT);
+        for (int i = 0; i < kUiLogLevelRows; ++i) {
+            const int cellX = (i % kUiLogLevelPerRow) * kUiLogLevelCellWidth;
+            const int cellY = (i / kUiLogLevelPerRow) * kUiLogLevelRowHeight;
+            if (i == g_ui.logLevelHover || i == levelNow) {
+                const int fillR = i == g_ui.logLevelHover ? 90 : 70;
+                const int fillG = i == g_ui.logLevelHover ? 70 : 55;
+                const int fillB = i == g_ui.logLevelHover ? 20 : 25;
+                c->FillRectangle(cellX + 3, cellY + 3, kUiLogLevelCellWidth - 6,
+                    kUiLogLevelRowHeight - 6, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
             }
-            c->DrawFrame(popX, listY, kUiLogLevelWidth - 2,
-                kUiLogLevelRows * kUiLogLevelRowHeight, 160, 140, 70);
+            char itemUtf8[24] = {};
+            const char* mark = i == levelNow ? "(*) " : "( ) ";
+            _snprintf(itemUtf8, sizeof(itemUtf8), "%s%s", mark, kUiLogLevelNames_[i]);
+            char itemGbk[32] = {};
+            UiToGbk_(itemUtf8, itemGbk, sizeof(itemGbk));
+            font->TextDraw(c, itemGbk, cellX + 4, cellY, kUiLogLevelCellWidth - 8,
+                kUiLogLevelRowHeight,
+                i == levelNow ? eTextColor::LIGHT_GREEN : eTextColor::WHITE,
+                eTextAlignment::MIDDLE_CENTER);
         }
+        char packLabel[32] = {};
+        UiToGbk_("打包日志", packLabel, sizeof(packLabel));
+        font->TextDraw(c, packLabel, kUiLogPackX + 2, 0, kUiLogPackWidth - 4,
+            kUiBarHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
+        c->DrawFrame(kUiLogPackX, 3, kUiLogPackWidth, kUiBarHeight - 6, 220, 200, 110);
         if (rows > 0) {
-            const int listY = kUiBarHeight;
+            const int listY = kUiBarTopOffset + kUiBarHeight;
             for (int row = 0; row < rows; ++row) {
                 if (row == g_ui.hoverRow)
                     c->FillRectangle(2, listY + row * kUiRowHeight,
@@ -606,18 +611,14 @@ static void UiDrawBar_(H3CombatManager* mgr)
             if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiListWidth,
                 lastH - totalH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiListWidth, lastH - totalH);
         }
-        // 悬浮条(480 宽)与下拉列表(136 宽)分开 blt：列表右侧不清底、不覆盖战场
-        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, kUiBarHeight, x, y);
+        // 两行悬浮框整块呈现，存档列表仅覆盖自身窄矩形。
+        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, kUiBgHeight, x, y);
         if (rows > 0)
-            bltOk = UiBltPcx16Region_(c, 0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
-                x, y + kUiBarHeight) && bltOk;
-        bltOk = UiBltPcx16Region_(c, kUiLogLevelX, kUiBarHeight, kUiLogLevelWidth - 2,
-            kUiLogLevelRows * kUiLogLevelRowHeight, x + kUiLogLevelX,
-            y + kUiBarHeight) && bltOk;
-        wnd->H3Redraw(x, y, kUiBarWidth, kUiBarHeight);
-        if (rows > 0) wnd->H3Redraw(x, y + kUiBarHeight, kUiListWidth, rows * kUiRowHeight);
-        wnd->H3Redraw(x + kUiLogLevelX, y + kUiBarHeight,
-            kUiLogLevelWidth - 2, kUiLogLevelRows * kUiLogLevelRowHeight);
+            bltOk = UiBltPcx16Region_(c, 0, kUiBarTopOffset + kUiBarHeight, kUiListWidth,
+                rows * kUiRowHeight, x, y + kUiBarTopOffset + kUiBarHeight) && bltOk;
+        wnd->H3Redraw(x, y, kUiBarWidth, kUiBgHeight);
+        if (rows > 0) wnd->H3Redraw(x, y + kUiBarTopOffset + kUiBarHeight,
+            kUiListWidth, rows * kUiRowHeight);
         redrawing = false;
         lastX = x;
         lastY = y;
@@ -640,37 +641,47 @@ static void UiClampBarToBattleDlg_(const H3CombatManager* mgr)
     const int dy = dlg->GetY();
     const int dw = dlg->GetWidth();
     const int dh = dlg->GetHeight();
-    if (dw < kUiBarWidth || dh < kUiBarHeight) return;
+    if (dw < kUiBarWidth || dh < kUiLogLevelBlockH + kUiBarHeight) return;
     if (g_ui.x < dx) g_ui.x = dx;
     if (g_ui.y < dy) g_ui.y = dy;
     if (g_ui.x + kUiBarWidth > dx + dw)
         g_ui.x = dx + dw - kUiBarWidth;
-    if (g_ui.y + kUiBarHeight > dy + dh)
-        g_ui.y = dy + dh - kUiBarHeight;
+    if (g_ui.y + kUiLogLevelBlockH + kUiBarHeight > dy + dh)
+        g_ui.y = dy + dh - kUiLogLevelBlockH - kUiBarHeight;
 }
 
 static bool UiPointInBar_(int px, int py)
 {
-    return px >= g_ui.x && px < g_ui.x + kUiBarWidth && py >= g_ui.y && py < g_ui.y + kUiBarHeight;
+    return px >= g_ui.x && px < g_ui.x + kUiBarWidth
+        && py >= g_ui.y + kUiBarTopOffset
+        && py < g_ui.y + kUiBarTopOffset + kUiBarHeight;
 }
 
-static bool UiHitBar_(const H3Msg* msg)
+// 悬浮框体系整块（等级行+条本体）区域，用于鼠标吞并与外点判定。
+static bool UiPointInUiBlock_(int px, int py)
+{
+    return px >= g_ui.x && px < g_ui.x + kUiBarWidth
+        && py >= g_ui.y && py < g_ui.y + kUiBarTopOffset + kUiBarHeight;
+}
+
+static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
 {
     if (!msg) return false;
+    const auto hit = fullBlock ? UiPointInUiBlock_ : UiPointInBar_;
     const H3POINT cursor = H3POINT::GetCursorPosition();
-    if (UiPointInBar_(cursor.x, cursor.y)) return true;
-    if (UiPointInBar_(msg->position.x, msg->position.y)) return true;
+    if (hit(cursor.x, cursor.y)) return true;
+    if (hit(msg->position.x, msg->position.y)) return true;
     const H3CombatManager* mgr = H3CombatManager::Get();
     const BYTE* dlgBytes = reinterpret_cast<const BYTE*>(mgr ? mgr->dlg : nullptr);
     if (!dlgBytes) return false;
     const int dlgX = *reinterpret_cast<const INT32*>(dlgBytes + 0x18);
     const int dlgY = *reinterpret_cast<const INT32*>(dlgBytes + 0x1C);
-    return UiPointInBar_(dlgX + msg->position.x, dlgY + msg->position.y);
+    return hit(dlgX + msg->position.x, dlgY + msg->position.y);
 }
 
 static int UiHitRow_(int px, int py)
 {
-    const int top = g_ui.y + kUiBarHeight;
+    const int top = g_ui.y + kUiBarTopOffset + kUiBarHeight;
     if (px < g_ui.x || px >= g_ui.x + kUiListWidth || py < top) return -1;
     int row = (py - top) / kUiRowHeight;
     const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
@@ -679,22 +690,42 @@ static int UiHitRow_(int px, int py)
     return row;
 }
 
-// 日志等级单选列表命中：条下方五行选项，返回 0..4；与存档列表矩形不相交。
 static int UiHitLogLevelItem_(int px, int py)
 {
-    const int top = g_ui.y + kUiBarHeight;
-    const int left = g_ui.x + kUiLogLevelX;
-    if (px < left || px >= left + kUiLogLevelWidth - 2 || py < top) return -1;
-    const int row = (py - top) / kUiLogLevelRowHeight;
-    if (row < 0 || row >= kUiLogLevelRows) return -1;
-    return row;
+    const int dx = px - g_ui.x;
+    const int dy = py - g_ui.y;
+    if (dx < 0 || dx >= kUiLogLevelRows * kUiLogLevelCellWidth
+        || dy < 0 || dy >= kUiLogLevelRowHeight) return -1;
+    return dx / kUiLogLevelCellWidth;
 }
 
-// 条内状态框：仅显示当前等级，点击吞并但无动作。
-static bool UiHitLogLevelTrigger_(int px, int py)
+static bool UiHitLogPack_(int px, int py)
 {
-    return px >= g_ui.x + kUiLogLevelX && px < g_ui.x + kUiLogLevelX + kUiLogLevelWidth - 2
+    return px >= g_ui.x + kUiLogPackX && px < g_ui.x + kUiLogPackX + kUiLogPackWidth
         && py >= g_ui.y && py < g_ui.y + kUiBarHeight;
+}
+
+static void UiPackLogs_()
+{
+    // Both input paths can report one click; do not create the same pack twice.
+    static DWORD lastPack = 0;
+    static bool packing = false;
+    const DWORD now = GetTickCount();
+    if (packing || (lastPack && now - lastPack < 1000)) return;
+    lastPack = now;
+    packing = true;
+    char reason[192] = {};
+    if (PackRecentLogs_(nullptr, 0, reason, sizeof(reason))) {
+        UiMarkNoticeHighlight_("日志已打包并复制，可粘贴发送");
+    } else {
+        UiMarkNotice_("日志打包失败，详见提示");
+        LogWarn("[LogPack] 打包失败：%s", reason);
+        wchar_t message[256] = {};
+        Utf8ToWide_(reason, message, (int)_countof(message));
+        MessageBoxW(nullptr, message, L"日志打包", MB_OK | MB_ICONWARNING);
+    }
+    lastPack = GetTickCount();
+    packing = false;
 }
 
 static struct {
@@ -1090,6 +1121,10 @@ static void UiHandleMouse_(H3Msg* msg)
         return;
     }
     if (msg->subtype == eMsgSubtype::LBUTTON_CLICK) {
+        if (UiHitLogPack_(px, py)) {
+            UiPackLogs_();
+            return;
+        }
         const int levelItem = UiHitLogLevelItem_(px, py);
         if (levelItem >= 0) {
             UiSelectLogLevel_(levelItem);
@@ -1101,7 +1136,6 @@ static void UiHandleMouse_(H3Msg* msg)
                 CancelSaveWait_("rebind entered");
                 return;
             }
-            if (UiHitLogLevelTrigger_(px, py)) return;  // 状态框无动作
             UiReloadEntries_(H3CombatManager::Get());
             return;
         }
@@ -1179,11 +1213,19 @@ static void UiPollRebindKey_()
 // 系统鼠标钩子路径的统一点击入口：gameX/gameY 为游戏逻辑坐标。
 static void UiHandleFrameClick_(int gameX, int gameY)
 {
-    // 日志等级常驻单选列表：点行即选中保存；矩形与存档列表不相交。
+    if (UiHitLogPack_(gameX, gameY)) {
+        UiPackLogs_();
+        return;
+    }
+    // 日志等级横向单选列表：点单元格即选中保存；等级块其余空位只吞并不动作。
     const int levelItem = UiHitLogLevelItem_(gameX, gameY);
     if (levelItem >= 0) {
         UiSelectLogLevel_(levelItem);
         LogInfo("点击日志等级行：%d", levelItem);
+        return;
+    }
+    if (UiPointInUiBlock_(gameX, gameY) && !UiPointInBar_(gameX, gameY)) {
+        LogInfo("点击日志等级块空位（无动作）：(%d,%d)", gameX, gameY);
         return;
     }
     if (UiPointInBar_(gameX, gameY)) {
@@ -1191,8 +1233,6 @@ static void UiHandleFrameClick_(int gameX, int gameY)
             g_ui.awaitingRebind = true;
             CancelSaveWait_("rebind entered");
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
-        } else if (UiHitLogLevelTrigger_(gameX, gameY)) {
-            LogInfo("点击日志等级状态框（无动作）：(%d,%d)", gameX, gameY);
         } else {
             UiReloadEntries_(H3CombatManager::Get());
             LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
@@ -1210,8 +1250,8 @@ static void UiHandleFrameClick_(int gameX, int gameY)
 // 系统鼠标钩子路径的右键删除：点击列表行删除对应存档。
 static void UiHandleFrameRightClick_(int gameX, int gameY)
 {
-    if (UiHitLogLevelItem_(gameX, gameY) >= 0 || UiHitLogLevelTrigger_(gameX, gameY))
-        return;  // 等级行/状态框：吞并右键，不动作
+    if (UiHitLogLevelItem_(gameX, gameY) >= 0 || UiPointInUiBlock_(gameX, gameY))
+        return;  // 等级块：吞并右键，不动作
     const int row = UiHitRow_(gameX, gameY);
     if (row < 0 || row >= (int)g_ui.entries.size()) return;
     hbs::ArchiveStore store(ArchiveRoot_());

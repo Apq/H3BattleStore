@@ -36,6 +36,7 @@ PatcherInstance* _PI = nullptr;
 
 #include "modules/IniUtf8.inc.cpp"
 #include "modules/ConfigLog.inc.cpp"
+#include "modules/LogPack.inc.cpp"
 #include "modules/CrashGuard.hpp"
 #include "modules/BattleArchive.inc.cpp"
 #include "modules/BattleCodec.inc.cpp"

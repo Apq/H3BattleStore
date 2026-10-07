@@ -504,8 +504,8 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
             const int row = UiHitRow_(gameX, gameY);
             const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
             const bool hitLevelItem = UiHitLogLevelItem_(gameX, gameY) >= 0;
-            const bool hitLevelTrigger = UiHitLogLevelTrigger_(gameX, gameY);
-            const bool swallow = inBar || hitList || hitLevelItem || hitLevelTrigger;
+            const bool hitUiBlock = UiPointInUiBlock_(gameX, gameY);
+            const bool swallow = inBar || hitList || hitLevelItem || hitUiBlock;
             if (move)
                 return false;
             if (leftDown && swallow) {
@@ -515,12 +515,14 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
                 InterlockedExchange(&g_pendingClickY, gameY);
                 LogInfo("点击已吞并：game=(%d,%d)", gameX, gameY);
                 return true;
-            } else if (rightDown && (inBar || hitList || hitLevelItem || hitLevelTrigger)) {
+            } else if (rightDown && swallow) {
                 return true;
             } else if (rightUp && hitList) {
                 InterlockedExchange(&g_pendingRightClickX, gameX);
                 InterlockedExchange(&g_pendingRightClickY, gameY);
                 LogInfo("右键已吞并：game=(%d,%d)", gameX, gameY);
+                return true;
+            } else if (rightUp && swallow) {
                 return true;
             }
         }
@@ -570,7 +572,7 @@ static bool CombatMessageBefore_(H3Msg* msg)
                 g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
         return false;
     }
-    const bool onBar = UiHitBar_(msg);
+    const bool onBar = UiHitBar_(msg, true);
     const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
     if ((onBar || row >= 0 || g_ui.dragging) && msg) {
         if (msg->command == eMsgCommand::MOUSE_BUTTON) {

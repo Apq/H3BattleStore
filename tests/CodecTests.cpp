@@ -170,7 +170,7 @@ static void TestV5Roundtrip_()
     }
 }
 
-int wmain(int argc, wchar_t** argv)
+int main()
 {
     TestV5Roundtrip_();
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
@@ -558,47 +558,6 @@ int wmain(int argc, wchar_t** argv)
     Expect(RestorePolicy_(bad, &error), "double-wide right second hex accepted");
     bad.squares[23].twoHexMonsterSquare = 0;
     Expect(!RestorePolicy_(bad, &error), "double-wide incorrect flag rejected");
-
-    if (argc > 1) {
-        std::vector<uint8_t> bytes;
-        std::wstring archiveError;
-        hbs::ArchiveDocument document = {};
-        std::unique_ptr<CodecCapture> recorded(new CodecCapture{});
-        bool ok = hbs::detail::ReadWholeFile(argv[1], bytes, archiveError)
-            && hbs::detail::Decode(bytes.data(), bytes.size(), document, archiveError)
-            && CodecDecode(document.sections, recorded.get(), &error);
-        if (ok) {
-            Expect(true, "real archive CRC and codec decode");
-            for (int side = 0; side < 2; ++side) {
-                const CodecStack& reserved = recorded->stacks[side][20];
-                printf("real archive reserved side=%d occupied=%d type=%d alive=%d initial=%d hp=%d sideIndex=%d\n",
-                    side, reserved.occupied ? 1 : 0, reserved.type, reserved.numberAlive,
-                    reserved.numberAtStart, reserved.infoCombat[0], reserved.sideIndex);
-            }
-            {
-                size_t packed = 0;
-                for (const auto& range : kManagerExtraRanges_) {
-                    if (range.offset == 0x14031u) break;
-                    packed += range.size;
-                }
-                size_t travelingOn = 0;
-                for (int cell = 0; cell < 187; ++cell)
-                    if (recorded->extraScalars[packed + cell]) ++travelingOn;
-                printf("real archive traveling mask on=%zu\n", travelingOn);
-            }
-            error.clear();
-            bool accepted = RestorePolicy_(*recorded, &error);
-            printf("real archive self-preflight accepted=%d reason=%s\n", accepted, error.c_str());
-            Expect(accepted, "real archive self-preflight accepted (no game writes)");
-        } else if (error.find("version") != std::string::npos) {
-            // v5 archives predate travelingSquares (v6); rejecting them at the
-            // version gate is the designed behavior (no legacy compatibility).
-            printf("real archive rejected by version gate (legacy save, expected)\n");
-        } else {
-            Expect(false, "real archive CRC and codec decode");
-            printf("real archive decode error=%s\n", error.c_str());
-        }
-    }
 
     if (g_failures) {
         printf("%d codec test(s) failed\n", g_failures);

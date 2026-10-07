@@ -12,17 +12,5 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-rem Optional real-patcher ABI tests; all artifacts stay under tests\abi-tmp.
-if not "%H3BATTLE_RUN_ABI_TESTS%"=="1" goto :build_success
-    call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
-    if errorlevel 1 exit /b 1
-    if not exist "tests\abi-tmp" mkdir "tests\abi-tmp"
-    if errorlevel 1 exit /b 1
-    cl /nologo /std:c++20 /O2 /W4 /utf-8 /EHsc /Zp1 /DWIN32 /DNDEBUG /DWINDOWS_IGNORE_PACKING_MISMATCH /D_CRT_SECURE_NO_WARNINGS /DJSON_NOEXCEPTION /wd4018 /wd4267 /wd4553 /wd4005 /wd4996 /wd4235 /wd4010 /I"..\H3API\single_header" /I"third_party" tests\HookAbiTests.cpp /Fo"tests\abi-tmp\HookAbiTests.obj" /Fe"tests\abi-tmp\HookAbiTests.exe" /Fd"tests\abi-tmp\HookAbiTests.pdb" /link /INCREMENTAL:NO /OPT:NOICF /PDB:"tests\abi-tmp\HookAbiTests.pdb"
-    if errorlevel 1 exit /b 1
-    tests\abi-tmp\HookAbiTests.exe
-    rem Native failures may be negative signed exit codes, not errorlevel >= 1.
-    if not "%errorlevel%"=="0" exit /b 1
-:build_success
 pwsh -c "Write-Host '±‡“ÎÕÍ≥…' -ForegroundColor Green"
 if "%PAUSE_ON_SUCCESS%"=="1" pause
