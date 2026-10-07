@@ -9,7 +9,7 @@ struct BattleStorageWindowState_ {
     bool tactics;
     bool action;
     bool executing;
-    bool nativeBusy;
+    bool casting;
     bool humanTurn;
     bool activeReady;
 };
@@ -18,7 +18,7 @@ static constexpr bool BattleStorageAllowed_(const BattleStorageWindowState_& sta
 {
     return state.initialized && !state.fatal && state.mainDialog && !state.finished
         && !state.autoCombat && !state.tactics && !state.action && !state.executing
-        && !state.nativeBusy && state.humanTurn && state.activeReady;
+        && !state.casting && state.humanTurn && state.activeReady;
 }
 
 // 0x200 aliases native item commands and mouse-button notifications.

@@ -125,6 +125,7 @@ static unsigned g_battleGeneration = 0;
 static DWORD g_battleThread = 0;
 static int g_messageDepth = 0;
 static int g_executorDepth = 0;
+static int g_spellDepth = 0;
 static bool g_battleListDirty = true;
 
 static bool BattleMainDialog_(const H3CombatManager* mgr)
@@ -133,7 +134,8 @@ static bool BattleMainDialog_(const H3CombatManager* mgr)
     return CombatIsReadable_(mgr) && mgr->dlg && wnd && wnd->lastDlg == mgr->dlg;
 }
 
-// Shared by the status lamp and both input paths; message depth is execution-only.
+// Shared by the lamp and inputs. The native refresh-busy flag is not an action gate;
+// ordinary idle animation is allowed. Message depth is execution-only.
 static bool CombatStorageWindow_(const H3CombatManager* mgr)
 {
     if (!CombatIsReadable_(mgr)) return false;
@@ -145,7 +147,7 @@ static bool CombatStorageWindow_(const H3CombatManager* mgr)
         && mgr->activeStack->numberAlive > 0;
     return BattleStorageAllowed_({g_battleInitialized, g_restoreFatal, BattleMainDialog_(mgr),
         mgr->finished != 0, mgr->autoCombat != 0, mgr->tacticsPhase != 0,
-        (int)mgr->action != 0, g_executorDepth != 0, *(const int*)0x698A3C != 0,
+        (int)mgr->action != 0, g_executorDepth != 0, g_spellDepth != 0,
         humanTurn, activeReady});
 }
 

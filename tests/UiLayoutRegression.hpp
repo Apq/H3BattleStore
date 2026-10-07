@@ -50,4 +50,9 @@ constexpr bool StorageWindowTruthTable() {
     return true;
 }
 static_assert(StorageWindowTruthTable());
+constexpr BattleStorageWindowState_ idleHuman = {
+    true, false, true, false, false, false, false, false, false, true, true};
+static_assert(BattleStorageAllowed_(idleHuman));
+static_assert([] { auto state = idleHuman; state.casting = true; return !BattleStorageAllowed_(state); }());
+static_assert([] { auto state = idleHuman; state.executing = true; return !BattleStorageAllowed_(state); }());
 }

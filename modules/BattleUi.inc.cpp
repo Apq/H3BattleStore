@@ -588,6 +588,16 @@ static void UiDrawBar_(H3CombatManager* mgr)
             labelColor, eTextAlignment::MIDDLE_LEFT);
         const bool storageAllowed = !g_restoreBusy && !g_restoreRequest.pending
             && CombatStorageWindow_(mgr);
+        static int lastStorageAllowed = -1;
+        static unsigned lastStorageGeneration = ~0u;
+        if (lastStorageAllowed != (int)storageAllowed || lastStorageGeneration != g_battleGeneration) {
+            LogDebug("[StorageWindow] allowed=%d generation=%u initialized=%d human_side=%d action=%d executor=%d spell=%d busy=%d pending=%d",
+                storageAllowed ? 1 : 0, g_battleGeneration, g_battleInitialized ? 1 : 0,
+                mgr->currentActiveSide, (int)mgr->action, g_executorDepth, g_spellDepth,
+                g_restoreBusy ? 1 : 0, g_restoreRequest.pending ? 1 : 0);
+            lastStorageAllowed = (int)storageAllowed;
+            lastStorageGeneration = g_battleGeneration;
+        }
         const hbs_ui::LampColor lamp = hbs_ui::StatusLampColor(storageAllowed);
         const int lampX = hbs_ui::StatusLampX;
         const int lampY = hbs_ui::StatusLampY(g_uiLayout);

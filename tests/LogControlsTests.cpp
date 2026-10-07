@@ -80,6 +80,22 @@ static std::string ReadFixtureText_(const std::wstring& path)
 
 static void TestLogPolicies_(const std::wstring& root)
 {
+    BattleStorageWindowState_ window = {true, false, true, false, false, false,
+        false, false, false, true, true};
+    Check(BattleStorageAllowed_(window), "human idle turn allows storage regardless of refresh animation");
+    window.executing = true;
+    Check(!BattleStorageAllowed_(window), "actual action execution rejects storage");
+    window.executing = false;
+    window.casting = true;
+    Check(!BattleStorageAllowed_(window), "spell execution rejects storage even with no creature action");
+    window.casting = false;
+    Check(BattleStorageAllowed_(window), "spell return restores idle storage window");
+    window.action = true;
+    Check(!BattleStorageAllowed_(window), "submitted action rejects storage before executor starts");
+    window.action = false;
+    window.humanTurn = false;
+    Check(!BattleStorageAllowed_(window), "nonhuman turn rejects storage");
+    std::puts("PASS: idle animation allowed, submitted action/executor/spell/nonhuman turn rejected");
     Check(LogStageLevel_("capture.stacks") == LOG_DEBUG
         && LogStageLevel_("restore.commit-objects") == LOG_INFO
         && LogStageLevel_("restore.rollback") == LOG_WARN, "phase severity policy");

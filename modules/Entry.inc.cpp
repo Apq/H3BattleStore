@@ -7,6 +7,7 @@ static const int GUARD_KEYBOARD = GuardRegisterHook_("BattleStore.Keyboard");
 static const int GUARD_MOUSE = GuardRegisterHook_("BattleStore.Mouse");
 static const int GUARD_MESSAGE = GuardRegisterHook_("BattleStore.Message");
 static const int GUARD_EXECUTE = GuardRegisterHook_("BattleStore.Execute");
+static const int GUARD_SPELL = GuardRegisterHook_("BattleStore.Spell");
 static LogKeyEdges_ g_commandKeys;
 static const int GUARD_CYCLE = GuardRegisterHook_("BattleStore.Cycle");
 static const int GUARD_BLT = GuardRegisterHook_("BattleStore.AfterBlt");
@@ -726,6 +727,26 @@ static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int
     return result;
 }
 
+static void __stdcall Hook_BattleCastSpell_(HiHook* hook, H3CombatManager* mgr,
+    int spell, int hex, int castType, int secondHex, int expertise, int power)
+{
+    ++g_spellDepth;
+    // Finally repairs tracking only; native exceptions must propagate unchanged.
+    __try {
+        __try {
+            LogDebug("[Spell] begin generation=%u depth=%d spell=%d hex=%d cast_type=%d",
+                g_battleGeneration, g_spellDepth, spell, hex, castType);
+        }
+        __except (GuardCrashFilter_(GUARD_SPELL, GetExceptionInformation())) {}
+        THISCALL_7(void, hook->GetDefaultFunc(), mgr, spell, hex, castType, secondHex, expertise, power);
+        __try {
+            LogDebug("[Spell] end generation=%u depth=%d spell=%d", g_battleGeneration, g_spellDepth, spell);
+        }
+        __except (GuardCrashFilter_(GUARD_SPELL, GetExceptionInformation())) {}
+    }
+    __finally { --g_spellDepth; }
+}
+
 static void BattleReset_()
 {
     ++g_battleGeneration;
@@ -895,6 +916,7 @@ static void StartPlugin()
     _PI->WriteHiHook(0x462600, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStart_);
     _PI->WriteHiHook(0x462E40, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStop_);
     _PI->WriteHiHook(0x4786B0, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleExecute_);
+    _PI->WriteHiHook(0x5A0140, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleCastSpell_);
     _PI->WriteHiHook(0x473A00, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatMessage_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
     _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
