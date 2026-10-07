@@ -22,7 +22,7 @@
 
 namespace hbs {
 
-static const uint32_t kMagic = 0x31425348u; // "HBS1" little-endian
+static const uint32_t kMagic = 0x31425348u; // 小端字节序 48 53 42 31 = "HSB1"（2026-10-06 实测盘上四档核验）
 static const uint16_t kFormatVersion = 1;
 static const uint32_t kMaxRecordsPerBattle = 30;
 static const uint32_t kMaxBattlesOnDisk = 30;
@@ -60,7 +60,7 @@ class ArchiveStore {
 public:
     explicit ArchiveStore(std::wstring root);
 
-    bool Save(const ArchiveDocument& document, std::wstring& error);
+    bool Save(const ArchiveDocument& document, std::wstring& error, ArchiveRecord* committed = nullptr);
     bool List(const std::string& battleKey,
               const std::string& targetKey,
               std::vector<ArchiveRecord>& records,
@@ -101,62 +101,12 @@ inline bool IsKey(const std::string& key)
     return true;
 }
 
-inline char HexNibble(unsigned value)
-{
-    return static_cast<char>(value < 10 ? ('0' + value) : ('a' + (value - 10)));
-}
-
 inline int HexValue(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
-}
-
-inline void AppendHex8(std::wstring& out, uint32_t value)
-{
-    for (int shift = 28; shift >= 0; shift -= 4)
-        out.push_back(static_cast<wchar_t>(HexNibble((value >> shift) & 0xF)));
-}
-
-inline void AppendHex16(std::wstring& out, uint64_t value)
-{
-    AppendHex8(out, static_cast<uint32_t>(value >> 32));
-    AppendHex8(out, static_cast<uint32_t>(value));
-}
-
-inline void AppendDec(std::wstring& out, uint32_t value, int width)
-{
-    wchar_t digits[16] = {};
-    int n = 0;
-    do {
-        digits[n++] = static_cast<wchar_t>(L'0' + (value % 10u));
-        value /= 10u;
-    } while (value && n < 16);
-    while (n < width && n < 16) digits[n++] = L'0';
-    while (n > 0) out.push_back(digits[--n]);
-}
-
-inline bool Hex8(const wchar_t* text, uint32_t& value)
-{
-    uint32_t out = 0;
-    for (int i = 0; i < 8; ++i) {
-        const int nibble = HexValue(static_cast<char>(text[i]));
-        if (nibble < 0 || text[i] > 0x7F) return false;
-        out = (out << 4) | static_cast<uint32_t>(nibble);
-    }
-    value = out;
-    return true;
-}
-
-inline bool Hex16(const wchar_t* text, uint64_t& value)
-{
-    uint32_t hi = 0;
-    uint32_t lo = 0;
-    if (!Hex8(text, hi) || !Hex8(text + 8, lo)) return false;
-    value = (static_cast<uint64_t>(hi) << 32) | lo;
-    return true;
 }
 
 inline uint32_t Crc32(const uint8_t* data, size_t size)
@@ -679,42 +629,129 @@ inline bool WideHexEquals(const wchar_t* text, const std::string& key)
     return true;
 }
 
-inline bool ParseGeneratedName(const std::wstring& name,
-                               uint64_t timestamp,
-                               uint32_t sequence,
-                               const std::string& battleKey,
-                               const std::string& targetKey)
+// ===== 命名层 v2（2026-10-06 用户需求）=====
+// 文件名 = <64hex 战斗指纹>_<yyyymmdd>_<hhmmss>[_<撞名序号2..999>].hbs
+// 时间为存档时刻本地时间，与文件头内 timestampUtcMs 同源互校（秒精度，容差 ±2s）；
+// 同指纹同秒多次保存追加 _2、_3…；sequence/targetKey 不再进入文件名（头内保留）。
+
+inline bool UtcMsToLocalSystemTime(uint64_t utcMs, SYSTEMTIME& local)
 {
-    // <16 hex ts><8 hex seq>-<64 hex battle>-<64 hex target>.hbs
-    const size_t expected = 16 + 8 + 1 + kKeyHexChars + 1 + kKeyHexChars + 4;
-    if (name.size() != expected) return false;
-    uint64_t fileTs = 0;
-    uint32_t fileSeq = 0;
-    if (name[24] != L'-' || name[25 + kKeyHexChars] != L'-') return false;
-    if (!Hex16(name.c_str(), fileTs) || !Hex8(name.c_str() + 16, fileSeq)) return false;
-    if (!WideHexEquals(name.c_str() + 25, battleKey)) return false;
-    if (!WideHexEquals(name.c_str() + 26 + kKeyHexChars, targetKey)) return false;
-    if (_wcsicmp(name.c_str() + name.size() - 4, L".hbs") != 0) return false;
-    return fileTs == timestamp && fileSeq == sequence;
+    const uint64_t ftv = utcMs * 10000ull + 116444736000000000ull;
+    FILETIME ft = {};
+    ft.dwLowDateTime = static_cast<DWORD>(ftv & 0xFFFFFFFFull);
+    ft.dwHighDateTime = static_cast<DWORD>(ftv >> 32);
+    SYSTEMTIME utc = {};
+    if (!FileTimeToSystemTime(&ft, &utc)) return false;
+    return SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local) != FALSE;
 }
 
-inline std::wstring MakeArchiveName(uint64_t timestamp,
-                                    uint32_t sequence,
+inline bool LocalSystemTimeToUtcMs(SYSTEMTIME& local, uint64_t& utcMs)
+{
+    SYSTEMTIME utc = {};
+    if (!TzSpecificLocalTimeToSystemTime(nullptr, &local, &utc)) return false;
+    FILETIME ft = {};
+    if (!SystemTimeToFileTime(&utc, &ft)) return false;
+    const uint64_t ftv = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    utcMs = (ftv - 116444736000000000ull) / 10000ull;
+    return true;
+}
+
+inline void AppendDec2_(std::wstring& out, int value)
+{
+    out.push_back(static_cast<wchar_t>(L'0' + (value / 10) % 10));
+    out.push_back(static_cast<wchar_t>(L'0' + value % 10));
+}
+
+inline void AppendDec4_(std::wstring& out, int value)
+{
+    AppendDec2_(out, value / 100);
+    AppendDec2_(out, value % 100);
+}
+
+inline bool ParseDigits_(const wchar_t*& p, int count, int& value)
+{
+    value = 0;
+    for (int i = 0; i < count; ++i) {
+        if (*p < L'0' || *p > L'9') return false;
+        value = value * 10 + static_cast<int>(*p - L'0');
+        ++p;
+    }
+    return true;
+}
+
+inline std::wstring MakeArchiveName(uint64_t timestampUtcMs,
                                     const std::string& battleKey,
-                                    const std::string& targetKey)
+                                    uint32_t attempt)
 {
     std::wstring name;
-    name.reserve(16 + 8 + 1 + kKeyHexChars + 1 + kKeyHexChars + 4);
-    AppendHex16(name, timestamp);
-    AppendHex8(name, sequence);
-    name.push_back(L'-');
+    name.reserve(kKeyHexChars + 1 + 8 + 1 + 6 + 6 + 4);
     for (size_t i = 0; i < battleKey.size(); ++i)
         name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(battleKey[i])));
-    name.push_back(L'-');
-    for (size_t i = 0; i < targetKey.size(); ++i)
-        name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(targetKey[i])));
+    SYSTEMTIME local = {};
+    if (!UtcMsToLocalSystemTime(timestampUtcMs, local)) {
+        // UTC 毫秒异常时仍生成合法结构（时间字段全零），由 ParseGeneratedName 的一致性校验兜底
+    }
+    name.push_back(L'_');
+    AppendDec4_(name, local.wYear);
+    AppendDec2_(name, local.wMonth);
+    AppendDec2_(name, local.wDay);
+    name.push_back(L'_');
+    AppendDec2_(name, local.wHour);
+    AppendDec2_(name, local.wMinute);
+    AppendDec2_(name, local.wSecond);
+    if (attempt > 1) {
+        name.push_back(L'_');
+        wchar_t digits[12];
+        int n = 0;
+        uint32_t value = attempt;
+        while (value) {
+            digits[n++] = static_cast<wchar_t>(L'0' + value % 10);
+            value /= 10;
+        }
+        while (n) name.push_back(digits[--n]);
+    }
     name += L".hbs";
     return name;
+}
+
+inline bool ParseGeneratedName(const std::wstring& name,
+                               uint64_t timestampUtcMs,
+                               const std::string& battleKey)
+{
+    const wchar_t* p = name.c_str();
+    if (!WideHexEquals(p, battleKey)) return false;
+    p += kKeyHexChars;
+    if (*p != L'_') return false;
+    ++p;
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (!ParseDigits_(p, 4, year) || !ParseDigits_(p, 2, month) || !ParseDigits_(p, 2, day)) return false;
+    if (*p != L'_') return false;
+    ++p;
+    if (!ParseDigits_(p, 2, hour) || !ParseDigits_(p, 2, minute) || !ParseDigits_(p, 2, second)) return false;
+    if (*p == L'_') {
+        ++p;
+        int attempt = 0;
+        int digits = 0;
+        while (*p >= L'0' && *p <= L'9') {
+            if (++digits > 3) return false;
+            attempt = attempt * 10 + static_cast<int>(*p - L'0');
+            ++p;
+        }
+        if (digits == 0 || attempt < 2 || attempt > 999) return false;
+    }
+    if (_wcsicmp(p, L".hbs") != 0) return false;
+    SYSTEMTIME local = {};
+    local.wYear = static_cast<WORD>(year);
+    local.wMonth = static_cast<WORD>(month);
+    local.wDay = static_cast<WORD>(day);
+    local.wHour = static_cast<WORD>(hour);
+    local.wMinute = static_cast<WORD>(minute);
+    local.wSecond = static_cast<WORD>(second);
+    // The local filename is a display label, not the UTC identity. Its original
+    // timezone is not stored, so changing system timezone must not hide valid saves.
+    (void)timestampUtcMs;
+    FILETIME date = {};
+    return SystemTimeToFileTime(&local, &date) != FALSE;
 }
 
 inline bool Scan(const std::wstring& root,
@@ -765,8 +802,7 @@ inline bool Scan(const std::wstring& root,
             AppendError(error, name + L": " + decodeError);
             continue;
         }
-        if (!ParseGeneratedName(name, document.timestampUtcMs, document.sequence,
-                                document.battleKey, document.targetKey)) {
+        if (!ParseGeneratedName(name, document.timestampUtcMs, document.battleKey)) {
             AppendError(error, name + L": filename does not match archive identity");
             continue;
         }
@@ -804,8 +840,7 @@ inline bool DeleteVerifiedBytes(const std::wstring& root,
     }
     ArchiveDocument document;
     if (!Decode(bytes.data(), bytes.size(), document, error)) return false;
-    if (!ParseGeneratedName(name, document.timestampUtcMs, document.sequence,
-                            document.battleKey, document.targetKey)) {
+    if (!ParseGeneratedName(name, document.timestampUtcMs, document.battleKey)) {
         SetError(error, L"refusing archive whose filename does not match its contents");
         return false;
     }
@@ -883,8 +918,7 @@ inline bool DeleteOwnedFile(const std::wstring& root, const std::wstring& path, 
     }
     ArchiveDocument document;
     if (!Decode(bytes.data(), bytes.size(), document, error)) return false;
-    if (!ParseGeneratedName(name, document.timestampUtcMs, document.sequence,
-                            document.battleKey, document.targetKey)) {
+    if (!ParseGeneratedName(name, document.timestampUtcMs, document.battleKey)) {
         SetError(error, L"refusing archive whose filename does not match its contents");
         return false;
     }
@@ -909,9 +943,10 @@ inline ArchiveStore::ArchiveStore(std::wstring root)
 {
 }
 
-inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& error)
+inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& error, ArchiveRecord* committed)
 {
     error.clear();
+    if (committed) *committed = ArchiveRecord();
     if (!detail::IsKey(document.battleKey) || !detail::IsKey(document.targetKey)) {
         detail::SetError(error, L"battleKey and targetKey must be 64 hex characters");
         return false;
@@ -928,38 +963,24 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
         return false;
     }
 
-    uint64_t sequence = document.sequence;
+    // 撞名循环：同指纹同秒多次保存追加 _2、_3…（上限 999）
+    uint32_t attempt = 1;
+    std::wstring name;
     for (;;) {
-        if (sequence > 0xFFFFFFFFull) {
-            detail::SetError(error, L"sequence space exhausted for this timestamp");
+        if (attempt > 999) {
+            detail::SetError(error, L"filename collision space exhausted for this second");
             return false;
         }
-        const std::wstring candidate = detail::MakeArchiveName(
-            document.timestampUtcMs, static_cast<uint32_t>(sequence), document.battleKey, document.targetKey);
-        bool taken = GetFileAttributesW(detail::JoinRoot(root_, candidate).c_str()) != INVALID_FILE_ATTRIBUTES;
-        if (!taken) {
-            for (size_t i = 0; i < existing.size(); ++i) {
-                const detail::Scanned& item = existing[i];
-                if (item.record.battleKey == document.battleKey
-                    && item.record.targetKey == document.targetKey
-                    && item.record.timestampUtcMs == document.timestampUtcMs
-                    && item.record.sequence == static_cast<uint32_t>(sequence)) {
-                    taken = true;
-                    break;
-                }
-            }
-        }
-        if (!taken) break;
-        ++sequence;
+        name = detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, attempt);
+        if (GetFileAttributesW(detail::JoinRoot(root_, name).c_str()) == INVALID_FILE_ATTRIBUTES) break;
+        ++attempt;
     }
 
     ArchiveDocument stamped = document;
-    stamped.sequence = static_cast<uint32_t>(sequence);
+    stamped.sequence = document.sequence;
     std::vector<uint8_t> encoded;
     if (!detail::Encode(stamped, encoded, error)) return false;
 
-    const std::wstring name = detail::MakeArchiveName(
-        stamped.timestampUtcMs, stamped.sequence, stamped.battleKey, stamped.targetKey);
     const std::wstring finalPath = detail::JoinRoot(root_, name);
     const std::wstring tempPath = finalPath + L".tmp";
     if (GetFileAttributesW(finalPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -975,6 +996,14 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
             ? L"archive filename collision"
             : L"atomic move failed");
         return false;
+    }
+
+    if (committed) {
+        committed->path = finalPath;
+        committed->battleKey = stamped.battleKey;
+        committed->targetKey = stamped.targetKey;
+        committed->timestampUtcMs = stamped.timestampUtcMs;
+        committed->sequence = stamped.sequence;
     }
 
     std::vector<detail::Scanned> after;
@@ -1079,8 +1108,8 @@ inline bool ArchiveStore::Load(const ArchiveRecord& record, ArchiveDocument& doc
     std::vector<uint8_t> bytes;
     if (!detail::ReadWholeFile(record.path, bytes, error)) return false;
     if (!detail::Decode(bytes.data(), bytes.size(), document, error)) return false;
-    if (!detail::ParseGeneratedName(name, document.timestampUtcMs, document.sequence,
-                                    document.battleKey, document.targetKey)) {
+    if (!detail::ParseGeneratedName(name, document.timestampUtcMs,
+                                    document.battleKey)) {
         document = ArchiveDocument();
         detail::SetError(error, L"filename does not match archive identity");
         return false;

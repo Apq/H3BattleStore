@@ -1,5 +1,5 @@
 // ========== BattleUi.inc.cpp ==========
-// 战场悬浮条：存档下拉列表、快捷键显示、点击展开/收起、拖动与右键删除。
+// 战场悬浮条：常驻存档列表、快捷键显示、读档确认与右键删除。
 // 绘制在 0x495C50 动画循环返回后，不占战场格子；交互在消息钩子内完成。
 
 #include <ctime>
@@ -53,6 +53,9 @@ static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
 
 static const int kUiBarHeight = 24;
 static const int kUiBarWidth = 480;
+// 常驻列表宽度：能显示完时间即可，不跟悬浮条同宽。
+// 内容只有 "yyyymmdd-hhmmss" 15 字符，小字体约 6px/字符，136px 含边距足够。
+static const int kUiListWidth = 136;
 static const int kUiRowHeight = 18;
 static const int kUiListMaxRows = 10;
 static const int kUiDefaultX = 16;
@@ -69,7 +72,7 @@ static struct
 {
     int x = kUiDefaultX;
     int y = kUiDefaultY;
-    bool listOpen = false;
+
     bool dragging = false;
     int dragOffX = 0;
     int dragOffY = 0;
@@ -80,23 +83,33 @@ static struct
     char rebindKey = 0;          // 改键接受的键：必须先松开才允许触发存档
     char lastSavedStamp[32] = {};
     DWORD lastSavedUntil = 0;
+    DWORD lastNoticeUntil = 0;    // 等待超时等结果提示，悬浮条短暂显示
+    char lastNoticeGbk[96] = {};
+    bool lastNoticeHighlight = false;  // 本条通知用醒目色（读档成功）；过期后自然回常规状态行
     DWORD rebindGuardUntil = 0;  // 改键生效后短窗内忽略该键，防误触发存档
     std::string battleKey;
     std::vector<UiSaveEntry> entries;
     int hoverRow = -1;
+    int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
 
-static void UiReloadEntries_(const H3CombatManager* mgr)
+static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
+static const int GUARD_COPY = GuardRegisterHook_("BattleStore.CopyPixels");
+
+// 返回 true = 指纹与扫描都成功（entries 可信）；false = 本次加载失败（调用方可重试）。
+static bool UiReloadEntries_(const H3CombatManager* mgr)
 {
     g_ui.entries.clear();
     std::string battleKey;
     std::string error;
-    if (!BattleFingerprint_(mgr, &battleKey, &error)) return;
+    if (!BattleFingerprint_(mgr, &battleKey, &error)) { LogWarn("[List op=%ld] fingerprint failed: %s", g_diag.id, error.c_str()); return false; }
     g_ui.battleKey = battleKey;
     hbs::ArchiveStore store(ArchiveRoot_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
-    if (!store.List(battleKey, "", records, storeError)) return;
+    if (!store.List(battleKey, "", records, storeError)) { LogWarn("[List op=%ld] scan failed: %s", g_diag.id, DiagUtf8_(storeError).c_str()); return false; }
+    if (!storeError.empty()) LogWarn("[List op=%ld] scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
+    LogInfo("[List op=%ld] battle=%s records=%u", g_diag.id, battleKey.c_str(), (unsigned)records.size());
     g_ui.entries.reserve(records.size());
     for (size_t i = 0; i < records.size(); ++i) {
         UiSaveEntry entry;
@@ -105,6 +118,7 @@ static void UiReloadEntries_(const H3CombatManager* mgr)
         entry.path = records[i].path;
         g_ui.entries.push_back(entry);
     }
+    return true;
 }
 
 static void UiSaveBarPosition_()
@@ -153,6 +167,23 @@ static void UiMarkSaved_(uint64_t timestampUtcMs)
     entry.timestampUtcMs = timestampUtcMs;
     UiFormatStamp_(entry, g_ui.lastSavedStamp, sizeof(g_ui.lastSavedStamp));
     g_ui.lastSavedUntil = GetTickCount() + 3000;
+}
+
+// 2026-10-06 用户裁定：保存窗口=轮到该玩家且尚未下令；窗口外按键立即提示拒绝。
+// 不等待动画、不加输入锁——提示只用于告知拒绝原因，短暂显示后恢复常规状态。
+static void UiMarkNotice_(const char* utf8Text)
+{
+    if (!utf8Text || !utf8Text[0]) return;
+    UiToGbk_(utf8Text, g_ui.lastNoticeGbk, sizeof(g_ui.lastNoticeGbk));
+    g_ui.lastNoticeUntil = GetTickCount() + 4000;
+    g_ui.lastNoticeHighlight = false;
+}
+
+// 读档成功等强结果：同一悬浮通道，但整段用醒目色显示，倒计时结束自动回常规状态行。
+static void UiMarkNoticeHighlight_(const char* utf8Text)
+{
+    UiMarkNotice_(utf8Text);
+    g_ui.lastNoticeHighlight = true;
 }
 
 // ---------- DirectDraw backbuffer 直绘（方案移植自 H3BattleValueInfo，2026-10-05） ----------
@@ -313,9 +344,9 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
         DDSURFACEDESC desc;
         memset(&desc, 0, sizeof(desc));
         desc.dwSize = sizeof(desc);
-        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))
-            || !desc.lpSurface)
-            return false;
+        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))) return false;
+        __try {
+        if (!desc.lpSurface) return false;
         H3WindowManager* wnd = H3WindowManager::Get();
         int dstW = (int)desc.dwWidth;
         int dstH = (int)desc.dwHeight;
@@ -371,10 +402,11 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
                 }
             }
         }
-        const bool ok = copyW > 0 && copyH > 0;
-        bb->Unlock(nullptr);
-        return ok;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return copyW > 0 && copyH > 0;
+        } __finally {
+            bb->Unlock(nullptr);
+        }
+    } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
         return false;
     }
 }
@@ -384,12 +416,20 @@ static H3LoadedPcx16* g_barComposite = nullptr;
 // 等待静止帧存档的截止时刻（Entry 置位/消费；0=无等待）。绘制层用它显示提示。
 static DWORD g_uiWaitSaveUntil = 0;
 
+static void CancelSaveWait_(const char* reason)
+{
+    if (!g_uiWaitSaveUntil) return;
+    g_uiWaitSaveUntil = 0;
+    LogInfo("[Wait op=%ld] cancelled input_lock=0 reason=%s", g_diag.id, reason);
+    DiagEnd_("cancelled", reason);
+}
+
+
 static void UiDrawBar_(H3CombatManager* mgr)
 {
     (void)mgr;
-    static bool broken = false;
     static bool redrawing = false;
-    if (broken || redrawing) return;
+    if (redrawing) return;
     __try {
         H3WindowManager* wnd = H3WindowManager::Get();
         H3Font* font = H3SmallFont::Get();
@@ -410,7 +450,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         g_ui.y = 8;
         const int x = g_ui.x;
         const int y = g_ui.y;
-        const int rows = (g_ui.listOpen && !g_ui.entries.empty())
+        const int rows = (!g_ui.entries.empty())
             ? (g_ui.entries.size() < (size_t)kUiListMaxRows
                 ? (int)g_ui.entries.size() : kUiListMaxRows)
             : 0;
@@ -428,8 +468,9 @@ static void UiDrawBar_(H3CombatManager* mgr)
             lastMgr = mgr;
         }
         const bool rectChanged = lastX != x || lastY != y || lastH != usedH;
-        // 每帧整图清底，防列表收起后残留旧像素
-        c->FillRectangle(0, 0, kUiBarWidth, compositeH, 0, 0, 0);
+        // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
+        c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 0, 0, 0);
+        c->FillRectangle(0, kUiBarHeight, kUiListWidth, kUiListMaxRows * kUiRowHeight, 0, 0, 0);
         // 背景：成品图 HB_bg.pcx 只贴悬浮条本体一行（金框已烘焙）；
         // 下拉列表超出悬浮框，不用背景图（2026-10-05 用户明确），纯色+代码框。
         H3LoadedPcx16* bg = UiLoadBarBg_();
@@ -437,23 +478,49 @@ static void UiDrawBar_(H3CombatManager* mgr)
             && bg->width >= kUiBarWidth && bg->height >= kUiBarHeight;
         if (bgOk) {
             UiCopyBgRegion_(c, bg, 0, 0, kUiBarWidth, kUiBarHeight);
+            // 下拉列表底色 = 背景图主色（2026-10-06 用户裁定：选项底色接近背景图，
+            // 不要黑蓝对比）。稀疏采样均值做主色；480x24 图 /3 /8 仅数百点，每帧可算。
+            long sumR = 0, sumG = 0, sumB = 0;
+            long count = 0;
+            const bool src32 = H3BitMode::Get() == 4;
+            for (int py = 0; py < bg->height; py += 3) {
+                for (int px = 0; px < bg->width; px += 8) {
+                    BYTE* pix = bg->buffer + (size_t)py * bg->scanlineSize + (size_t)px * (src32 ? 4 : 2);
+                    const int r = src32 ? (int)(pix[2]) : (int)(((*(WORD*)pix >> 11) & 0x1F) << 3);
+                    const int g = src32 ? (int)(pix[1]) : (int)(((*(WORD*)pix >> 5) & 0x3F) << 2);
+                    const int b = src32 ? (int)(pix[0]) : (int)((*(WORD*)pix & 0x1F) << 3);
+                    sumR += r; sumG += g; sumB += b; ++count;
+                }
+            }
+            if (count > 0) {
+                g_ui.listR = (int)(sumR / count);
+                g_ui.listG = (int)(sumG / count);
+                g_ui.listB = (int)(sumB / count);
+            }
         }
         else {
             c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 20, 20, 20);
             c->DrawFrame(0, 0, kUiBarWidth, kUiBarHeight, 200, 180, 90);
+            // 无背景图时退回悬浮条暗色系
+            g_ui.listR = 20; g_ui.listG = 20; g_ui.listB = 20;
         }
         if (rows > 0) {
-            c->FillRectangle(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 10, 10, 30);
-            c->DrawFrame(0, kUiBarHeight, kUiBarWidth, rows * kUiRowHeight, 160, 140, 70);
+            c->FillRectangle(0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
+                (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
+            c->DrawFrame(0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight, 160, 140, 70);
         }
         char label[128] = {};
+        eTextColor labelColor = eTextColor::WHITE;
         if (g_ui.awaitingRebind) {
             char utf8[96] = {};
             _snprintf(utf8, sizeof(utf8), "可用：B F G K M N U V X Y，Esc 取消");
             UiToGbk_(utf8, label, sizeof(label));
         }
-        else if (g_uiWaitSaveUntil)
-            UiToGbk_("等待动画结束…", label, sizeof(label));
+        else if (g_ui.lastNoticeGbk[0] && GetTickCount() < g_ui.lastNoticeUntil) {
+            _snprintf(label, sizeof(label), "%s", g_ui.lastNoticeGbk);
+            // 醒目色（亮绿）：深棕底上与常规白字区分开，倒计时结束回常规状态行。
+            if (g_ui.lastNoticeHighlight) labelColor = eTextColor::LIGHT_GREEN;
+        }
         else if (g_ui.lastSavedStamp[0] && GetTickCount() < g_ui.lastSavedUntil) {
             char utf8[96] = {};
             _snprintf(utf8, sizeof(utf8), "已存档 %s", g_ui.lastSavedStamp);
@@ -467,7 +534,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
             UiToGbk_(utf8, label, sizeof(label));
         }
         font->TextDraw(c, label, 6, 0, kUiBarWidth - 60, kUiBarHeight,
-            eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+            labelColor, eTextAlignment::MIDDLE_LEFT);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
@@ -480,31 +547,36 @@ static void UiDrawBar_(H3CombatManager* mgr)
             for (int row = 0; row < rows; ++row) {
                 if (row == g_ui.hoverRow)
                     c->FillRectangle(2, listY + row * kUiRowHeight,
-                        kUiBarWidth - 4, kUiRowHeight, 90, 70, 20);
+                        kUiListWidth - 4, kUiRowHeight, 90, 70, 20);
                 char stamp[32] = {};
                 UiFormatStamp_(g_ui.entries[row], stamp, sizeof(stamp));
                 font->TextDraw(c, stamp, 6, listY + row * kUiRowHeight,
-                    kUiBarWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+                    kUiListWidth - 12, kUiRowHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
             }
         }
         bool bltOk = false;
         redrawing = true;
-        if (rectChanged && lastX >= 0 && wnd->screenPcx16
-            && UiBltPcx16Region_(wnd->screenPcx16, lastX, lastY, kUiBarWidth, lastH, lastX, lastY)) {
-            wnd->H3Redraw(lastX, lastY, kUiBarWidth, lastH);
+        if (rectChanged && lastX >= 0 && lastH > usedH && wnd->screenPcx16) {
+            const int tailY = lastY + usedH;
+            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiListWidth,
+                lastH - usedH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiListWidth, lastH - usedH);
         }
-        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, usedH, x, y);
-        wnd->H3Redraw(x, y, kUiBarWidth, usedH);
+        // 悬浮条(480 宽)与下拉列表(136 宽)分开 blt：列表右侧不清底、不覆盖战场
+        bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, kUiBarHeight, x, y);
+        if (rows > 0)
+            bltOk = UiBltPcx16Region_(c, 0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
+                x, y + kUiBarHeight) && bltOk;
+        wnd->H3Redraw(x, y, kUiBarWidth, kUiBarHeight);
+        if (rows > 0) wnd->H3Redraw(x, y + kUiBarHeight, kUiListWidth, rows * kUiRowHeight);
         redrawing = false;
         lastX = x;
         lastY = y;
         lastH = usedH;
         if (logInfo)
-            LogInfo("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
+            LogDebug("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
                 c, UiDDBackBuffer_(), x, y, bltOk ? 1 : 0);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        broken = true;
-        LogError("悬浮条绘制异常(code=0x%08X)，本会话停画防崩", GetExceptionCode());
+    } __except (GuardCrashFilter_(GUARD_DRAW, GetExceptionInformation())) {
+        redrawing = false;
     }
 }
 
@@ -548,9 +620,8 @@ static bool UiHitBar_(const H3Msg* msg)
 
 static int UiHitRow_(int px, int py)
 {
-    if (!g_ui.listOpen) return -1;
     const int top = g_ui.y + kUiBarHeight;
-    if (px < g_ui.x || px >= g_ui.x + kUiBarWidth || py < top) return -1;
+    if (px < g_ui.x || px >= g_ui.x + kUiListWidth || py < top) return -1;
     int row = (py - top) / kUiRowHeight;
     const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
         ? (int)g_ui.entries.size() : kUiListMaxRows;
@@ -558,64 +629,365 @@ static int UiHitRow_(int px, int py)
     return row;
 }
 
+static struct {
+    bool pending = false;
+    unsigned generation = 0;
+    DWORD requested = 0;
+    std::string battleKey;
+    UiSaveEntry entry;
+} g_restoreRequest;
+
 static void UiConfirmAndRestore_(const UiSaveEntry& entry)
 {
+    if (g_restoreBusy || g_restoreFatal || g_restoreRequest.pending || !g_battleInitialized) return;
+    // Copy before any dialog or redraw can invalidate the entries vector.
+    g_restoreRequest.entry = entry;
+    g_restoreRequest.battleKey = g_ui.battleKey;
+    g_restoreRequest.generation = g_battleGeneration;
+    g_restoreRequest.requested = GetTickCount();
+    g_restoreRequest.pending = true;
+    ClearBattleInputs_();
+    LogInfo("[Load] queued generation=%u path=%s", g_battleGeneration, DiagUtf8_(entry.path).c_str());
+}
+
+// Player text never includes raw diagnostics, even for a future unknown error.
+static std::string UiRestoreReasonZh_(const std::string& reason)
+{
+    static const struct { const char* raw; const char* zh; } reasons[] = {
+        {"battle generation changed", "确认期间战斗已切换，请重新选择存档。"},
+        {"restore window changed", "当前不在玩家等待下令的时刻，请回到战场后重试。"},
+        {"battle fingerprint changed", "当前战斗与所选存档不一致，请重新选择存档。"},
+        {"battle fingerprint failed", "无法识别当前战斗，请重新进入战斗。"},
+        {"未取得本场战斗的战前指纹，请重新进入战斗", "未取得本场战斗的战前指纹，请重新进入战斗。"},
+        {"archive battle key mismatch", "存档所属战斗与当前战斗不一致，不能读取。"},
+        {"archive not found", "所选存档已不存在，可能已被删除或移动。"},
+        {"unsupported capture version; create a new v4 save", "存档快照版本不兼容，请使用当前版本重新存档。"},
+        {"unsupported capture version", "存档快照版本不兼容，请使用当前版本重新存档。"},
+        {"capture version", "存档快照版本不兼容，请使用当前版本重新存档。"},
+        {"saved state is not a player waiting turn", "该存档不是玩家等待下令时的状态，不能恢复。"},
+        {"live active stack uses reserved slot", "存档快照版本不兼容，请使用当前版本重新存档。"},
+        {"battle participant count exceeds supported slots", "参战部队数量超出当前支持范围。"},
+        {"siege restoration is not supported yet", "暂不支持读取攻城战存档。"},
+        {"reserved slot scalar outside valid range", "存档中的保留位数值超出有效范围。"},
+        {"reserved slot AI target invalid", "存档中的保留位行动目标无效。"},
+        {"arrow tower restoration is not supported yet", "暂不支持恢复箭塔状态。"},
+        {"saved stack slot reference invalid", "存档中的部队位置引用无效。"},
+        {"saved stack scalar outside valid range", "存档中的部队数值超出有效范围。"},
+        {"non-finite spell effect", "存档中的法术效果数值无效。"},
+        {"saved AI target invalid", "存档中的电脑行动目标无效。"},
+        {"saved spell deque too large", "存档中的部队法术记录过多。"},
+        {"saved spell id invalid", "存档中存在无效的法术编号。"},
+        {"saved relation vector too large", "存档中的部队关联记录过多。"},
+        {"saved relation target invalid", "存档中的部队关联目标无效。"},
+        {"saved active stack is not alive", "存档中的行动部队已无存活单位。"},
+        {"saved obstacle count exceeds 4096", "存档中的障碍物数量超出支持上限。"},
+        {"saved obstacle kind outside known table", "存档中存在无法识别的障碍物类型。"},
+        {"saved obstacle geometry invalid", "存档中的障碍物位置或占格数据无效。"},
+        {"saved obstacle owner side invalid", "存档中的障碍物所属阵营无效。"},
+        {"saved obstacle def name invalid", "存档中的障碍物图像资源名称无效。"},
+        {"saved obstacle cell off board", "存档中的障碍物占格超出战场。"},
+        {"saved obstacles overlap on one hex", "存档中的障碍物占格重叠，无法安全恢复。"},
+        {"battlefield references reserved slot", "战场格子引用了不支持的部队保留位置。"},
+        {"live corpse count invalid", "当前战场的尸体数量数据无效。"},
+        {"live corpse references reserved slot", "当前战场尸体引用了不支持的部队保留位置。"},
+        {"corpse count invalid", "存档中的尸体数量数据无效。"},
+        {"square references absent stack", "存档中的战场格子引用了不存在的部队。"},
+        {"square position or second hex inconsistent", "存档中的部队占格与位置数据不一致。"},
+        {"corpse identity invalid", "存档中的尸体所属部队无效。"},
+        {"stack and battlefield position disagree", "存档中的部队位置与战场格子不一致。"},
+        {"double-wide second hex missing", "存档中双格部队的第二个占格缺失。"},
+        {"battle section overflow", "战斗数据段超出存档容量限制。"},
+        {"capture exceeds an exact-save limit", "战斗快照超出精确存档的支持范围。"},
+        {"null capture output", "无法创建战斗快照，请重新尝试。"},
+        {"capture is missing a required section", "存档缺少必要的战斗数据段。"},
+        {"battle wall arrays are truncated", "存档中的城墙数据不完整。"},
+        {"battle section is corrupt", "存档中的战斗数据段已损坏。"},
+        {"stack section version mismatch", "存档中的部队数据段版本不兼容。"},
+        {"stack section is corrupt", "存档中的部队数据段已损坏。"},
+        {"square section header mismatch", "存档中的战场格子数据头不匹配。"},
+        {"square section is corrupt", "存档中的战场格子数据段已损坏。"},
+        {"obstacle section version mismatch", "存档中的障碍物数据段版本不兼容。"},
+        {"obstacle count exceeds 4096", "存档中的障碍物数量超出支持上限。"},
+        {"obstacle section is corrupt", "存档中的障碍物数据段已损坏。"},
+        {"log section version mismatch", "存档中的战斗日志数据段版本不兼容。"},
+        {"log count exceeds 100000", "存档中的战斗日志条数超出支持上限。"},
+        {"log section is corrupt", "存档中的战斗日志数据段已损坏。"},
+        {"hero section version mismatch", "存档中的英雄数据段版本不兼容。"},
+        {"hero section is corrupt or mana differs from battle section", "存档中的英雄数据损坏，或魔法值与战斗数据不一致。"},
+        {"relation section version mismatch", "存档中的部队关联数据段版本不兼容。"},
+        {"relation section is corrupt", "存档中的部队关联数据段已损坏。"},
+        {"spell section version mismatch", "存档中的法术数据段版本不兼容。"},
+        {"spell section is corrupt", "存档中的法术数据段已损坏。"},
+        {"combat manager is not readable", "无法读取当前战斗状态，请回到战场后重试。"},
+        {"eagle-eye set is invalid", "当前战斗的鹰眼术记录无效。"},
+        {"square corpse count outside 0..14", "当前战场格子的尸体数量超出有效范围。"},
+        {"obstacle container is not readable", "无法读取当前战斗的障碍物记录。"},
+        {"obstacle info pointer is not a recognized kind", "当前战斗存在无法识别的障碍物。"},
+        {"obstacle blocked count outside 0..8", "当前障碍物的占格数量超出有效范围。"},
+        {"obstacle def name is not readable", "无法读取当前障碍物的图像资源名称。"},
+        {"obstacle anchor hex off board", "当前障碍物的起始格超出战场。"},
+        {"obstacle cell off board", "当前障碍物的占格超出战场。"},
+        {"obstacle anchor square linkage is broken", "当前障碍物与起始格的关联已失效。"},
+        {"obstacle cell square linkage is broken", "当前障碍物与战场占格的关联已失效。"},
+        {"combat log container is not readable", "无法读取当前战斗的日志记录。"},
+        {"combat log line is not readable", "当前战斗日志中存在无法读取的记录。"},
+        {"AI目标指针不属于本战场", "当前电脑行动目标不属于本战场。"},
+        {"stack relation points outside the combat manager", "当前部队的关联目标不属于本战场。"},
+        {"spell deque is not readable", "无法读取当前部队的法术记录。"},
+        {"active stack index", "存档中的行动部队编号无效。"},
+        {"stack identity", "存档中的部队类型或位置无效。"},
+        {"relation target", "存档中的部队关联目标无效。"},
+        {"empty capture", "存档中没有可恢复的部队。"},
+        {"obstacle vector is not accessible", "当前障碍物记录不可访问，无法安全恢复。"},
+        {"live obstacle resource is unavailable", "当前障碍物的图像资源不可用。"},
+        {"live obstacle release slot is unavailable", "当前障碍物的资源释放接口不可用。"},
+        {"saved obstacle payload is invalid", "存档中的障碍物数据无效。"},
+        {"saved obstacle kind is not present in this game build", "存档中的障碍物类型与当前游戏版本不兼容。"},
+        {"saved obstacle def name does not match the live table", "存档中的障碍物图像资源与当前游戏不一致。"},
+        {"saved obstacle cell count does not match the live table", "存档中的障碍物占格数量与当前游戏不一致。"},
+        {"saved obstacle cell layout does not match the live table", "存档中的障碍物占格布局与当前游戏不一致。"},
+        {"obstacle vector would exceed the supported size", "恢复后的障碍物记录数量将超出支持上限。"},
+        {"resource donor failed validation", "用于恢复的障碍物图像资源未通过校验。"},
+        {"obstacle def could not be loaded", "无法加载存档所需的障碍物图像资源。"},
+        {"obstacle def failed validation", "存档所需的障碍物图像资源未通过校验。"},
+        {"live obstacle kind degraded since capture", "当前障碍物类型已发生变化，请重新尝试。"},
+        {"not at outer player message boundary", "当前不在玩家等待下令的安全时刻，请稍后重试。"},
+        {"hero mana not writable", "当前英雄魔法值不可写入，无法安全恢复。"},
+        {"battle memory not writable", "当前战斗状态不可写入，无法安全恢复。"},
+        {"log dialog not writable", "当前战斗日志窗口不可写入，无法安全恢复。"},
+        {"log preallocation failed", "为战斗日志分配内存失败，请稍后重试。"},
+        {"object preallocation failed", "为战斗对象分配内存失败，请稍后重试。"},
+        {"prepared eagle-eye set mismatch", "准备恢复的鹰眼术记录未通过一致性校验。"},
+        {"saved creature DEF frame unavailable", "存档所需的部队动画帧不可用。"},
+        {"rollback creature DEF frame unavailable", "当前部队的回滚动画帧不可用，无法安全恢复。"},
+        {"obstacle rebuild failed", "障碍物重建失败，未完成读档。"},
+        {"restore mismatch; rolled back", "恢复结果与存档不一致，已回滚到读档前状态。"},
+        {"resource pool release faulted", "释放障碍物资源时发生异常，已停止战斗。"},
+        {"resource pool pin faulted", "保留障碍物资源时发生异常，已停止战斗。"},
+        {"resource pool load faulted", "加载障碍物资源时发生异常，已停止战斗。"},
+        {"obstacle scratch capacity was not prepared", "障碍物恢复工作区未准备完成，已停止战斗。"},
+        {"prepared obstacle resource is missing", "已准备的障碍物资源丢失，已停止战斗。"},
+        {"obstacle zombie cleanup faulted", "清理已失效的障碍物时发生异常，已停止战斗。"},
+        {"obstacle removal faulted", "移除障碍物时发生异常，已停止战斗。"},
+        {"obstacle entry reference faulted", "引用障碍物资源时发生异常，已停止战斗。"},
+        {"obstacle vector insert faulted", "添加障碍物时发生异常，已停止战斗。"},
+        {"obstacle square placement faulted", "恢复障碍物占格时发生异常，已停止战斗。"},
+        {"rebuilt obstacle set lost saved identity", "重建后的障碍物与存档不一致，已停止战斗。"},
+        {"obstacle rebuild fault; stopping with partial write", "障碍物重建发生异常，状态可能仅部分恢复，已停止战斗。"},
+        {"rollback fault; stopping with unverified state", "回滚发生异常，战斗状态无法确认，已停止战斗。"},
+        {"rollback verification failed", "回滚状态未通过校验，已停止战斗。"},
+        {"native object allocator fault", "分配战斗对象时发生异常，已停止战斗。"},
+        {"deque allocation cleanup fault", "清理法术记录内存时发生异常，已停止战斗。"},
+        {"deque map cleanup fault", "清理法术记录索引时发生异常，已停止战斗。"},
+        {"eagle-eye set constructor fault", "创建鹰眼术记录时发生异常，已停止战斗。"},
+        {"eagle-eye set insertion fault", "恢复鹰眼术记录时发生异常，已停止战斗。"},
+        {"native stack preparation fault", "准备部队对象时发生异常，已停止战斗。"},
+        {"native stack release fault", "释放部队对象时发生异常，已停止战斗。"},
+        {"eagle-eye set release fault", "释放鹰眼术记录时发生异常，已停止战斗。"},
+        {"恢复随机数状态时发生异常，已停止战斗", "恢复随机数状态时发生异常，已停止战斗。"},
+        {"恢复后刷新战场发生异常，已停止战斗", "恢复后刷新战场发生异常，已停止战斗。"},
+        {"回滚后刷新战场发生异常，已停止战斗", "回滚后刷新战场发生异常，已停止战斗。"},
+        {"提交随机数状态时发生异常，已停止战斗", "提交随机数状态时发生异常，已停止战斗。"},
+        {"archive CRC mismatch", "存档文件校验失败，文件已损坏或被修改。"},
+        {"section CRC mismatch", "存档数据段校验失败，文件已损坏或被修改。"},
+        {"unsupported archive version", "存档文件版本不兼容，请重新存档。"},
+        {"bad archive magic", "所选文件不是有效的战场存档。"},
+        {"archive shorter than minimum frame", "存档文件不完整，无法读取。"},
+        {"archive exceeds 64MB", "存档文件大小超出支持上限。"},
+        {"filename does not match archive identity", "存档文件名与内容不一致，无法安全读取。"},
+        {"record metadata does not match archive", "存档内容已改变，请刷新列表后重新选择。"},
+        {"archive root is empty", "存档目录未设置，请检查配置。"},
+        {"archive root is not a directory", "存档目录路径不是文件夹，请检查配置。"},
+        {"archive path has no directory", "存档文件路径缺少目录信息。"},
+        {"archive path is outside the store root", "存档文件路径不在允许的存档目录内。"},
+        {"refusing archive path outside the store root", "存档文件路径不在允许的存档目录内。"},
+        {"GetFinalPathNameByHandleW failed", "无法确认存档文件的实际路径。"},
+        {"GetFinalPathNameByHandleW truncated", "存档文件的实际路径不完整。"},
+        {"cannot create archive root", "无法创建存档目录，请检查目录路径和访问权限。"},
+        {"cannot scan archive root", "无法扫描存档目录，请检查目录访问权限。"},
+        {"archive scan ended early", "扫描存档目录时中断，请重新尝试。"},
+        {"CreateFileW failed", "无法打开存档，请检查文件访问权限或是否被占用。"},
+        {"cannot open archive", "无法打开存档，请检查文件访问权限或是否被占用。"},
+        {"cannot read archive size", "无法读取存档文件大小。"},
+        {"ReadFile failed", "读取存档文件失败，请检查磁盘或文件占用情况。"},
+        {"short archive read", "存档文件未完整读出，可能已被截断。"},
+        {"utf8 conversion failed", "无法解析读档失败原因，请查看插件日志。"}
+    };
+    for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i)
+        if (reason == reasons[i].raw) return reasons[i].zh;
+
+    if (std::any_of(reason.begin(), reason.end(), [](unsigned char c) { return c >= 0x80; })) return reason;
+    std::string lower = reason;
+    for (size_t i = 0; i < lower.size(); ++i)
+        if (lower[i] >= 'A' && lower[i] <= 'Z') lower[i] += 'a' - 'A';
+    auto has = [&](const char* token) { return lower.find(token) != std::string::npos; };
+    if (has("crc") || has("checksum")) return "存档校验失败，文件已损坏或被修改。";
+    if (has("access denied") || has("permission")) return "没有访问存档文件或目录的权限，请检查访问权限。";
+    if (has("path not found") || has("invalid path") || has("invalid name") || has("directory"))
+        return "存档目录或文件路径无效，请检查路径配置。";
+    if (has("file not found") || has("not exist") || has("vanished")) return "所选存档已不存在，可能已被删除或移动。";
+    if (has("sharing violation") || has("lock violation")) return "存档文件正被其他程序占用，请稍后重试。";
+    if (has("outside") || has("path") || has("filename")) return "存档路径或文件名不符合要求，无法安全读取。";
+    if (has("version")) return "存档版本与当前插件不兼容，请重新存档。";
+    if (has("fingerprint") || has("key") || has("metadata")) return "存档标识与当前战斗或列表记录不一致。";
+    if (has("truncated") || has("corrupt") || has("header") || has("section") || has("trailing bytes"))
+        return "存档数据不完整或已损坏，无法读取。";
+    if (has("allocation") || has("preallocation") || has("overflow") || has("too large") || has("exceeds"))
+        return "读档所需内存或数据规模超出支持范围。";
+    if (has("rollback")) return "战斗恢复或回滚未通过校验，请查看插件日志。";
+    if (has("fault") || has("exception")) return "恢复战斗时发生内部异常，请查看插件日志。";
+    if (has("obstacle") || has("resource") || has("def")) return "障碍物或图像资源不满足恢复条件。";
+    if (has("stack") || has("corpse") || has("square") || has("relation")) return "部队或战场格子数据不满足恢复条件。";
+    if (has("spell") || has("eagle-eye") || has("mana")) return "法术或英雄数据不满足恢复条件。";
+    if (has("read") || has("open") || has("scan")) return "无法读取存档或当前战斗数据，请稍后重试。";
+    return "无法完成读档，具体原因请查看插件日志。";
+}
+
+// Archive errors omit Win32 codes; only attach a code to generic I/O failures.
+static std::string UiArchiveRestoreReason_(const std::wstring& error, DWORD code)
+{
+    std::string raw = DiagUtf8_(error);
+    if (raw != "CreateFileW failed" && raw != "cannot open archive" && raw != "cannot scan archive root"
+        && raw != "cannot create archive root" && raw != "ReadFile failed") return raw;
+    switch (code) {
+    case ERROR_ACCESS_DENIED: raw += "; access denied"; break;
+    case ERROR_FILE_NOT_FOUND: raw += "; file not found"; break;
+    case ERROR_PATH_NOT_FOUND: raw += "; path not found"; break;
+    case ERROR_INVALID_NAME: raw += "; invalid name"; break;
+    case ERROR_BAD_PATHNAME:
+    case ERROR_FILENAME_EXCED_RANGE:
+    case ERROR_INVALID_DRIVE:
+    case ERROR_DIRECTORY: raw += "; invalid path"; break;
+    case ERROR_SHARING_VIOLATION: raw += "; sharing violation"; break;
+    case ERROR_LOCK_VIOLATION: raw += "; lock violation"; break;
+    default: break;
+    }
+    LogWarn("[Load op=%ld] archive raw=%s win32=%lu", g_diag.id, DiagUtf8_(error).c_str(), code);
+    return raw;
+}
+
+static void UiRestoreFailure_(const char* outcome, const std::string& raw)
+{
+    const std::string reason = UiRestoreReasonZh_(raw);
+    LogWarn("[Load op=%ld] raw=%s reason_zh=%s fatal=%d", g_diag.id, raw.c_str(), reason.c_str(), g_restoreFatal ? 1 : 0);
+    // Keep the fatal diagnostic write context; never show a dialog in that state.
+    if (g_restoreFatal) return;
+    DiagEnd_(outcome, reason.c_str());
+    const std::string message = std::string("读档未完成：") + reason;
+    char notice[512] = {};
+    UiToGbk_(message.c_str(), notice, sizeof(notice));
+    H3Messagebox::Show(notice);
+}
+
+static void UiExecuteRestore_(H3CombatManager* mgr)
+{
+    if (g_restoreFatal) { g_restoreRequest.pending = false; return; }
+    const UiSaveEntry entry = g_restoreRequest.entry;
+    const unsigned generation = g_restoreRequest.generation;
+    const std::string expectedKey = g_restoreRequest.battleKey;
+    g_restoreRequest.pending = false;
+    g_restoreBusy = true;
+    struct BusyReset { ~BusyReset() { ClearBattleInputs_(); g_restoreBusy = false; } } busyReset;
+    DiagBegin_("load", "outer-message", mgr);
     char stamp[32] = {};
     UiFormatStamp_(entry, stamp, sizeof(stamp));
-    char text[160] = {};
-    char textUtf8[160] = {};
-    _snprintf(textUtf8, sizeof(textUtf8), "读回 %s 这一档？当前未保存的进度会丢掉。", stamp);
-    UiToGbk_(textUtf8, text, sizeof(text));
-    if (!H3Messagebox::Choice(text))
-        return;
-    H3CombatManager* mgr = H3CombatManager::Get();
-    const char* reason = nullptr;
-    if (!CombatCanCapture_(mgr, &reason)) {
-        LogWarn("读档被拒绝：%s", reason ? reason : "unsafe");
-        return;
+    char text[192] = {}, utf8[192] = {};
+    _snprintf(utf8, sizeof(utf8), "读回 %s 这一档？当前未保存的进度会丢掉。", stamp);
+    UiToGbk_(utf8, text, sizeof(text));
+    DiagStage_("load.confirm");
+    const bool confirmed = H3Messagebox::Choice(text);
+    if (g_restoreFatal) return;
+    if (!confirmed) { DiagEnd_("cancelled", "玩家取消读档确认"); return; }
+    std::string key, error;
+    if (generation != g_battleGeneration) {
+        UiRestoreFailure_("rejected", "battle generation changed"); return;
     }
-    std::string battleKey;
-    std::string error;
-    if (!BattleFingerprint_(mgr, &battleKey, &error)) {
-        LogError("读档失败：fingerprint");
-        return;
+    if (!RestoreWindow_(mgr)) {
+        UiRestoreFailure_("rejected", "restore window changed"); return;
+    }
+    if (!BattleFingerprint_(mgr, &key, &error)) {
+        UiRestoreFailure_("rejected", error.empty() ? "battle fingerprint failed" : error); return;
+    }
+    if (key != expectedKey) {
+        LogWarn("[Load op=%ld] expected_battle=%s current_battle=%s", g_diag.id, expectedKey.c_str(), key.c_str());
+        UiRestoreFailure_("rejected", "battle fingerprint changed"); return;
     }
     hbs::ArchiveStore store(ArchiveRoot_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
-    if (!store.List(battleKey, "", records, storeError)) {
-        LogError("读档失败：archive list failed");
-        return;
+    SetLastError(ERROR_SUCCESS);
+    if (!store.List(key, "", records, storeError)) {
+        const DWORD code = GetLastError();
+        UiRestoreFailure_("failed", UiArchiveRestoreReason_(storeError, code)); return;
     }
+    if (!storeError.empty())
+        LogWarn("[Load op=%ld] scan warning raw=%s reason_zh=%s", g_diag.id,
+            DiagUtf8_(storeError).c_str(), UiRestoreReasonZh_(DiagUtf8_(storeError)).c_str());
     const hbs::ArchiveRecord* found = nullptr;
-    for (size_t i = 0; i < records.size(); ++i) {
-        if (records[i].path == entry.path
-            && records[i].timestampUtcMs == entry.timestampUtcMs
-            && records[i].sequence == entry.sequence) {
-            found = &records[i];
-            break;
-        }
-    }
+    for (size_t i = 0; i < records.size(); ++i)
+        if (records[i].path == entry.path && records[i].timestampUtcMs == entry.timestampUtcMs
+            && records[i].sequence == entry.sequence) { found = &records[i]; break; }
     if (!found) {
-        LogError("读档失败：record vanished");
-        return;
+        // Scan skips corrupt files; preserve the selected file's reason, not another file's warning.
+        const std::wstring marker = hbs::detail::FileNameOf(entry.path) + L": ";
+        const size_t warning = storeError.find(marker);
+        if (warning != std::wstring::npos) {
+            const size_t start = warning + marker.size();
+            const size_t end = storeError.find(L"; ", start);
+            const std::wstring selectedError = storeError.substr(start, end == std::wstring::npos ? end : end - start);
+            // Reopen only for generic I/O diagnostics, since Scan lost the original OS code.
+            DWORD code = ERROR_SUCCESS;
+            if (selectedError == L"CreateFileW failed" || selectedError == L"cannot open archive") {
+                HANDLE file = CreateFileW(entry.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file == INVALID_HANDLE_VALUE) code = GetLastError();
+                else CloseHandle(file);
+            }
+            UiRestoreFailure_("failed", UiArchiveRestoreReason_(selectedError, code)); return;
+        }
+        const DWORD attributes = GetFileAttributesW(entry.path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD code = GetLastError();
+            UiRestoreFailure_("failed", UiArchiveRestoreReason_(L"cannot open archive", code)); return;
+        }
+        UiRestoreFailure_("rejected", "record metadata does not match archive"); return;
     }
     hbs::ArchiveDocument document;
-    CodecCapture capture;
-    if (!store.Load(*found, document, storeError)
-        || !CodecDecode(document.sections, &capture, &error)) {
-        LogError("读档失败：%s", error.empty() ? "archive load failed" : error.c_str());
+    storeError.clear();
+    SetLastError(ERROR_SUCCESS);
+    if (!store.Load(*found, document, storeError)) {
+        const DWORD code = GetLastError();
+        UiRestoreFailure_("failed", UiArchiveRestoreReason_(storeError, code)); return;
+    }
+    if (document.battleKey != key) {
+        LogWarn("[Load op=%ld] archive_battle=%s current_battle=%s", g_diag.id, document.battleKey.c_str(), key.c_str());
+        UiRestoreFailure_("rejected", "archive battle key mismatch"); return;
+    }
+    std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
+    CodecCapture& capture = *captureStorage;
+    if (!CodecDecode(document.sections, &capture, &error) || !RestoreSameBattle_(mgr, capture, key, &error)) {
+        UiRestoreFailure_("rejected", error);
         return;
     }
-    if (!RestoreSameBattle_(mgr, capture, &error)) {
-        LogError("战斗恢复失败：%s", error.c_str());
-        return;
-    }
-    UiReloadEntries_(mgr);
-    g_ui.listOpen = false;
-    LogInfo("战斗时刻已恢复：%s", stamp);
+    DiagEnd_("serialized-equal", "第五版快照已恢复并通过数据一致性校验；实机轨迹验收仍待验证");
+    // Success notice (2026-10-07 用户裁定)：本插件悬浮框醒目色显示几秒，
+    // 到时自动回常规状态行；模态弹窗只留给失败。
+    char done[96] = {};
+    _snprintf(done, sizeof(done), "已读档：第 %d 回合", capture.turn);
+    UiMarkNoticeHighlight_(done);
+    // No rendering after the final RNG commit in this handler.
 }
 
+static void UiProcessRestore_(H3CombatManager* mgr, int result)
+{
+    if (!g_restoreRequest.pending || g_restoreBusy) return;
+    if (result == 2 || g_restoreRequest.generation != g_battleGeneration
+        || GetTickCount() - g_restoreRequest.requested > 5000) {
+        g_restoreRequest.pending = false;
+        LogWarn("[Load] cancelled: battle changed, closing or wait timeout"); return;
+    }
+    if (RestoreWindow_(mgr)) UiExecuteRestore_(mgr);
+}
 static void UiHandleMouse_(H3Msg* msg)
 {
     if (!msg) return;
@@ -628,20 +1000,18 @@ static void UiHandleMouse_(H3Msg* msg)
     }
     if (msg->command != eMsgCommand::MOUSE_BUTTON) return;
     // 兜底路径与系统钩子并存（游戏轮询合成消息吞不掉）：不再置拖动，
-    // 条上按下只收列表；点击处理统一由系统钩子 → UiHandleFrameClick_ 完成。
+    // 常驻列表不切换显隐；点击处理统一由系统钩子 → UiHandleFrameClick_ 完成。
     if (msg->subtype == eMsgSubtype::LBUTTON_DOWN && UiHitBar_(msg)) {
-        g_ui.listOpen = false;
         return;
     }
     if (msg->subtype == eMsgSubtype::LBUTTON_CLICK) {
         if (UiHitBar_(msg)) {
             if (px >= g_ui.x + kUiBarWidth - 52) {
                 g_ui.awaitingRebind = true;
-                g_uiWaitSaveUntil = 0;  // 进改键即放弃未决的存档等待
+                CancelSaveWait_("rebind entered");
                 return;
             }
-            g_ui.listOpen = !g_ui.listOpen;
-            if (g_ui.listOpen) UiReloadEntries_(H3CombatManager::Get());
+            UiReloadEntries_(H3CombatManager::Get());
             return;
         }
         const int row = UiHitRow_(px, py);
@@ -649,7 +1019,6 @@ static void UiHandleMouse_(H3Msg* msg)
             UiConfirmAndRestore_(g_ui.entries[row]);
             return;
         }
-        if (g_ui.listOpen) g_ui.listOpen = false;
         return;
     }
     if (msg->subtype == eMsgSubtype::RBUTTON_DOWN) {
@@ -722,18 +1091,10 @@ static void UiHandleFrameClick_(int gameX, int gameY)
     if (UiPointInBar_(gameX, gameY)) {
         if (gameX >= g_ui.x + kUiBarWidth - 58) {
             g_ui.awaitingRebind = true;
-            g_uiWaitSaveUntil = 0;  // 进改键即放弃未决的存档等待（2026-10-05）
+            CancelSaveWait_("rebind entered");
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else {
-            g_ui.listOpen = !g_ui.listOpen;
-            if (g_ui.listOpen) {
-                UiReloadEntries_(H3CombatManager::Get());
-            } else {
-                // 关列表：旧列表区在战场框外，恢复源不可靠，请求全屏重绘清场
-                H3WindowManager* w = H3WindowManager::Get();
-                if (w && w->screenPcx16)
-                    w->H3Redraw(0, 0, w->screenPcx16->width, w->screenPcx16->height);
-            }
+            UiReloadEntries_(H3CombatManager::Get());
             LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
         }
         return;
@@ -743,7 +1104,6 @@ static void UiHandleFrameClick_(int gameX, int gameY)
         UiConfirmAndRestore_(g_ui.entries[row]);
         return;
     }
-    if (g_ui.listOpen) g_ui.listOpen = false;
     if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
 }
 

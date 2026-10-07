@@ -3,6 +3,18 @@
 
 #pragma comment(lib, "version.lib")
 
+static const int GUARD_KEYBOARD = GuardRegisterHook_("BattleStore.Keyboard");
+static const int GUARD_MOUSE = GuardRegisterHook_("BattleStore.Mouse");
+static const int GUARD_MESSAGE = GuardRegisterHook_("BattleStore.Message");
+static const int GUARD_CYCLE = GuardRegisterHook_("BattleStore.Cycle");
+static const int GUARD_BLT = GuardRegisterHook_("BattleStore.AfterBlt");
+static const int GUARD_INIT = GuardRegisterHook_("BattleStore.Init");
+static unsigned g_waitKeyEvents = 0;
+static unsigned g_waitMouseEvents = 0;
+static unsigned g_waitGameEvents = 0;
+static const char* g_waitReason = nullptr;
+
+
 static void LogSelfVersion_()
 {
     wchar_t wpath[MAX_PATH] = {};
@@ -34,6 +46,10 @@ static void LogSelfVersion_()
         delete[] data;
     }
     LogInfo("战斗存档 v%s | DLL=%s", ver, utf8);
+    LogInfo("诊断构建=%s compiled=%s %s pid=%lu archive=%u codec=%u ptr=%u mgrSize=%u stackSize=%u",
+        kDiagnosticBuild_, __DATE__, __TIME__, GetCurrentProcessId(), (unsigned)hbs::kFormatVersion,
+        kCodecVersion, (unsigned)sizeof(void*), (unsigned)sizeof(H3CombatManager), (unsigned)sizeof(H3CombatCreature));
+    LogWarn("[Coverage] codec v3 stable-topology restore; serialized mismatch rollback; runtime/UI/RNG trajectory acceptance pending");
 }
 
 static bool CombatIsReadable_(const H3CombatManager* mgr)
@@ -41,23 +57,112 @@ static bool CombatIsReadable_(const H3CombatManager* mgr)
     return mgr && !IsBadReadPtr(mgr, sizeof(H3CombatManager));
 }
 
-// ArchiveRoot_ 的栈缓冲在游戏回调线程上有溢出风险（kPathCap_ = 4MB），改用堆。
+// ===== 存档根 v4（2026-10-06 对齐 HD Folders 的准确规则）=====
+// HD 的 UI.Ext.ScenarioMgr.Folders=1（本机默认开）在原版档落 Games\ 根后，
+// 再复制一份到 .\games\<目录名>\<年月日>.GM1（热座带 [hotseat] 前缀）。
+// 目录名链（HD_SODSrc all_functions_named.c:191556-191640，与 HD dll 串池
+// "Unnamed"/"\games\%s"/"%s\%d%d%d%s" 相邻互证）：
+//   基础名 = *(char**)(*(DWORD*)0x699538 + 0x1fb40)   // 游戏名（热座=玩家输入；
+//                                                        单人遭遇战引擎设为地图名，
+//                                                        盘证 Games\{~c}山海界 v1.6 战略版}\）
+//   指针 NULL 或空串 → "Unnamed"（HD s_Unnamed_011460e4；盘证 Games\Unnamed\
+//   有随机图过天档；"Random" 属 HD.Misc.TournamentSaver 键，与此无关）
+//   再经字符清洗（HD FUN_010e2e80 mode=1，花括号颜色码 {~c} 保留）。
+// 本插件每次现读该链拼 <游戏根>\Games\<目录名>（用户拍板不缓存），
+// 链不可读退回 Games\ 根。路径缓冲一律堆分配（AGENTS.md 规范）。
+static bool FindGamesRoot_(std::wstring& gamesRoot)
+{
+    wchar_t* path = new (std::nothrow) wchar_t[kPathCap_ / 2]();
+    if (!path) return false;
+    bool ok = false;
+    if (GetModuleFileNameW(g_hModule, path, kPathCap_ / 2)) {
+        for (int level = 0; level < 8 && !ok; ++level) {
+            wchar_t* slash = wcsrchr(path, L'\\');
+            if (!slash) slash = wcsrchr(path, L'/');
+            if (!slash || slash == path) break;
+            *slash = 0;
+            std::wstring candidate = std::wstring(path) + L"\\Games";
+            const DWORD attrs = GetFileAttributesW(candidate.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                gamesRoot.swap(candidate);
+                ok = true;
+            }
+        }
+    }
+    delete[] path;
+    return ok;
+}
+
+// 游戏名（HD 语义）→ Games 下的子目录名。返回 true = folder 可信；
+// false = 链不可读（调用方退回 Games\\战场存档）。空名 → "Unnamed"（对齐 HD）。
+static bool ReadSaveFolderName_(std::wstring& folder)
+{
+    folder.clear();
+    if (IsBadReadPtr((void*)0x699538, 4)) return false;
+    const DWORD base = *(DWORD*)0x699538;
+    if (!base || IsBadReadPtr((void*)(base + 0x1fb40), 4)) return false;
+    const char* text = *(const char**)(base + 0x1fb40);
+    if (!text) {
+        folder.assign(L"Unnamed");
+        return true;
+    }
+    if (IsBadStringPtrA(text, 260)) return false;
+    char ansi[260];
+    lstrcpynA(ansi, text, 260);
+    // 去首尾空白
+    char* end = ansi + strlen(ansi);
+    while (end > ansi && (unsigned char)end[-1] <= ' ') *--end = 0;
+    const char* begin = ansi;
+    while (*begin && (unsigned char)*begin <= ' ') ++begin;
+    if (!*begin) {
+        folder.assign(L"Unnamed");
+        return true;
+    }
+    if (strstr(begin, "..") || strchr(begin, ':')) return false;
+    for (const char* c = begin; *c; ++c) {
+        const unsigned char uc = (unsigned char)*c;
+        if (uc < 0x20 || strchr("<>\"|?*", *c)) return false;
+    }
+    wchar_t wide[130];
+    const int chars = MultiByteToWideChar(CP_ACP, 0, begin, -1, wide, 129);
+    if (chars <= 1) return false;
+    folder.assign(wide);
+    return true;
+}
+
 static std::wstring ArchiveRoot_()
 {
-    const size_t cap = 4096;
-    wchar_t* path = new (std::nothrow) wchar_t[cap]();
-    std::wstring result;
-    if (path) {
-        GetModuleFileNameW(g_hModule, path, (DWORD)cap);
-        wchar_t* slash = wcsrchr(path, L'\\');
-        if (!slash) slash = wcsrchr(path, L'/');
-        if (slash) *(slash + 1) = 0;
-        else path[0] = 0;
-        wcscat_s(path, cap, L"H3BattleStore.data");
-        result = path;
-        delete[] path;
+    std::wstring gamesRoot;
+    if (!FindGamesRoot_(gamesRoot)) {
+        // 兜底（几乎不可达）：DLL 同目录
+        wchar_t* path = new (std::nothrow) wchar_t[kPathCap_ / 2]();
+        std::wstring result;
+        if (path) {
+            GetModuleFileNameW(g_hModule, path, kPathCap_ / 2);
+            wchar_t* slash = wcsrchr(path, L'\\');
+            if (!slash) slash = wcsrchr(path, L'/');
+            if (slash) *(slash + 1) = 0;
+            else path[0] = 0;
+            result = path;
+            delete[] path;
+        }
+        return result + L"战场存档";
     }
-    return result;
+    std::wstring folder;
+    if (!ReadSaveFolderName_(folder)) {
+        static bool warned = false;
+        if (!warned) {
+            LogWarn("[Archive] 游戏名链(*(DWORD*)0x699538 + 0x1fb40)不可读，使用 Games\\战场存档");
+            warned = true;
+        }
+        folder.clear();
+    }
+    std::wstring root = gamesRoot;
+    if (!folder.empty()) {
+        root += L"\\";
+        root += folder;
+    }
+    return root + L"\\战场存档";
 }
 
 static bool CombatCanCapture_(const H3CombatManager* mgr, const char** reason)
@@ -65,20 +170,8 @@ static bool CombatCanCapture_(const H3CombatManager* mgr, const char** reason)
     if (!CombatIsReadable_(mgr)) { if (reason) *reason = "no combat"; return false; }
     if (mgr->finished) { if (reason) *reason = "combat finished"; return false; }
     if (mgr->autoCombat) { if (reason) *reason = "auto combat"; return false; }
-    if (mgr->action != 0 || mgr->actionParameter || mgr->actionTarget || mgr->actionParameter2) {
-        // 2026-10-05 实测：玩家空闲悬停时该四元组也持续非零（疑似 UI 预备动作），
-        // 不能作为保存门槛；保存是纯读快照，动态风险由 actionUndergoing /
-        // travelingSquares / finished / tacticsPhase 把关。此处仅记录观察值。
-        static DWORD lastActionLog = 0;
-        const DWORD actionNow = GetTickCount();
-        if (actionNow - lastActionLog > 2000) {
-            LogInfo("保存时动作字段非零：action=%d p=%d t=%d p2=%d",
-                (int)mgr->action, (int)(INT_PTR)mgr->actionParameter,
-                (int)(INT_PTR)mgr->actionTarget, (int)(INT_PTR)mgr->actionParameter2);
-            lastActionLog = actionNow;
-        }
-    }
-    if (mgr->actionUndergoing) { if (reason) *reason = "animation in progress"; return false; }
+    // The H3API tail boolean is shifted to +0x1402F (native auto-retreat),
+    // not the actual +0x14030 action byte. Neither is used as a busy gate.
     return true;
 }
 
@@ -105,7 +198,10 @@ static bool Sha256Hex_(const uint8_t* data, size_t size, std::string* out)
     return true;
 }
 
-static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error)
+static std::string g_preBattleKey_;
+static const H3CombatManager* g_preBattleManager_ = nullptr;
+
+static bool BattleInitialFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error)
 {
     if (!CombatIsReadable_(mgr) || !out) return false;
     std::vector<uint8_t> bytes;
@@ -118,21 +214,43 @@ static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std
     };
     put32(mgr->landType);
     put32(mgr->specialTerrain);
-    put32(mgr->siegeKind);
-    put32(mgr->hasMoat);
+    put32(mgr->siegeKind2); // Fortification level, not mutable door status at +0x53A4.
+    put32(*((const uint8_t*)mgr + 0x53A8));
+    put32(*((const uint8_t*)mgr + 0x53A9));
     put32((int32_t)mgr->boatCombat);
     put32(mgr->town ? 1 : 0);
     for (int side = 0; side < 2; ++side) {
         put32(mgr->heroOwner[side]);
-        put32(mgr->heroMonCount[side]);
+        const H3Army* army = mgr->army[side];
+        if (!Readable_(army, sizeof(H3Army))) {
+            if (error) *error = "战前军队数据不可读取";
+            return false;
+        }
         put32(mgr->hero[side] ? 1 : 0);
         for (int slot = 0; slot < 7; ++slot) {
-            const H3CombatCreature& stack = mgr->stacks[side][slot];
-            put32(stack.type);
-            put32(stack.numberAtStart);
-            put32(stack.slotIndex);
+            put32(army->type[slot]);
+            put32(army->count[slot]);
         }
     }
+    // v5 增补（2026-10-06 用户拍板）：双方英雄身份（id/经验/等级）、19 个穿戴槽
+    // 宝物 id、城镇身份（编号/类型/归属）。全部为战斗中恒定字段，用于阻断
+    // "同色同阵容的不同英雄"与"穿戴不同导致强度不同"的跨场互读。
+    // Only called before native battle initialization. Mutable combat slots and
+    // obstacles never participate, and subsequent requests use the frozen digest.
+    for (int side = 0; side < 2; ++side) {
+        const H3Hero* hero = mgr->hero[side];
+        if (hero && !Readable_(hero, sizeof(H3Hero))) hero = nullptr;
+        put32(hero ? hero->id : -1);
+        put32(hero ? hero->experience : -1);
+        put32(hero ? (int32_t)hero->level : -1);
+        for (int slot = 0; slot < 19; ++slot)
+            put32(hero ? hero->bodyArtifacts[slot].id : -1);
+    }
+    const H3Town* town = mgr->town;
+    if (town && !Readable_(town, sizeof(H3Town))) town = nullptr;
+    put32(town ? (int32_t)town->number : -1);
+    put32(town ? (int32_t)town->type : -1);
+    put32(town ? (int32_t)town->owner : -1);
     if (!Sha256Hex_(bytes.data(), bytes.size(), out)) {
         if (error) *error = "battle fingerprint failed";
         return false;
@@ -140,26 +258,52 @@ static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std
     return true;
 }
 
-static void TryCaptureCombat_()
+static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error)
+{
+    if (!out || mgr != g_preBattleManager_ || g_preBattleKey_.empty()) {
+        if (error) *error = "未取得本场战斗的战前指纹，请重新进入战斗";
+        return false;
+    }
+    *out = g_preBattleKey_;
+    return true;
+}
+
+// 返回 true = 落盘且回读校验通过（悬浮条已打"已存档"戳）；
+// false = 任一环节失败（拒绝/采集/编码/写盘/回读），调用方负责悬浮条提示。
+static bool TryCaptureCombat_()
 {
     const H3CombatManager* mgr = H3CombatManager::Get();
+    if (!g_diag.id) DiagBegin_("save", "direct", mgr);
+    DiagStage_("save.gate");
     const char* reason = nullptr;
     if (!CombatCanCapture_(mgr, &reason)) {
-        LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
-        return;
+        DiagState_(mgr, "save-rejected");
+        DiagEnd_("rejected", reason);
+        return false;
     }
-    CodecCapture capture;
+    std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
+    CodecCapture& capture = *captureStorage;
     std::string error;
+    DiagStage_("save.capture");
     if (!CaptureBattle_(mgr, &capture, &error)) {
-        LogError("战斗采集失败：%s", error.c_str());
-        return;
+        DiagEnd_("failed", error.c_str());
+        return false;
     }
+    DiagSummary_(capture, "captured");
     hbs::ArchiveDocument document;
-    if (!BattleFingerprint_(mgr, &document.battleKey, &error)
-        || !CodecEncode(capture, &document.sections, &error)) {
-        LogError("战斗编码失败：%s", error.c_str());
-        return;
+    DiagStage_("save.fingerprint");
+    if (!BattleFingerprint_(mgr, &document.battleKey, &error)) {
+        DiagEnd_("failed", error.c_str());
+        return false;
     }
+    LogInfo("[Archive op=%ld] battle=%s target=placeholder-zero", g_diag.id, document.battleKey.c_str());
+    DiagStage_("save.encode");
+    CodecInvalidateHover_(&capture);
+    if (!CodecEncode(capture, &document.sections, &error)) {
+        DiagEnd_("failed", error.c_str());
+        return false;
+    }
+    DiagSections_(document.sections, "encoded");
     document.targetKey.assign(64, '0');
     FILETIME now = {};
     GetSystemTimeAsFileTime(&now);
@@ -171,89 +315,88 @@ static void TryCaptureCombat_()
 
     hbs::ArchiveStore store(ArchiveRoot_());
     std::wstring storeError;
-    if (!store.Save(document, storeError)) {
-        char utf8[512] = {};
-        WideCharToMultiByte(CP_UTF8, 0, storeError.c_str(), -1, utf8, sizeof(utf8), nullptr, nullptr);
-        LogError("战斗存档写入失败：%s", utf8);
-        return;
+    hbs::ArchiveRecord committed;
+    DiagStage_("save.write");
+    LogInfo("[Archive op=%ld] root=%s timestamp=%llu", g_diag.id,
+        DiagUtf8_(ArchiveRoot_()).c_str(), document.timestampUtcMs);
+    if (!store.Save(document, storeError, &committed)) {
+        DiagEnd_("failed", DiagUtf8_(storeError).c_str());
+        return false;
     }
+    LogInfo("[Archive op=%ld] persisted=1 path=%s sequence=%u", g_diag.id,
+        DiagUtf8_(committed.path).c_str(), committed.sequence);
+    if (!storeError.empty()) LogWarn("[Archive op=%ld] retention warning=%s", g_diag.id, DiagUtf8_(storeError).c_str());
+    DiagStage_("save.readback");
+    hbs::ArchiveDocument readback;
+    if (!store.Load(committed, readback, storeError)) {
+        DiagEnd_("persisted-unverified", DiagUtf8_(storeError).c_str());
+        return false;
+    }
+    bool equal = readback.sections.size() == document.sections.size();
+    for (size_t i = 0; i < document.sections.size(); ++i) {
+        const hbs::ArchiveSection* actual = FindSection_(readback.sections, document.sections[i].id);
+        equal = equal && actual && CodecSectionEqual_(document.sections[i], *actual, nullptr);
+    }
+    LogInfo("[Archive op=%ld] readback_crc=ok payload_equal=%d", g_diag.id, equal ? 1 : 0);
+    equal = equal && readback.battleKey == committed.battleKey
+        && readback.targetKey == committed.targetKey
+        && readback.timestampUtcMs == committed.timestampUtcMs
+        && readback.sequence == committed.sequence;
+    if (!equal) { DiagEnd_("persisted-unverified", "readback payload mismatch"); return false; }
+    std::unique_ptr<CodecCapture> decodedStorage(new CodecCapture{});
+    CodecCapture& decoded = *decodedStorage;
+    if (!CodecDecode(readback.sections, &decoded, &error)) {
+        DiagEnd_("persisted-unverified", error.c_str()); return false;
+    }
+    DiagSummary_(decoded, "readback");
     UiMarkSaved_(document.timestampUtcMs);
-    if (g_ui.listOpen) UiReloadEntries_(mgr);
-    LogInfo("战斗时刻已存档：回合 %d，当前 %d:%d", capture.turn, capture.currentMonSide, capture.currentMonIndex);
-}
+    // 保存成功后刷新常驻列表，第一项就是刚存的档。
+    //（列表按时间戳倒序，最新必在首位）；提示可有可无，列表不能少。
 
-static bool LoadLatestCapture_(const H3CombatManager* mgr, CodecCapture* out, std::string* error)
-{
-    std::string battleKey;
-    if (!BattleFingerprint_(mgr, &battleKey, error) || !out) return false;
-    hbs::ArchiveStore store(ArchiveRoot_());
-    std::vector<hbs::ArchiveRecord> records;
-    std::wstring storeError;
-    if (!store.List(battleKey, "", records, storeError) || records.empty()) {
-        if (error) *error = records.empty() ? "no archive for this battle" : "archive list failed";
-        return false;
-    }
-    hbs::ArchiveDocument document;
-    if (!store.Load(records[0], document, storeError)) {
-        if (error) *error = "archive load failed";
-        return false;
-    }
-    return CodecDecode(document.sections, out, error);
-}
-
-static bool RestoreSameBattle_(H3CombatManager* mgr, const CodecCapture& capture, std::string* error);
-
-static void TryRestoreCombat_()
-{
-    H3CombatManager* mgr = H3CombatManager::Get();
-    const char* reason = nullptr;
-    if (!CombatCanCapture_(mgr, &reason)) {
-        LogWarn("读档被拒绝：%s", reason ? reason : "unsafe");
-        return;
-    }
-    CodecCapture capture;
-    std::string error;
-    if (!LoadLatestCapture_(mgr, &capture, &error)) {
-        LogError("读档失败：%s", error.c_str());
-        return;
-    }
-    if (!RestoreSameBattle_(mgr, capture, &error)) {
-        LogError("战斗恢复失败：%s", error.c_str());
-        return;
-    }
-    LogInfo("战斗时刻已恢复：回合 %d，当前 %d:%d", capture.turn, capture.currentMonSide, capture.currentMonIndex);
-}
-
-static bool CombatFullyIdle_(const H3CombatManager* mgr, int messageResult, const char** reason)
-{
-    if (messageResult == 2) { if (reason) *reason = "battle message closes manager"; return false; }
-    if (!CombatCanCapture_(mgr, reason)) return false;
-    if (mgr->tacticsPhase) { if (reason) *reason = "tactics phase"; return false; }
-    for (int i = 0; i < 187; ++i) {
-        if (mgr->travelingSquares[i]) { if (reason) *reason = "creature is moving"; return false; }
-    }
+    UiReloadEntries_(mgr);
+    DiagEnd_("ok", "persisted and readback verified; runtime restore not verified");
     return true;
 }
 
-// 2026-10-05 实测：actionUndergoing 在背景动画（岩浆/旗帜等）常驻非零，
-// 直接拒绝会让"按 G"看起来无反应。改为等待静止帧：置 3 秒窗口由绘制帧轮询，
-// 静止即存；超时强制存（采集是纯读快照，风险由恢复端指纹校验兜底）。
-// 移动中的部队同理短暂等待。
-static void TrySaveOrWait_(H3CombatManager* mgr, int messageResult)
+// 2026-10-06 用户裁定：保存窗口 = 轮到该玩家行动且尚未下令。
+// 窗口外按存档键立即拒绝并提示，不等待动画、不加输入锁。
+// Native path cache (+0x14031) is not an executor busy flag. H3API's
+// travelingSquares member starts one byte early; do not use it as a gate.
+static bool CombatPlayerWindow_(const H3CombatManager* mgr, int messageResult, const char** reason)
 {
+    if (messageResult == 2) { if (reason) *reason = "battle message closes manager"; return false; }
+    if (!CombatCanCapture_(mgr, reason)) return false;
+    if (g_restoreBusy || g_restoreFatal || g_executorDepth || *(const int*)0x698A3C
+        || !BattleMainDialog_(mgr) || (int)mgr->action != 0) {
+        if (reason) *reason = "not at player input boundary"; return false;
+    }
+    if (mgr->tacticsPhase) { if (reason) *reason = "tactics phase"; return false; }
+    // 等价 H3API IsHumanTurn()（= isHuman[currentActiveSide]），字段直读以保持 const。
+    if (mgr->currentActiveSide < 0 || mgr->currentActiveSide > 1 || !mgr->isHuman[mgr->currentActiveSide]) { if (reason) *reason = "not player turn"; return false; }
+    return true;
+}
+
+// 一次物理按下只允许触发一次保存：game-message 与 system-frame 两个输入源都会
+// 看到同一次按下边沿（19:05 日志 Op1→Op2 相隔 76ms 双触发），窗口打开后会存两档。
+// 首个到达的边沿置位，后续边沿吞掉；按键松开后由帧循环清零重新武装。
+static volatile LONG g_saveEdgeConsumed = 0;
+
+static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin)
+{
+    if (InterlockedExchange(&g_saveEdgeConsumed, 1)) {
+        LogInfo("[Input] duplicate edge suppressed origin=%s", origin);
+        return;
+    }
+    DiagBegin_("save", origin, mgr);
+    LogInfo("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
+        g_ui.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
     const char* reason = nullptr;
-    if (CombatFullyIdle_(mgr, messageResult, &reason)) {
-        g_uiWaitSaveUntil = 0;
-        TryCaptureCombat_();
+    if (CombatPlayerWindow_(mgr, messageResult, &reason)) {
+        if (!TryCaptureCombat_()) UiMarkNotice_("保存失败：详见日志");
         return;
     }
-    if (reason && (strcmp(reason, "animation in progress") == 0
-        || strcmp(reason, "creature is moving") == 0)) {
-        g_uiWaitSaveUntil = GetTickCount() + 3000;
-        LogInfo("战斗未静止（%s），等待静止帧存档（最多3秒）", reason);
-        return;
-    }
-    LogWarn("保存被拒绝：%s", reason ? reason : "unsafe");
+    UiMarkNotice_("仅可在己方待行动时保存");
+    DiagEnd_("rejected", reason);
 }
 
 static HHOOK g_combatKeyboardHook = nullptr;
@@ -280,23 +423,63 @@ static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
     return true;
 }
 
+static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION) {
+        if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(H3CombatManager::Get())) return false;
+        if (g_uiWaitSaveUntil) { ++g_waitKeyEvents; return true; }
+        const char letter = UiVirtualKeyToLetter_((int)wParam, true);
+        const bool up = (lParam & 0x80000000) != 0;
+        const bool repeat = (lParam & 0x40000000) != 0;
+        if (letter && (letter == g_ui.saveKey || g_ui.awaitingRebind))
+            LogInfo("[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+                up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_ui.saveKey,
+                g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
+                (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
+        if (letter && !up && !repeat)
+            InterlockedExchange(&g_pendingSaveKey, letter);
+    }
+    return false;
+}
+
+static void ClearBattleInputs_()
+{
+    InterlockedExchange(&g_pendingClickX, -1);
+    InterlockedExchange(&g_pendingClickY, -1);
+    InterlockedExchange(&g_pendingRightClickX, -1);
+    InterlockedExchange(&g_pendingRightClickY, -1);
+    InterlockedExchange(&g_pendingSaveKey, 0);
+}
+
+static void DiagHookFault_()
+{
+    __try {
+        if (g_diag.id || g_uiWaitSaveUntil) GuardLog_(
+            "[Op %ld] outcome=%s stage=%s side=%d slot=%d writing=%d input_lock=0 no rollback",
+            g_diag.id, g_diag.writing ? "partial-write" : "exception",
+            g_diag.stage ? g_diag.stage : "none", g_diag.side, g_diag.slot, g_diag.writing ? 1 : 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (g_diag.writing) g_restoreFatal = true;
+    g_restoreBusy = false;
+    g_restoreRequest.pending = false;
+    g_diag.id = 0;
+    g_diag.writing = false;
+    InterlockedExchange(&g_pendingClickX, -1);
+    InterlockedExchange(&g_pendingClickY, -1);
+    InterlockedExchange(&g_pendingRightClickX, -1);
+    InterlockedExchange(&g_pendingRightClickY, -1);
+    g_uiWaitSaveUntil = 0;
+    InterlockedExchange(&g_pendingSaveKey, 0);
+}
+
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && !(lParam & 0x80000000) && !(lParam & 0x40000000)) {
-        if (g_uiWaitSaveUntil)
-            return 1;  // 等待静止帧期间屏蔽键盘（2026-10-05 用户要求）
-        const char letter = UiVirtualKeyToLetter_((int)wParam, true);
-        if (letter) {
-            // 只记"本帧按下了哪个键"，存档触发由绘制帧的边沿判定决定
-            // （2026-10-05：改键单次短按穿透，根因是事件残留而非按住）
-            InterlockedExchange(&g_pendingSaveKey, letter);
-            LogInfo("系统键盘边沿：vk=%d letter=%c", (int)wParam, letter);
-        }
-    }
+    __try { if (CombatKeyboardBody_(code, wParam, lParam)) return 1; }
+    __except (GuardCrashFilter_(GUARD_KEYBOARD, GetExceptionInformation())) { DiagHookFault_(); }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
+static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION) {
         const bool leftDown = wParam == WM_LBUTTONDOWN;
@@ -304,42 +487,48 @@ static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         const bool rightDown = wParam == WM_RBUTTONDOWN;
         const bool rightUp = wParam == WM_RBUTTONUP;
         const bool move = wParam == WM_MOUSEMOVE;
-        if (g_uiWaitSaveUntil && (leftDown || leftUp || rightDown || rightUp))
-            return 1;  // 等待静止帧期间屏蔽鼠标按键（2026-10-05 用户要求）
+        if (g_uiWaitSaveUntil) { ++g_waitMouseEvents; return true; }
         if (move && !g_ui.dragging)
-            return CallNextHookEx(nullptr, code, wParam, lParam);
+            return false;
         if (leftDown || leftUp || rightDown || rightUp || move) {
             // 只在真实战斗且悬浮条显示时介入，避免战斗外误吞点击。
             H3CombatManager* combat = H3CombatManager::Get();
-            if (!CombatIsReadable_(combat) || combat->finished || !combat->dlg)
-                return CallNextHookEx(nullptr, code, wParam, lParam);
+            if (g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal)
+                return false;
             const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
             int gameX = 0;
             int gameY = 0;
             if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY))
-                return CallNextHookEx(nullptr, code, wParam, lParam);
+                return false;
             const bool inBar = UiPointInBar_(gameX, gameY);
             const int row = UiHitRow_(gameX, gameY);
             const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
             if (move)
-                return CallNextHookEx(nullptr, code, wParam, lParam);
+                return false;
             if (leftDown && (inBar || hitList)) {
-                return 1;  // 按下先吞并，抬起才转发（悬浮条固定右上角，无拖动）
+                return true;  // 固定左上角，无拖动；抬起才执行点击。
             } else if (leftUp && (inBar || hitList)) {
                 InterlockedExchange(&g_pendingClickX, gameX);
                 InterlockedExchange(&g_pendingClickY, gameY);
                 LogInfo("点击已吞并：game=(%d,%d)", gameX, gameY);
-                return 1;
+                return true;
             } else if (rightDown && (inBar || hitList)) {
-                return 1;
+                return true;
             } else if (rightUp && hitList) {
                 InterlockedExchange(&g_pendingRightClickX, gameX);
                 InterlockedExchange(&g_pendingRightClickY, gameY);
                 LogInfo("右键已吞并：game=(%d,%d)", gameX, gameY);
-                return 1;
+                return true;
             }
         }
     }
+    return false;
+}
+
+static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
+{
+    __try { if (CombatMouseBody_(code, wParam, lParam)) return 1; }
+    __except (GuardCrashFilter_(GUARD_MOUSE, GetExceptionInformation())) { DiagHookFault_(); }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
@@ -358,73 +547,150 @@ static void EnsureCombatKeyboardHook_()
         g_combatMouseHook ? "已安装" : "安装失败", gameWindow);
 }
 
-static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
+static bool CombatMessageBefore_(H3Msg* msg)
 {
-    // 等待静止帧存档期间屏蔽玩家全部输入（2026-10-05 用户要求）：
-    // 键盘/鼠标消息一律吞掉不转发，存档执行完成（或超时强制存）后解除。
     if (g_uiWaitSaveUntil && msg) {
         const int cmd = (int)msg->command;
         if (cmd == (int)eMsgCommand::KEY_DOWN || cmd == (int)eMsgCommand::KEY_UP
-            || cmd == (int)eMsgCommand::MOUSE_BUTTON || cmd == (int)eMsgCommand::MOUSE_OVER)
-            return 1;
-    }
-    static DWORD lastInput = 0;
-    const DWORD now = GetTickCount();
-    if (msg && now - lastInput > 250) {
-        LogInfo("战斗消息：cmd=%d sub=%d item=%d x=%d y=%d",
-            (int)msg->command, (int)msg->subtype, msg->itemId, msg->position.x, msg->position.y);
-        lastInput = now;
+            || cmd == (int)eMsgCommand::MOUSE_BUTTON || cmd == (int)eMsgCommand::MOUSE_OVER) {
+            ++g_waitGameEvents;
+            return true;
+        }
     }
     if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
         const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
-        LogInfo("战斗按键：virtual=%d letter=%c save=%c", msg->subtype,
-            pressed ? pressed : '?', g_ui.saveKey);
-        const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
-        if (g_ui.awaitingRebind) {
-            UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
-            // 清掉改键残留，防止同键名立即触发一次存档（表现为"等待动画结束"）
-            InterlockedExchange(&g_pendingSaveKey, 0);
-            return result;
-        }
-        // 存档触发要求真实边沿（2026-10-05 22:54 日志实证：游戏对同一次按键
-        // 把本钩子调用两次——第一次 saveKey 还是旧键正确改键，79ms 后第二次
-        // saveKey 已是新键，pressed==saveKey 成立穿透触发存档）。
-        if (pressed && pressed == g_ui.saveKey) {
-            static bool msgKeyWasDown = false;
-            const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
-            // rebindKey：改键接受的那次按键必须先松开（2026-10-05 22:54 日志：
-            // 游戏对同一次按键调本钩子两次，第二次时键仍按着，边沿挡不住）
-            if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
-                if (!downNow) g_ui.rebindKey = 0;
-            } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
-                && now >= g_ui.rebindGuardUntil) {
-                TrySaveOrWait_(mgr, result);
-            }
-            msgKeyWasDown = downNow;
-        }
-        return result;
+        if (pressed == g_ui.saveKey || g_ui.awaitingRebind)
+            LogInfo("[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+                msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
+                (int)msg->subtype, pressed ? pressed : '?', g_ui.saveKey,
+                (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
+                g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
+        return false;
     }
-    // 拖动跟随只走系统 WH_MOUSE 钩子：消息钩子对每条消息（含 cmd=0 空帧
-    // position=(0,0)）都更新位置，会把悬浮条拉回 (0,0)，2026-10-05 实测。
     const bool onBar = UiHitBar_(msg);
     const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
     if ((onBar || row >= 0 || g_ui.dragging) && msg) {
         if (msg->command == eMsgCommand::MOUSE_BUTTON) {
             UiHandleMouse_(msg);
-            return 1;
+            return true;
         }
-        if (msg->command == eMsgCommand::MOUSE_OVER && g_ui.listOpen) {
+        if (msg->command == eMsgCommand::MOUSE_OVER) {
             UiHandleMouse_(msg);
-            return 1;
+            return true;
         }
     } else if (msg && msg->command == eMsgCommand::MOUSE_BUTTON
         && msg->subtype == eMsgSubtype::LBUTTON_DOWN) {
         if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
-        if (g_ui.listOpen) g_ui.listOpen = false;
     }
-    return THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
+    return false;
 }
 
+static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result)
+{
+    if (!msg || (msg->command != eMsgCommand::KEY_DOWN && msg->command != eMsgCommand::KEY_UP)) return;
+    const DWORD now = GetTickCount();
+    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
+    if (g_ui.awaitingRebind) {
+        UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
+        InterlockedExchange(&g_pendingSaveKey, 0);
+        return;
+    }
+    if (pressed && pressed == g_ui.saveKey) {
+        static bool msgKeyWasDown = false;
+        const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
+            if (!downNow) g_ui.rebindKey = 0;
+            LogInfo("[Input] save suppressed source=game reason=rebind-latch");
+        } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
+            && now >= g_ui.rebindGuardUntil) {
+            TrySave_(mgr, result, "game-message");
+        } else {
+            LogInfo("[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
+                downNow ? 1 : 0, msgKeyWasDown ? 1 : 0, g_uiWaitSaveUntil ? 1 : 0,
+                now < g_ui.rebindGuardUntil ? 1 : 0);
+        }
+        msgKeyWasDown = downNow;
+    }
+}
+
+static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
+{
+    ++g_messageDepth;
+    int result = 0;
+    __try {
+        bool failed = false, consumed = false;
+        __try {
+            if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr))
+                consumed = CombatMessageBefore_(msg);
+        }
+        __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { failed = true; DiagHookFault_(); }
+        result = consumed ? 1 : THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
+        if (!failed) {
+            __try {
+                if (!g_restoreBusy && !g_restoreFatal && g_messageDepth == 1) {
+                    CombatMessageAfter_(mgr, msg, result);
+                    UiProcessRestore_(mgr, result);
+                }
+            }
+            __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { DiagHookFault_(); }
+        }
+    }
+    __finally { --g_messageDepth; }
+    if (g_restoreFatal) {
+        GuardLog_("[Restore] FATAL: unverified partial write; stopping instead of continuing battle");
+        RaiseException(0xE0424842, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    }
+    return result;
+}
+
+
+static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int parameter)
+{
+    ++g_executorDepth;
+    int result = 0;
+    // finally only repairs depth; exceptions from the original still propagate.
+    __try { result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter); }
+    __finally { --g_executorDepth; }
+    return result;
+}
+
+static void BattleReset_()
+{
+    ++g_battleGeneration;
+    g_battleInitialized = false;
+    g_preBattleKey_.clear();
+    g_preBattleManager_ = nullptr;
+    g_battleListDirty = true;
+    g_restoreRequest.pending = false;
+    g_restoreFatal = false;
+    g_ui.entries.clear();
+    g_ui.battleKey.clear();
+    g_ui.hoverRow = -1;
+
+    ClearBattleInputs_();
+}
+
+static const int GUARD_LIFECYCLE = GuardRegisterHook_("BattleStore.Lifecycle");
+static int __stdcall Hook_BattleStart_(HiHook* hook, H3CombatManager* mgr, int parameter)
+{
+    __try {
+        BattleReset_();
+        g_battleThread = GetCurrentThreadId();
+        if (BattleInitialFingerprint_(mgr, &g_preBattleKey_, nullptr)) g_preBattleManager_ = mgr;
+    }
+    __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
+    const int result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter);
+    __try { g_battleInitialized = CombatIsReadable_(mgr) && mgr->dlg && !mgr->finished; }
+    __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
+    return result;
+}
+
+static void __stdcall Hook_BattleStop_(HiHook* hook, H3CombatManager* mgr)
+{
+    __try { BattleReset_(); }
+    __except (GuardCrashFilter_(GUARD_LIFECYCLE, GetExceptionInformation())) { DiagHookFault_(); }
+    THISCALL_1(void, hook->GetDefaultFunc(), mgr);
+}
 // Hook_AfterBlt @ 0x600430（H3BattleValueInfo 同款）：backbuffer Blt 完成后
 // 补画悬浮条。只靠 CycleCombatScreen 画会被后续 Blt 覆盖，表现为战场框内
 // 闪烁（2026-10-05 用户实测）。
@@ -432,30 +698,46 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 {
     (void)h;
     (void)c;
-    H3CombatManager* mgr = H3CombatManager::Get();
-    if (CombatIsReadable_(mgr) && !mgr->finished && mgr->dlg)
-        UiDrawBar_(mgr);
+    __try {
+        H3CombatManager* mgr = H3CombatManager::Get();
+        if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr) && !mgr->finished)
+            UiDrawBar_(mgr);
+    }
+    __except (GuardCrashFilter_(GUARD_BLT, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
-static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
+static void CombatCycleAfter_(H3CombatManager* mgr, int result)
 {
     static DWORD lastFrame = 0;
-    const int result = THISCALL_1(int, hook->GetDefaultFunc(), mgr);
+
     const DWORD now = GetTickCount();
     const bool readable = CombatIsReadable_(mgr);
     if (now - lastFrame > 1000) {
-        LogDebug("战斗绘制帧：mgr=%p readable=%d finished=%d dlg=%p",
+        LogDebug("战斗绘制帧：mgr=%p readable=%d finished=%d dlg=%p cycleResult=%d",
             mgr, readable ? 1 : 0,
             readable ? (mgr->finished ? 1 : 0) : -1,
-            readable ? mgr->dlg : nullptr);
+            readable ? mgr->dlg : nullptr, result);
         lastFrame = now;
     }
     if (readable && !mgr->finished && mgr->dlg) {
+        if (g_battleInitialized && g_battleListDirty && BattleMainDialog_(mgr)) {
+            if (UiReloadEntries_(mgr)) {
+                g_battleListDirty = false;
+                g_ui.hoverRow = -1;
+
+                LogInfo("[List] 战斗开始自动加载完成，常驻列表条数=%u generation=%u",
+                    (unsigned)g_ui.entries.size(), g_battleGeneration);
+            }
+        }
+        if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(mgr)) return;
         EnsureCombatKeyboardHook_();
         UiPollRebindKey_();
         if (now < g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
+        // 存档键松开后重新武装单次边沿（配合 TrySave_ 的 g_saveEdgeConsumed 闩锁）
+        if (!(GetAsyncKeyState(g_ui.saveKey) & 0x8000))
+            InterlockedExchange(&g_saveEdgeConsumed, 0);
         static bool keyWasDown = false;
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
         const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
@@ -469,48 +751,50 @@ static int __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
         // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind && !g_uiWaitSaveUntil) {
+        if (pressed) LogInfo("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
+            pressed, g_ui.saveKey, (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0,
+            keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-');
+        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind) {
             const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
             if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
                 if (!downNow) g_ui.rebindKey = 0;  // 改键那次按键松开后才解锁
             } else if (downNow && !keyWasDown && now >= g_ui.rebindGuardUntil) {
-                TrySaveOrWait_(mgr, 0);
+                TrySave_(mgr, 0, "system-frame");
             }
             keyWasDown = downNow;
         } else {
-            keyWasDown = !g_ui.awaitingRebind && !g_uiWaitSaveUntil
+            keyWasDown = !g_ui.awaitingRebind
                 && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
-        }
-        if (g_uiWaitSaveUntil && !g_ui.awaitingRebind) {
-            const char* waitReason = nullptr;
-            if (CombatFullyIdle_(mgr, 0, &waitReason)) {
-                g_uiWaitSaveUntil = 0;
-                LogInfo("动画已结束，执行存档");
-                TryCaptureCombat_();
-            } else if (GetTickCount() >= g_uiWaitSaveUntil) {
-                LogWarn("等待动画超时（%s），强制存档", waitReason ? waitReason : "unsafe");
-                g_uiWaitSaveUntil = 0;
-                TryCaptureCombat_();
-            }
         }
         UiDrawBar_(mgr);
     }
-    else if (now - lastFrame <= 20)
-        LogInfo("悬浮条跳过绘制：readable=%d finished=%d dlg=%p",
-            readable ? 1 : 0,
-            readable ? (mgr->finished ? 1 : 0) : -1,
-            readable ? mgr->dlg : nullptr);
-    return result;
+    else {
+        CancelSaveWait_("combat unavailable or finished");
+    }
+}
+
+static void __stdcall Hook_CycleCombatScreen_(HiHook* hook, H3CombatManager* mgr)
+{
+    THISCALL_1(void, hook->GetDefaultFunc(), mgr);
+    __try { CombatCycleAfter_(mgr, 0); }
+    __except (GuardCrashFilter_(GUARD_CYCLE, GetExceptionInformation())) { DiagHookFault_(); }
 }
 
 static void StartPlugin()
 {
     LogSelfVersion_();
+    if (!GuardVerifySodBytes_()) {
+        LogError("SoD 版本门卫失败：已停用全部钩子");
+        return;
+    }
     UiLoadBarPosition_();
+    _PI->WriteHiHook(0x462600, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStart_);
+    _PI->WriteHiHook(0x462E40, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStop_);
+    _PI->WriteHiHook(0x4786B0, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleExecute_);
     _PI->WriteHiHook(0x473A00, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatMessage_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
     _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
-    LogInfo("战斗存档: battle-store build enabled.");
+    LogInfo("战斗存档：第五版可逆事务已启用，实机恢复验收尚未完成。");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
@@ -537,13 +821,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         g_disable_log = ReadDisableLogFromIniFiles();
         delete[] wpath;
         SetupDatedLogPathAndCleanup(hModule);
+        GuardSetLogPathW(g_disable_log ? nullptr : g_log_path_w);
+        InstallCrashGuard();
         LogInfo("战斗存档 loading.");
         _P = GetPatcher();
         if (!_P) { LogError("GetPatcher failed."); return TRUE; }
         _PI = _P->CreateInstance("HD.Plugin.H3BattleStore");
         if (!_PI) { LogError("CreateInstance failed."); return TRUE; }
         ReadConfig();
-        StartPlugin();
+        __try { StartPlugin(); }
+        __except (GuardCrashFilter_(GUARD_INIT, GetExceptionInformation())) {}
+    }
+    if (reason == DLL_PROCESS_DETACH) {
+        if (g_combatKeyboardHook) UnhookWindowsHookEx(g_combatKeyboardHook);
+        if (g_combatMouseHook) UnhookWindowsHookEx(g_combatMouseHook);
+        GuardShutdown();
     }
     return TRUE;
 }

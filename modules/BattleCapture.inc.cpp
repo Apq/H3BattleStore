@@ -32,7 +32,17 @@ static bool ReadDequeInts_(const uint8_t* object, std::vector<int32_t>* out)
     const uint8_t* const* map = *(const uint8_t* const* const*)(object + 0x10);
     const uint8_t* const endCurrent = *(const uint8_t* const*)(object + 0x1C);
     const uint8_t* const* const endMap = *(const uint8_t* const* const*)(object + 0x20);
-    if (!Readable_(current, 4) || !Readable_(map, sizeof(void*))) return false;
+    const uintptr_t mapBase = *(const uintptr_t*)(object + 0x24);
+    const uint32_t mapSize = *(const uint32_t*)(object + 0x28);
+    if (!mapSize || mapSize > 100000 || !Readable_((const void*)mapBase, mapSize * 4)
+        || (uintptr_t)map < mapBase || (uintptr_t)endMap < (uintptr_t)map
+        || ((uintptr_t)map - mapBase) % 4 || ((uintptr_t)endMap - mapBase) % 4
+        || (uintptr_t)endMap - mapBase >= mapSize * 4
+        || !Readable_(current, 4) || !Readable_(map, sizeof(void*))
+        || *(const uintptr_t*)(object + 0x04) != (uintptr_t)*map
+        || (uintptr_t)blockEnd != (uintptr_t)*map + 4096
+        || (uintptr_t)current < (uintptr_t)*map || (uintptr_t)current >= (uintptr_t)blockEnd
+        || ((uintptr_t)current - (uintptr_t)*map) % 4) return false;
     out->reserve(size);
     for (uint32_t read = 0; read < size; ++read) {
         if (current == blockEnd) {
@@ -44,6 +54,12 @@ static bool ReadDequeInts_(const uint8_t* object, std::vector<int32_t>* out)
         if (!Readable_(current, 4)) return false;
         out->push_back(*(const int32_t*)current);
         current += 4;
+        if (current == blockEnd) {
+            ++map;
+            if (map > endMap || !Readable_(map, sizeof(void*)) || !Readable_(*map, 4)) return false;
+            current = *map;
+            blockEnd = current + 0x1000;
+        }
         if (read + 1 == size && (current != endCurrent || map != endMap)) return false;
     }
     return true;
@@ -64,13 +80,150 @@ static bool ReadPointerRelations_(const H3CombatManager* mgr, const H3Vector<H3C
     return true;
 }
 
+// Native VC6 set<int>: header owns a head node, shared nil lives at 0x694FA0.
+static bool ReadSpellSet_(const uint8_t* object, std::vector<int32_t>* out)
+{
+    out->clear();
+    if (!Readable_(object, 16)) return false;
+    const uint32_t count = *(const uint32_t*)(object + 12);
+    const uint32_t* head = *(const uint32_t* const*)(object + 4);
+    if (count > 81 || !Readable_(head, 20)) return false;
+    if (!count) return true;
+    const uint32_t* nil = *(const uint32_t* const*)0x694FA0;
+    const uint32_t* node = (const uint32_t*)head[1];
+    std::vector<const uint32_t*> path, visited;
+    while (node != nil || !path.empty()) {
+        while (node != nil) {
+            if (node == head || !Readable_(node, 20) || visited.size() >= count
+                || std::find(visited.begin(), visited.end(), node) != visited.end()) return false;
+            visited.push_back(node);
+            path.push_back(node);
+            node = (const uint32_t*)node[0];
+        }
+        node = path.back(); path.pop_back();
+        const int32_t spell = (int32_t)node[3];
+        if (spell < 0 || spell >= 81 || (!out->empty() && spell <= out->back())) return false;
+        out->push_back(spell);
+        node = (const uint32_t*)node[2];
+    }
+    return out->size() == count;
+}
+
+// v4 obstacle kind identity: the terrain table is a 91-entry array of
+// H3ObstacleInfo at 0x63C7C8 (stride 0x14); the five spell obstacles are
+// standalone statics placed beside it and are NOT on the table grid, which is
+// exactly why the old pointer-difference infoIndex truncated for them.
+static const uintptr_t kObstacleTableAddress_ = 0x63C7C8;
+static const size_t kObstacleTableEntries_ = 91;
+static const uintptr_t kObstacleSpellInfos_[] = {
+    0x63CEE8, // 100 quicksand  C17SPE1.DEF
+    0x63CF00, // 101 land mine  C09spF1.def
+    0x63CF18, // 102 force field 2 cells C15spE1.def
+    0x63CF2C, // 103 force field 3 cells C15spE10.def
+    0x63CF68, // 104 fire wall  C07spF61.def
+};
+
+#ifdef H3BATTLE_OBSTACLE_TEST_BACKEND
+static const H3ObstacleInfo* const* g_obstacleInfoMapTest_ = nullptr;
+#endif
+
+static bool ObstacleKindOf_(const H3ObstacleInfo* info, uint16_t* kindId)
+{
+    if (!info) return false;
+#ifdef H3BATTLE_OBSTACLE_TEST_BACKEND
+    if (g_obstacleInfoMapTest_) {
+        for (uint16_t i = 0; i <= 104; ++i)
+            if (g_obstacleInfoMapTest_[i] == info) { *kindId = i; return true; }
+        return false;
+    }
+#endif
+    const uintptr_t address = (uintptr_t)info;
+    const uintptr_t offset = address - kObstacleTableAddress_;
+    if (offset < kObstacleTableEntries_ * 0x14 && offset % 0x14 == 0) {
+        *kindId = (uint16_t)(offset / 0x14);
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(kObstacleSpellInfos_) / sizeof(kObstacleSpellInfos_[0]); ++i)
+        if (kObstacleSpellInfos_[i] == address) {
+            *kindId = (uint16_t)(100 + i);
+            return true;
+        }
+    return false;
+}
+
+// Address of the static info for a known kind id; null when out of range.
+static const H3ObstacleInfo* ObstacleInfoFor_(uint16_t kindId)
+{
+#ifdef H3BATTLE_OBSTACLE_TEST_BACKEND
+    if (g_obstacleInfoMapTest_) return kindId <= 104 ? g_obstacleInfoMapTest_[kindId] : nullptr;
+#endif
+    if (kindId < kObstacleTableEntries_)
+        return (const H3ObstacleInfo*)(kObstacleTableAddress_ + (size_t)kindId * 0x14);
+    if (kindId >= 100 && kindId < 100 + sizeof(kObstacleSpellInfos_) / sizeof(kObstacleSpellInfos_[0]))
+        return (const H3ObstacleInfo*)kObstacleSpellInfos_[kindId - 100];
+    return nullptr;
+}
+
+// Exact replication of the row-parity adjustment in FUN_00466590/FUN_00466710:
+// when the anchor row is odd and the target row is even, the delta lands one hex left.
+static int ObstacleCellHex_(int anchorHex, int delta)
+{
+    int target = delta + anchorHex;
+    if (((anchorHex / 17) & 1) != 0 && ((target / 17) & 1) == 0) target -= 1;
+    return target;
+}
+
+static bool ObstacleName_(const char* source, char* out)
+{
+    if (!source || !out) return false;
+    memset(out, 0, 16);
+    for (size_t i = 0; i < 16; ++i) {
+        if (!Readable_(source + i, 1)) return false;
+        const char ch = source[i];
+        if (!ch) return i != 0;
+        if (i == 15) return false;
+        out[i] = ch;
+    }
+    return false;
+}
+
+// Validate raw vector pointers before Count() can subtract malformed pointers.
+static bool ObstacleVectorReady_(const H3Vector<H3Obstacle>& vector, bool writable, UINT* count)
+{
+    if (!Readable_(&vector, sizeof(vector))) return false;
+    const uintptr_t* header = reinterpret_cast<const uintptr_t*>(&vector);
+    const uintptr_t first = header[1], end = header[2], capacity = header[3];
+    if ((!first && (end || capacity)) || end < first || capacity < end
+        || (end - first) % sizeof(H3Obstacle) || (capacity - first) % sizeof(H3Obstacle)) return false;
+    const uintptr_t bytes = end - first;
+    if (bytes / sizeof(H3Obstacle) > 4096) return false;
+    if (bytes && !Readable_(reinterpret_cast<const void*>(first), bytes)) return false;
+    if (writable && (IsBadWritePtr(const_cast<H3Vector<H3Obstacle>*>(&vector), sizeof(vector))
+        || (capacity != first && IsBadWritePtr(reinterpret_cast<void*>(first), capacity - first)))) return false;
+    *count = static_cast<UINT>(bytes / sizeof(H3Obstacle));
+    return true;
+}
+
+static bool CaptureResourceName_(const void* resource, char (&name)[13])
+{
+    memset(name, 0, sizeof(name));
+    if (!resource) return true;
+    if (!Readable_(resource, 0x1C)) return false;
+    const char* raw = (const char*)resource + 4;
+    const size_t length = strnlen(raw, 12);
+    if (!length || *(const int32_t*)((const uint8_t*)resource + 0x18) <= 0) return false;
+    memcpy(name, raw, length);
+    return true;
+}
+
 static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::string* error)
 {
     if (!Readable_(mgr, sizeof(H3CombatManager)) || !out) {
         if (error) *error = "combat manager is not readable";
         return false;
     }
-    memset(out, 0, sizeof(*out));
+    // 快照含 STL 容器，不能 memset 其对象头；重采集时也必须释放旧内容。
+    CodecReset_(out);
     out->version = kCodecVersion;
     out->action = mgr->action;
     out->actionParameter = mgr->actionParameter;
@@ -79,7 +232,7 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
     out->landType = mgr->landType;
     out->absoluteObstacleId = mgr->absoluteObstacleId;
     out->siegeKind = mgr->siegeKind;
-    out->hasMoat = mgr->hasMoat;
+    out->hasMoat = *((const uint8_t*)mgr + 0x53A8);
     out->specialTerrain = mgr->specialTerrain;
     out->antiMagicGarrison = mgr->antiMagicGarrison;
     out->creatureBank = mgr->creatureBank;
@@ -99,7 +252,7 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
     out->tacticsPhase = mgr->tacticsPhase;
     out->turn = mgr->turn;
     out->tacticsDifference = mgr->tacticsDifference;
-    out->waitPhase = mgr->waitPhase;
+    out->waitPhase = *((const uint8_t*)mgr + 0x13DE4);
     memcpy(out->heroSpellPower, mgr->heroSpellPower, sizeof(out->heroSpellPower));
     memcpy(out->isNotAI, mgr->isNotAI, sizeof(out->isNotAI));
     memcpy(out->isHuman, mgr->isHuman, sizeof(out->isHuman));
@@ -109,34 +262,68 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
     memcpy(out->heroMonCount, mgr->heroMonCount, sizeof(out->heroMonCount));
     memcpy(out->turnsSinceLastEnchanterCast, mgr->turnsSinceLastEnchanterCast, sizeof(out->turnsSinceLastEnchanterCast));
     memcpy(out->summonedMonster, mgr->summonedMonster, sizeof(out->summonedMonster));
+    // RNG：当前种子在游戏线程 TLS+0x14（rand 只推进它），0x67FBE4 是播种镜像，二者分别采集。
+    // Get() 即原版 getter 0x61D8C3；本函数只在游戏线程钩子内调用，战斗中单例必然已存在。
+    out->rngTlsSeed = (uint32_t)H3Random::ThreadLocalSingleton::Get().CurrentSeed();
+    out->rngMirrorSeed = *(const uint32_t*)0x67FBE4;
     memcpy(out->fortWallsHp, mgr->fortWallsHp, sizeof(out->fortWallsHp));
     memcpy(out->fortWallsAlive, mgr->fortWallsAlive, sizeof(out->fortWallsAlive));
     memcpy(out->massSpellTarget, mgr->massSpellTarget, sizeof(out->massSpellTarget));
     memcpy(out->accessibleSquares, mgr->accessibleSquares, sizeof(out->accessibleSquares));
     memcpy(out->accessibleSquares2, mgr->accessibleSquares2, sizeof(out->accessibleSquares2));
 
+    size_t managerPacked = 0;
+    for (const auto& range : kManagerExtraRanges_) {
+        memcpy(out->extraScalars + managerPacked, (const uint8_t*)mgr + range.offset, range.size);
+        managerPacked += range.size;
+    }
+    DiagStage_("capture.siege");
+    for (int tower = 0; tower < 3; ++tower) {
+        const uint8_t* raw = (const uint8_t*)mgr + 0x13D78 + tower * 0x24;
+        CodecTower_& saved = out->towers[tower];
+        memcpy(&saved.scalars[0], raw, 4);
+        memcpy(&saved.scalars[1], raw + 0x0C, 24);
+        if (!CaptureResourceName_(*(const void* const*)(raw + 4), saved.defName)
+            || !CaptureResourceName_(*(const void* const*)(raw + 8), saved.missileName)) {
+            if (error) *error = "箭塔资源不可读取";
+            return false;
+        }
+    }
+    for (int wall = 0; wall < 90; ++wall)
+        if (!CaptureResourceName_(((const void* const*)((const uint8_t*)mgr + 0x13DF8))[wall], out->wallPcxNames[wall])) {
+            if (error) *error = "城墙图像资源不可读取";
+            return false;
+        }
+
+    DiagStage_("capture.heroes");
     for (int side = 0; side < 2; ++side) {
         if (mgr->hero[side] && Readable_(mgr->hero[side], 0x1A))
             out->spellPoints[side] = *(const int16_t*)((const uint8_t*)mgr->hero[side] + 0x18);
-        const H3Vector<INT32>* eagle = (const H3Vector<INT32>*)((const uint8_t*)mgr + 0x545C + side * 0x10);
-        const UINT eyeCount = eagle->Count();
-        if (eyeCount > 1024 || (eyeCount && !Readable_(eagle->CFirst(), eyeCount * sizeof(int32_t)))) {
-            if (error) *error = "eagle eye container is not readable";
+        if (!ReadSpellSet_((const uint8_t*)mgr + 0x545C + side * 0x10, &out->eagleEye[side])) {
+            if (error) *error = "eagle-eye set is invalid";
             return false;
         }
-        out->eagleEye[side].assign(eagle->CFirst(), eagle->CFirst() + eyeCount);
     }
 
+    DiagStage_("capture.squares");
     for (int squareIndex = 0; squareIndex < 187; ++squareIndex) {
         const H3CombatSquare& source = mgr->squares[squareIndex];
         CodecSquare& square = out->squares[squareIndex];
+        size_t packed = 0;
+        for (const auto& range : kSquareExtraRanges_) {
+            memcpy(square.extraScalars + packed, (const uint8_t*)&source + range.offset, range.size);
+            packed += range.size;
+        }
         square.obstacleBits = source.obstacleBits;
-        square.obstacleIndex = source.obstacleIndex;
         square.stackSide = source.stackSide;
         square.stackIndex = source.stackIndex;
         square.twoHexMonsterSquare = source.twoHexMonsterSquare;
         square.deadStacksNumber = source.deadStacksNumber;
-        if (square.deadStacksNumber < 0 || square.deadStacksNumber > 14) return false;
+        if (square.deadStacksNumber < 0 || square.deadStacksNumber > 14) {
+            DiagCursor_(-1, squareIndex);
+            if (error) *error = "square corpse count outside 0..14";
+            return false;
+        }
         memcpy(square.deadStackSide, source.deadStackSide, sizeof(square.deadStackSide));
         memcpy(square.deadStackIndex, source.deadStackIndex, sizeof(square.deadStackIndex));
         memcpy(square.belongsToAttacker, source.belongsToAttacker, sizeof(square.belongsToAttacker));
@@ -144,43 +331,93 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
         square.availableForRightSquare = source.availableForRightSquare;
     }
 
-    const UINT obstacleCount = mgr->obstacleInfo.Count();
-    if (obstacleCount > 4096 || (obstacleCount && !Readable_(mgr->obstacleInfo.CFirst(), obstacleCount * sizeof(H3Obstacle)))) {
+    DiagStage_("capture.obstacles");
+    UINT obstacleCount = 0;
+    if (!ObstacleVectorReady_(mgr->obstacleInfo, false, &obstacleCount)) {
         if (error) *error = "obstacle container is not readable";
         return false;
     }
     out->obstacles.reserve(obstacleCount);
-    const H3ObstacleInfo* obstacleTable = (const H3ObstacleInfo*)0x63C7C8;
     for (UINT i = 0; i < obstacleCount; ++i) {
         const H3Obstacle& source = mgr->obstacleInfo[i];
+        // v4: destroyed entries stay in the vector as zombies (def == 0, count never
+        // shrinks). Only live entries are saved, keyed by kind + anchor and sorted so
+        // the encoded section is independent of the vector's append order.
+        if (!source.def) continue;
+        DiagCursor_(-1, (int)i);
         CodecObstacle item;
         memset(&item, 0, sizeof(item));
-        item.infoIndex = -1;
-        if (source.info && obstacleTable && source.info >= obstacleTable)
-            item.infoIndex = (int32_t)(source.info - obstacleTable);
+        if (!Readable_(source.info, sizeof(H3ObstacleInfo)) || !ObstacleKindOf_(source.info, &item.kindId)) {
+            if (error) *error = "obstacle info pointer is not a recognized kind";
+            return false;
+        }
+        const H3ObstacleInfo* info = source.info;
+        if (info->blockedCount < 0 || info->blockedCount > 8) {
+            if (error) *error = "obstacle blocked count outside 0..8";
+            return false;
+        }
+        if (!ObstacleName_(info->defName, item.defName)) {
+            if (error) *error = "obstacle def name is not readable";
+            return false;
+        }
         item.anchorHex = source.anchorHex;
+        if (item.anchorHex >= 187) {
+            if (error) *error = "obstacle anchor hex off board";
+            return false;
+        }
         item.ownerSide = source.ownerSide;
         item.featureTriggered = source.featureTriggered;
         item.featureDamage = source.featureDamage;
         item.featureDuration = source.featureDuration;
         item.animationIndex = source.animationIndex;
+        item.cellCount = (uint8_t)info->blockedCount;
+        for (int c = 0; c < info->blockedCount; ++c) {
+            const int hex = ObstacleCellHex_(item.anchorHex, info->relativeCells[c]);
+            if (hex < 0 || hex >= 187) {
+                if (error) *error = "obstacle cell off board";
+                return false;
+            }
+            item.cells[c] = (uint8_t)hex;
+        }
+        // The live grid must link every claimed square back to this entry; a broken
+        // link means vector and squares disagree and no rebuild could be verified.
+        if (mgr->squares[item.anchorHex].obstacleIndex != (INT32)i) {
+            if (error) *error = "obstacle anchor square linkage is broken";
+            return false;
+        }
+        for (int c = 0; c < info->blockedCount; ++c)
+            if (mgr->squares[item.cells[c]].obstacleIndex != (INT32)i) {
+                if (error) *error = "obstacle cell square linkage is broken";
+                return false;
+            }
         out->obstacles.push_back(item);
     }
+    std::sort(out->obstacles.begin(), out->obstacles.end(), CodecObstacleKeyLess_);
 
+    DiagStage_("capture.combat-log");
     if (mgr->dlg && Readable_(mgr->dlg, sizeof(H3CombatDlg))) {
         const H3Vector<H3String*>& log = *(const H3Vector<H3String*>*)((const uint8_t*)mgr->dlg + 0x54);
         const UINT logCount = log.Count();
-        if (logCount > 100000 || (logCount && !Readable_(log.CFirst(), logCount * sizeof(H3String*)))) return false;
+        if (logCount > 100000 || (logCount && !Readable_(log.CFirst(), logCount * sizeof(H3String*)))) {
+            if (error) *error = "combat log container is not readable";
+            return false;
+        }
         for (UINT i = 0; i < logCount; ++i) {
             const H3String* line = log[i];
             if (!line || !Readable_(line, sizeof(H3String)) || line->Length() > 0xFFFF
-                || (line->Length() && !Readable_(line->String(), line->Length()))) return false;
-            out->logLines.push_back(std::string(line->String(), line->String() + line->Length()));
+                || (line->Length() && !Readable_(line->String(), line->Length()))) {
+                DiagCursor_(-1, (int)i);
+                if (error) *error = "combat log line is not readable";
+                return false;
+            }
+            out->logLines.push_back(line->Length() ? std::string(line->String(), line->Length()) : std::string());
         }
     }
 
+    DiagStage_("capture.stacks");
     for (int side = 0; side < 2; ++side) {
         for (int slot = 0; slot < 21; ++slot) {
+            DiagCursor_(side, slot);
             const H3CombatCreature& source = mgr->stacks[side][slot];
             CodecStack& stack = out->stacks[side][slot];
             stack.occupied = source.type != -1;
@@ -243,14 +480,33 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             stack.highlightContour = source.highlightContour;
             const uint8_t* raw = (const uint8_t*)&source;
             stack.attackedAlready = *raw;
-            stack.isDead = raw[0xEB];
+            // +0xEB is padding, not a death flag; manager's vanish mask is captured separately.
+            stack.isDead = 0;
             stack.hasLosses = raw[0xE9];
             stack.hasLosses2 = raw[0xEA];
             stack.cloneId = source.cloneId;
             stack.cloneDuration = source.cloneDuration;
             stack.spellToApply = source.spellToApply;
             stack.visibility = source.visibility;
-            memcpy(stack.creatureInfo, &source.info, sizeof(stack.creatureInfo));
+            // v2：info 只取 flags（+0x10），不整块复制含 LPCSTR 的 0x74 字节。
+            stack.infoFlags = source.info.flags;
+            memcpy(stack.infoCombat, (const uint8_t*)&source.info + 0x4C, sizeof(stack.infoCombat));
+            stack.defendingDelta = *(const int32_t*)(raw + 0x4DC);
+            stack.animationSpeed = *(const int32_t*)(raw + 0x158);
+            stack.movementDirection = *(const int32_t*)(raw + 0x48);
+            stack.renderOffsetY = *(const int32_t*)(raw + 0x100);
+            stack.renderOffsetX = *(const int32_t*)(raw + 0x104);
+            size_t extraOffset = 0;
+            for (const CodecScalarRange_& range : kStackExtraRanges_) {
+                memcpy(stack.extraScalars + extraOffset, raw + range.offset, range.size);
+                extraOffset += range.size;
+            }
+            const H3CombatCreature* aiTarget = *(H3CombatCreature* const*)(raw + 0x538);
+            stack.aiTarget = {-1, -1};
+            if (aiTarget && !StackIdentity_(mgr, aiTarget, &stack.aiTarget.side, &stack.aiTarget.slot)) {
+                if (error) *error = "AI目标指针不属于本战场";
+                return false;
+            }
             const uint8_t* rawRelations = (const uint8_t*)&source;
             const H3Vector<H3CombatCreature*>* relations[] = {
                 (const H3Vector<H3CombatCreature*>*)(rawRelations + 0x4F4),
@@ -260,15 +516,18 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             };
             for (int relation = 0; relation < 4; ++relation) {
                 if (!ReadPointerRelations_(mgr, *relations[relation], &stack.relations[relation])) {
+                    LogError("[Capture op=%ld] slot=%d:%d relation=%d offset=%X", g_diag.id, side, slot, relation, 0x4F4 + relation * 0x10);
                     if (error) *error = "stack relation points outside the combat manager";
                     return false;
                 }
             }
             if (!ReadDequeInts_((const uint8_t*)&source + 0x420, &stack.spellIds)) {
+                LogError("[Capture op=%ld] slot=%d:%d deque offset=420", g_diag.id, side, slot);
                 if (error) *error = "spell deque is not readable";
                 return false;
             }
         }
     }
+    DiagCursor_(-1, -1);
     return true;
 }

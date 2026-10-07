@@ -230,10 +230,26 @@ static void TestStoreLimits()
     Expect(records.back().timestampUtcMs == 1001, "oldest dropped");
 
     ArchiveDocument collision = Doc(battle, target, 5000, 31, 4, 7);
-    Expect(store.Save(collision, error), "same millisecond bumps sequence");
+    ArchiveRecord committed;
+    Expect(store.Save(collision, error, &committed), "same second bumps attempt suffix");
+    const std::wstring committedName = committed.path.empty()
+        ? std::wstring() : committed.path.substr(committed.path.find_last_of(L'\\') + 1);
+    Expect(committedName.size() > 6
+        && committedName.compare(committedName.size() - 6, 6, L"_2.hbs") == 0
+        && committedName.compare(0, 64, std::wstring(battle.begin(), battle.end())) == 0
+        && committedName.compare(64, 9, L"_19700101") == 0,
+        "collision filename is <fingerprint>_yyyymmdd_hhmmss_2.hbs");
     Expect(store.List(battle, target, records, error), "list after collision");
-    Expect(records.size() == 30 && records[0].sequence == 32 && records[0].timestampUtcMs == 5000,
-           "collision sequence is 32");
+    Expect(records.size() == 30 && records[0].sequence == 31 && records[0].timestampUtcMs == 5000,
+        "collision keeps document sequence");
+    Expect(committed.sequence == 31 && committed.path == records[0].path
+        && committed.battleKey == battle && committed.targetKey == target,
+        "save returns actual committed identity");
+    ArchiveDocument committedReadback;
+    Expect(store.Load(committed, committedReadback, error), "readback committed collision");
+    Expect(committedReadback.sequence == 31 && committedReadback.sections[0].bytes[0] == 7,
+        "committed collision payload");
+
 
     ArchiveDocument other = Doc(battle, otherTarget, 1000, 31, 1, 3);
     Expect(store.Save(other, error), "other target does not collide");
@@ -252,10 +268,17 @@ static void TestStoreLimits()
                && loaded.sections[0].bytes[0] == 7,
            "loaded payload");
 
+    ArchiveDocument invalid = collision;
+    invalid.battleKey = "bad";
+    Expect(!store.Save(invalid, error, &committed), "invalid save rejected");
+    Expect(committed.path.empty() && committed.battleKey.empty() && committed.sequence == 0,
+        "failed save clears committed identity");
+
+
     ArchiveStore restarted(root);
     std::vector<ArchiveRecord> again;
     Expect(restarted.List(battle, target, again, error), "restart list");
-    Expect(again.size() == records.size() && again[0].path == records[0].path && again[0].sequence == 32,
+    Expect(again.size() == records.size() && again[0].path == records[0].path && again[0].sequence == 31,
            "restart keeps order");
 
     std::vector<std::string> battles;
@@ -319,9 +342,8 @@ static void TestDeleteFailure()
     Expect(GetFileAttributesW(outside.path.c_str()) != INVALID_FILE_ATTRIBUTES, "foreign file remains");
 
     const std::wstring corrupt = root
-        + L"000000000000002a00000001-"
-        + L"1111111111111111111111111111111111111111111111111111111111111111-"
-        + L"3333333333333333333333333333333333333333333333333333333333333333.hbs";
+        + std::wstring(document.battleKey.begin(), document.battleKey.end())
+        + L"_19700101_080000.hbs";
     const HANDLE bad = CreateFileW(corrupt.c_str(), GENERIC_WRITE, 0, nullptr,
                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (bad != INVALID_HANDLE_VALUE) {
@@ -336,6 +358,35 @@ static void TestDeleteFailure()
     Expect(error.find(L"truncated") != std::wstring::npos || error.find(L"CRC") != std::wstring::npos
                || error.find(corrupt.substr(corrupt.find_last_of(L'\\') + 1)) != std::wstring::npos,
            "corrupt diagnostic");
+
+    // Local filename time is not an identity gate: the saving timezone may differ.
+    // Header UTC and CRC remain authoritative.
+    ArchiveDocument honest = Doc(document.battleKey, document.targetKey, 42, 1, 8, 9);
+    ArchiveRecord honestCommitted;
+    Expect(store.Save(honest, error, &honestCommitted), "save for rename");
+    const std::wstring renamed = root
+        + std::wstring(document.battleKey.begin(), document.battleKey.end())
+        + L"_19700102_080001.hbs";
+    if (MoveFileW(honestCommitted.path.c_str(), renamed.c_str())) {
+        std::vector<ArchiveRecord> renamedList;
+        Expect(store.List("", "", renamedList, error), "renamed scan continues");
+        bool found = false;
+        for (size_t i = 0; i < renamedList.size(); ++i)
+            if (renamedList[i].path == renamed) found = true;
+        Expect(found, "valid archive remains visible with different local filename time");
+        for (const ArchiveRecord& record : renamedList) {
+            if (record.path != renamed) continue;
+            ArchiveDocument loaded;
+            Expect(store.Load(record, loaded, error) && loaded.timestampUtcMs == honest.timestampUtcMs,
+                "load uses header UTC rather than current timezone interpretation");
+        }
+        std::wstring invalidDate = std::wstring(document.battleKey.begin(), document.battleKey.end())
+            + L"_19700230_080001.hbs";
+        Expect(!hbs::detail::ParseGeneratedName(invalidDate, honest.timestampUtcMs, honest.battleKey),
+            "invalid filename calendar date still rejected");
+    } else {
+        Expect(false, "rename for tamper test");
+    }
 
     RemoveTree(root);
 }

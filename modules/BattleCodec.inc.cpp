@@ -2,6 +2,9 @@
 // 把一次战斗时刻编码成长度明确的二进制段。
 // 本文件不访问游戏对象；超限直接失败，不截断日志或容器。
 
+#include <memory>
+#include <utility>
+
 static const uint32_t kSectionBattle = 1;
 static const uint32_t kSectionStacks = 2;
 static const uint32_t kSectionSquares = 3;
@@ -10,7 +13,36 @@ static const uint32_t kSectionLog = 5;
 static const uint32_t kSectionHeroes = 6;
 static const uint32_t kSectionRelations = 7;
 static const uint32_t kSectionSpells = 8;
-static const uint32_t kCodecVersion = 1;
+static const uint32_t kCodecVersion = 6;
+
+struct CodecScalarRange_ { uint32_t offset, size; };
+// Audited numeric fields omitted by H3API; never includes resource/container pointers.
+static constexpr CodecScalarRange_ kStackExtraRanges_[] = {
+    {0x01, 4}, {0x08, 5}, {0x10, 0x11}, {0x24, 4}, {0x30, 1}, {0x64, 8},
+    {0x74, 8}, {0x94, 0x2C}, {0xE0, 8}, {0xE8, 1}, {0xF0, 1},
+    {0xFC, 4}, {0x108, 0x5C}, {0x16C, 4}, {0x190, 4}, {0x450, 4},
+    {0x474, 4}, {0x4A4, 4}, {0x4D8, 1}, {0x534, 4}, {0x53C, 12}
+};
+static constexpr size_t ScalarRangesSize_(const CodecScalarRange_* ranges, size_t count) {
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) total += ranges[i].size;
+    return total;
+}
+static constexpr size_t StackExtraSize_() {
+    return ScalarRangesSize_(kStackExtraRanges_, sizeof(kStackExtraRanges_) / sizeof(kStackExtraRanges_[0]));
+}
+static constexpr CodecScalarRange_ kManagerExtraRanges_[] = {
+    {0x5398, 8}, {0x53A9, 1}, {0x53C7, 1}, {0x53DC, 0x28},
+    {0x5414, 8}, {0x54B2, 2}, {0x1329C, 2},
+    {0x132B0, 4}, {0x13430, 0x31}, {0x13D48, 4},
+    {0x13D74, 3}, {0x13DE8, 0x10}, {0x13FFC, 4}, {0x1402F, 2},
+    // Native creature path cache; the shallow shade source is accessibleSquares2.
+    // H3API's tail fields are one byte early; use the audited native range.
+    {0x14031, 187}
+};
+static constexpr size_t ManagerExtraSize_() {
+    return ScalarRangesSize_(kManagerExtraRanges_, sizeof(kManagerExtraRanges_) / sizeof(kManagerExtraRanges_[0]));
+}
 
 struct CodecWriter
 {
@@ -203,15 +235,31 @@ struct CodecStack
     int32_t cloneDuration;
     int32_t spellToApply;
     int32_t visibility;
-    uint8_t creatureInfo[0x74];
+    // Preserve resource ownership: flags and audited numeric combat fields only.
+    uint32_t infoFlags;
+    // v3: numeric combat info +0x4C..+0x68; never serialize resource strings.
+    int32_t infoCombat[8];
+    int32_t defendingDelta;
+    int32_t animationSpeed;
+    int32_t movementDirection;
+    int32_t renderOffsetY;
+    int32_t renderOffsetX;
+    uint8_t extraScalars[StackExtraSize_()];
+    CodecIdentity aiTarget = {-1, -1};
     std::vector<int32_t> spellIds;
     std::vector<CodecIdentity> relations[4];
 };
 
+static constexpr CodecScalarRange_ kSquareExtraRanges_[] = {{0, 14}, {0x4D, 1}, {0x50, 32}};
+static constexpr size_t SquareExtraSize_() {
+    return ScalarRangesSize_(kSquareExtraRanges_, sizeof(kSquareExtraRanges_) / sizeof(kSquareExtraRanges_[0]));
+}
 struct CodecSquare
 {
+    uint8_t extraScalars[SquareExtraSize_()];
+    // v4: obstacleIndex was dropped. It is a product of the live vector layout and
+    // is recomputed from the rebuilt entry order; only the bits are ground truth.
     uint8_t obstacleBits;
-    int32_t obstacleIndex;
     int8_t stackSide;
     int8_t stackIndex;
     uint8_t twoHexMonsterSquare;
@@ -225,13 +273,53 @@ struct CodecSquare
 
 struct CodecObstacle
 {
-    int32_t infoIndex;
+    // v4: stable kind identity replaces the old pointer-difference infoIndex, which
+    // truncated for spell obstacles (their static H3ObstacleInfo entries are not on
+    // the 0x14 terrain-table grid). 0..90 = terrain table index, 100..104 = the five
+    // spell obstacles (quicksand, land mine, force field 2/3 cells, fire wall).
+    uint16_t kindId;
     uint8_t anchorHex;
     int8_t ownerSide;
     uint8_t featureTriggered;
     uint32_t featureDamage;
     uint32_t featureDuration;
     uint32_t animationIndex;
+    // Squares the game itself would touch (FUN_00466590 row-parity logic applied
+    // at capture time), so policy and rebuild never re-derive layout from pointers.
+    uint8_t cellCount;
+    uint8_t cells[8];
+    // Def name cross-checks the live kind table at restore time; never a load key.
+    char defName[16];
+};
+
+static bool ObstacleKindValid_(uint16_t kindId)
+{
+    return kindId <= 90 || (kindId >= 100 && kindId <= 104);
+}
+
+// Square bits each kind sets on its relative cells (anchor hex additionally gets bit 0).
+static inline uint8_t ObstacleKindBits_(uint16_t kindId)
+{
+    switch (kindId) {
+        case 100: return 0x04;    // quicksand
+        case 101: return 0x08;    // land mine
+        case 102: return 0x22;    // force field (localObstacle | forcefield)
+        case 103: return 0x22;    // force field
+        case 104: return 0x10;    // fire wall
+        default: return 0x02;     // terrain table obstacle
+    }
+}
+
+static bool CodecObstacleKeyLess_(const CodecObstacle& a, const CodecObstacle& b)
+{
+    if (a.kindId != b.kindId) return a.kindId < b.kindId;
+    return a.anchorHex < b.anchorHex;
+}
+
+struct CodecTower_ {
+    // type, x, y, facing, sequence, frame index, defending stack slot.
+    int32_t scalars[7];
+    char defName[13], missileName[13];
 };
 
 struct CodecCapture
@@ -254,7 +342,7 @@ struct CodecCapture
     uint8_t isHuman[2];
     int32_t heroOwner[2];
     uint8_t artifactAutoCast[2];
-    uint8_t heroCasted[2];
+    uint32_t heroCasted[2];
     int32_t heroMonCount[2];
     int32_t turnsSinceLastEnchanterCast[2];
     int32_t summonedMonster[2];
@@ -283,12 +371,247 @@ struct CodecCapture
     uint32_t rngTlsSeed;
     uint32_t rngMirrorSeed;
     std::vector<int32_t> eagleEye[2];
+    uint8_t extraScalars[ManagerExtraSize_()];
+    CodecTower_ towers[3];
+    char wallPcxNames[90][13];
     CodecSquare squares[187];
     std::vector<CodecObstacle> obstacles;
     std::vector<std::string> logLines;
     CodecStack stacks[2][21];
 };
 
+static void CodecReset_(CodecCapture* capture)
+{
+    std::unique_ptr<CodecCapture> empty(new CodecCapture{});
+    *capture = std::move(*empty);
+}
+
+// Hover intent belongs to the current mouse, not the saved combat timeline.
+// Neither shallow shade cache nor the native path cache is hover intent.
+static void CodecInvalidateHover_(CodecCapture* capture)
+{
+    capture->creatureAtMousePos = -1;
+    capture->mouseCoord = -1;
+    capture->attackerCoord = -1;
+    capture->moveType = -99;
+    for (int side = 0; side < 2; ++side)
+        for (int slot = 0; slot < 20; ++slot)
+            capture->stacks[side][slot].highlightContour = 0;
+}
+
+// Restore caches independently of the player's display option. Native drawing
+// gates shallow shading on 0x698814 or tacticsPhase, not on cache emptiness.
+static void CodecRestoreDisplayCaches_(void* previous, void* current, void* path, const CodecCapture& capture)
+{
+    memset(previous, 0, sizeof(capture.accessibleSquares));
+    memset(current, 0, sizeof(capture.accessibleSquares2));
+    memset(path, 0, 187);
+    memcpy(previous, capture.accessibleSquares, sizeof(capture.accessibleSquares));
+    memcpy(current, capture.accessibleSquares2, sizeof(capture.accessibleSquares2));
+    size_t packed = 0;
+    for (const auto& range : kManagerExtraRanges_) {
+        if (range.offset == 0x14031u) {
+            memcpy(path, capture.extraScalars + packed, range.size);
+            return;
+        }
+        packed += range.size;
+    }
+}
+
+static float CodecStackFloat_(const CodecStack& stack, uint32_t offset) {
+    size_t packed = 0;
+    for (const auto& range : kStackExtraRanges_) {
+        if (offset >= range.offset && offset + 4 <= range.offset + range.size) {
+            float value = 0;
+            memcpy(&value, stack.extraScalars + packed + offset - range.offset, 4);
+            return value;
+        }
+        packed += range.size;
+    }
+    return 0;
+}
+static bool CodecStackPositionValid_(const CodecStack& stack) {
+    return stack.type == 149 ? (stack.side == 1 && (stack.position == 251 || stack.position == 254 || stack.position == 255))
+        : (stack.position >= -1 && stack.position < 187 && (!stack.numberAlive || stack.position >= 0));
+}
+
+// Pure preflight on the saved payload itself. The live battlefield is replaced
+// wholesale on restore, so it never participates in these checks; only the
+// archive's own physical ranges (array bounds, native-call safety) are gated.
+static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
+{
+    auto reject = [&](const char* why) { if (error) *error = why; return false; };
+    if (saved.version != kCodecVersion)
+        return reject("存档数据版本不兼容，请重新保存战场存档");
+    if (saved.action || saved.finished || saved.autoCombat || saved.tacticsPhase
+        || saved.currentMonSide < 0 || saved.currentMonSide > 1
+        || saved.currentMonIndex < 0 || saved.currentMonIndex >= 20
+        || saved.currentActiveSide < 0 || saved.currentActiveSide > 1
+        || !saved.isHuman[saved.currentActiveSide] || saved.turn < 0)
+        return reject("saved state is not a player waiting turn");
+    for (int side = 0; side < 2; ++side)
+        if (saved.heroMonCount[side] < 0 || saved.heroMonCount[side] > 20)
+            return reject("battle participant count exceeds supported slots");
+    if (saved.siegeKind2 < 0 || saved.siegeKind2 > 3)
+        return reject("城防等级超出有效范围");
+    // Non-fortified battles never index door resources and may retain stale door bytes.
+    if (saved.siegeKind2 > 0 && (saved.siegeKind < 0 || saved.siegeKind > 3))
+        return reject("城门状态超出有效范围");
+    for (int wall = 0; wall < 18; ++wall)
+        if (saved.fortWallsHp[wall] < 0 || saved.fortWallsHp[wall] > 1000000
+            || saved.fortWallsAlive[wall] < 0 || saved.fortWallsAlive[wall] > 4)
+            return reject("城墙状态超出有效范围");
+    for (const auto& name : saved.wallPcxNames)
+        if (!memchr(name, 0, sizeof(name))) return reject("城墙图像资源名无效");
+    const int towerHex[] = {254, 251, 255};
+    for (int tower = 0; tower < 3; ++tower) {
+        const CodecTower_& t = saved.towers[tower];
+        if (!memchr(t.defName, 0, sizeof(t.defName)) || !memchr(t.missileName, 0, sizeof(t.missileName)))
+            return reject("箭塔资源名无效");
+        if (!t.defName[0] && !t.missileName[0]) continue;
+        const int slot = t.scalars[6];
+        if (!saved.siegeKind2 || t.scalars[0] < 0 || t.scalars[0] > 150
+            || t.scalars[3] < 0 || t.scalars[3] > 1 || t.scalars[4] < 0 || t.scalars[4] > 1023
+            || t.scalars[5] < 0 || slot < 0 || slot >= 20
+            || !saved.stacks[1][slot].occupied || saved.stacks[1][slot].type != 149
+            || saved.stacks[1][slot].position != towerHex[tower])
+            return reject("箭塔状态或关联槽位无效");
+    }
+    for (int side = 0; side < 2; ++side) {
+        for (int slot = 0; slot < 21; ++slot) {
+            const CodecStack& s = saved.stacks[side][slot];
+            if (s.occupied) {
+                if (s.spellIds.size() > 100000) return reject("saved spell deque too large");
+                for (int spell : s.spellIds)
+                    if (spell < 0 || spell >= 81) return reject("saved spell id invalid");
+                for (int v = 0; v < 4; ++v) {
+                    if (s.relations[v].size() > 42) return reject("saved relation vector too large");
+                    for (const CodecIdentity& id : s.relations[v])
+                        if (id.side < 0 || id.side > 1 || id.slot < 0 || id.slot >= 20
+                            || !saved.stacks[id.side][id.slot].occupied)
+                            return reject("saved relation target invalid");
+                }
+            }
+            if (slot == 20) {
+                // Reserved storage: partially constructed and never consumed by
+                // native combat logic. Save and write back as-is; only physical
+                // ranges and the AI pointer target apply (no emptiness or
+                // side/slot identity requirements).
+                if (s.occupied) {
+                    if (s.type < 0 || s.type > 0x95 || !CodecStackPositionValid_(s)
+                        || s.activeSpellNumber < 0 || s.activeSpellNumber > 81
+                        || s.renderOffsetX < -1000000 || s.renderOffsetX > 1000000
+                        || s.renderOffsetY < -1000000 || s.renderOffsetY > 1000000)
+                        return reject("reserved slot scalar outside valid range");
+                    if ((s.aiTarget.side == -1) != (s.aiTarget.slot == -1)
+                        || (s.aiTarget.side != -1 && (s.aiTarget.side < 0 || s.aiTarget.side > 1
+                        || s.aiTarget.slot < 0 || s.aiTarget.slot >= 20
+                        || !saved.stacks[s.aiTarget.side][s.aiTarget.slot].occupied)))
+                        return reject("reserved slot AI target invalid");
+                }
+                continue;
+            }
+            if (!s.occupied) continue;
+            if (s.side != side || s.sideIndex != slot)
+                return reject("saved stack slot reference invalid");
+            if (s.type < 0 || s.type > 0x95 || s.numberAlive < 0 || s.numberForeverDead < 0
+                || s.numberAtStart < 0 || s.numberAlive > s.numberAtStart
+                || s.healthLost < 0 || s.infoCombat[0] <= 0 || s.healthLost >= s.infoCombat[0]
+                || !CodecStackPositionValid_(s)
+                || s.secondHexOrientation < -1 || s.secondHexOrientation > 1
+                || s.activeSpellNumber < 0 || s.activeSpellNumber > 81
+                || s.renderOffsetX < -1000000 || s.renderOffsetX > 1000000
+                || s.renderOffsetY < -1000000 || s.renderOffsetY > 1000000)
+                return reject("saved stack scalar outside valid range");
+            const float effects[] = {s.frenzyMultiplier, s.blindEffect, s.fireShieldEffect,
+                s.protectionAirEffect, s.protectionFireEffect, s.protectionWaterEffect,
+                s.protectionEarthEffect, s.shieldEffect, s.airShieldEffect, s.slowEffect,
+                CodecStackFloat_(s, 0x450), CodecStackFloat_(s, 0x4A4)};
+            for (float f : effects)
+                if (!(f >= -1000000.0f && f <= 1000000.0f)) return reject("non-finite spell effect");
+            if ((s.aiTarget.side == -1 && s.aiTarget.slot != -1)
+                || (s.aiTarget.side != -1 && (s.aiTarget.side < 0 || s.aiTarget.side > 1
+                || s.aiTarget.slot < 0 || s.aiTarget.slot >= 20
+                || !saved.stacks[s.aiTarget.side][s.aiTarget.slot].occupied)))
+                return reject("saved AI target invalid");
+        }
+    }
+    const CodecStack& active = saved.stacks[saved.currentMonSide][saved.currentMonIndex];
+    if (!active.occupied || active.numberAlive <= 0) return reject("saved active stack is not alive");
+    // v4: obstacles are a rebuild payload. The live set is re-derived by the diff in
+    // RestoreApply_, so live-vs-saved equality is no longer required here; instead the
+    // saved payload needs bounded geometry and unique claims for safe native calls.
+    // Grid bits are independent saved data: HD/plugin processing can move an anchor
+    // flag without moving the obstacle entry. Restore writes the recorded bits.
+    {
+        if (saved.obstacles.size() > 4096) return reject("saved obstacle count exceeds 4096");
+        uint16_t claimed[187];
+        memset(claimed, 0, sizeof(claimed));
+        for (size_t i = 0; i < saved.obstacles.size(); ++i) {
+            const CodecObstacle& s = saved.obstacles[i];
+            if (!ObstacleKindValid_(s.kindId)) return reject("saved obstacle kind outside known table");
+            if (s.anchorHex >= 187 || s.cellCount > 8) return reject("saved obstacle geometry invalid");
+            if (s.ownerSide < -1 || s.ownerSide > 1) return reject("saved obstacle owner side invalid");
+            if (s.defName[0] == '\0' || memchr(s.defName, '\0', sizeof(s.defName)) == nullptr)
+                return reject("saved obstacle def name invalid");
+            for (uint8_t c = 0; c < s.cellCount; ++c)
+                if (s.cells[c] >= 187) return reject("saved obstacle cell off board");
+            if (claimed[s.anchorHex])
+                return reject("saved obstacles overlap on one hex");
+            claimed[s.anchorHex] = (uint16_t)(i + 1);
+            for (uint8_t c = 0; c < s.cellCount; ++c) {
+                const uint8_t hex = s.cells[c];
+                if (claimed[hex] && claimed[hex] != (uint16_t)(i + 1))
+                    return reject("saved obstacles overlap on one hex");
+                claimed[hex] = (uint16_t)(i + 1);
+            }
+        }
+    }
+    for (int i = 0; i < 187; ++i) {
+        const CodecSquare& s = saved.squares[i];
+        if (s.stackSide >= 0 && s.stackIndex == 20)
+            return reject("battlefield references reserved slot");
+        if (s.deadStacksNumber < 0 || s.deadStacksNumber > 14) return reject("corpse count invalid");
+        auto validRef = [&](int side, int slot) {
+            return side >= 0 && side < 2 && slot >= 0 && slot < 20 && saved.stacks[side][slot].occupied;
+        };
+        if (s.stackSide >= 0 && (!validRef(s.stackSide, s.stackIndex)
+            || saved.stacks[s.stackSide][s.stackIndex].numberAlive <= 0))
+            return reject("square references absent stack");
+        if (s.stackSide >= 0) {
+            const CodecStack& unit = saved.stacks[s.stackSide][s.stackIndex];
+            const int second = unit.position + (unit.secondHexOrientation ? 1 : -1);
+            const bool wide = (unit.infoFlags & 1) != 0;
+            const int primaryFlag = wide ? (unit.secondHexOrientation == 0) : 0xFF;
+            const bool primary = unit.position == i && s.twoHexMonsterSquare == primaryFlag;
+            const bool secondary = wide && i == second
+                && s.twoHexMonsterSquare == (unit.secondHexOrientation != 0);
+            if (!primary && !secondary)
+                return reject("square position or second hex inconsistent");
+        }
+        for (int d = 0; d < s.deadStacksNumber; ++d)
+            if (!validRef(s.deadStackSide[d], s.deadStackIndex[d])) return reject("corpse identity invalid");
+    }
+    for (int side = 0; side < 2; ++side)
+        for (int slot = 0; slot < 20; ++slot) {
+            const CodecStack& s = saved.stacks[side][slot];
+            if (!s.occupied || !s.numberAlive || s.type == 149) continue;
+            const CodecSquare& square = saved.squares[s.position];
+            const int primaryFlag = (s.infoFlags & 1) ? (s.secondHexOrientation == 0) : 0xFF;
+            if (square.stackSide != side || square.stackIndex != slot || square.twoHexMonsterSquare != primaryFlag)
+                return reject("stack and battlefield position disagree");
+            if (s.infoFlags & 1) {
+                const int second = s.position + (s.secondHexOrientation ? 1 : -1);
+                if (s.secondHexOrientation < 0 || second < 0 || second >= 187
+                    || second / 17 != s.position / 17
+                    || saved.squares[second].stackSide != side || saved.squares[second].stackIndex != slot
+                    || saved.squares[second].twoHexMonsterSquare != (s.secondHexOrientation != 0))
+                    return reject("double-wide second hex missing");
+            }
+        }
+
+    return true;
+}
 static void WriteStackScalars_(CodecWriter* writer, const CodecStack& stack)
 {
     writer->U8(stack.occupied ? 1 : 0);
@@ -343,8 +666,20 @@ static void WriteStackScalars_(CodecWriter* writer, const CodecStack& stack)
     writer->I32(stack.cloneDuration);
     writer->I32(stack.spellToApply);
     writer->I32(stack.visibility);
-    writer->Bytes(stack.creatureInfo, sizeof(stack.creatureInfo));
+    writer->U32(stack.infoFlags);
+    for (int i = 0; i < 8; ++i) writer->I32(stack.infoCombat[i]);
+    writer->I32(stack.defendingDelta);
+    writer->I32(stack.animationSpeed);
+    writer->I32(stack.movementDirection);
+    writer->I32(stack.renderOffsetY);
+    writer->I32(stack.renderOffsetX);
+    writer->Bytes(stack.extraScalars, sizeof(stack.extraScalars));
+    writer->I32(stack.aiTarget.side);
+    writer->I32(stack.aiTarget.slot);
 }
+
+// Slot 20 stays partially constructed native storage: captured as-is, restored
+// as-is, and never required to be empty or match participant identity fields.
 
 static void ReadStackScalars_(CodecReader* reader, CodecStack* stack)
 {
@@ -400,7 +735,16 @@ static void ReadStackScalars_(CodecReader* reader, CodecStack* stack)
     stack->cloneDuration = reader->I32();
     stack->spellToApply = reader->I32();
     stack->visibility = reader->I32();
-    reader->Bytes(stack->creatureInfo, sizeof(stack->creatureInfo));
+    stack->infoFlags = reader->U32();
+    for (int i = 0; i < 8; ++i) stack->infoCombat[i] = reader->I32();
+    stack->defendingDelta = reader->I32();
+    stack->animationSpeed = reader->I32();
+    stack->movementDirection = reader->I32();
+    stack->renderOffsetY = reader->I32();
+    stack->renderOffsetX = reader->I32();
+    reader->Bytes(stack->extraScalars, sizeof(stack->extraScalars));
+    stack->aiTarget.side = reader->I32();
+    stack->aiTarget.slot = reader->I32();
 }
 
 static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSection>* out, std::string* error)
@@ -429,7 +773,7 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         battle.U8(capture.isNotAI[side]);
         battle.U8(capture.isHuman[side]);
         battle.U8(capture.artifactAutoCast[side]);
-        battle.U8(capture.heroCasted[side]);
+        battle.U32(capture.heroCasted[side]);
     }
     battle.U8(capture.tacticsPhase);
     for (int i = 0; i < 18; ++i) battle.I32(capture.fortWallsHp[i]);
@@ -446,6 +790,13 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         for (size_t i = 0; i < capture.eagleEye[side].size(); ++i)
             battle.I32(capture.eagleEye[side][i]);
     }
+    battle.Bytes(capture.extraScalars, sizeof(capture.extraScalars));
+    for (const auto& tower : capture.towers) {
+        for (int scalar : tower.scalars) battle.I32(scalar);
+        battle.Bytes(tower.defName, sizeof(tower.defName));
+        battle.Bytes(tower.missileName, sizeof(tower.missileName));
+    }
+    battle.Bytes(capture.wallPcxNames, sizeof(capture.wallPcxNames));
     if (!battle.ok) { if (error) *error = "battle section overflow"; return false; }
 
     CodecWriter stacks;
@@ -460,8 +811,8 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
     squares.U32(187);
     for (int i = 0; i < 187; ++i) {
         const CodecSquare& square = capture.squares[i];
+        squares.Bytes(square.extraScalars, sizeof(square.extraScalars));
         squares.U8(square.obstacleBits);
-        squares.I32(square.obstacleIndex);
         squares.U8((uint8_t)square.stackSide);
         squares.U8((uint8_t)square.stackIndex);
         squares.U8(square.twoHexMonsterSquare);
@@ -482,13 +833,22 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
     obstacles.U32((uint32_t)capture.obstacles.size());
     for (size_t i = 0; i < capture.obstacles.size(); ++i) {
         const CodecObstacle& item = capture.obstacles[i];
-        obstacles.I32(item.infoIndex);
+        const uint8_t nameLength = (uint8_t)strnlen(item.defName, sizeof(item.defName));
+        if (!nameLength || nameLength >= sizeof(item.defName) || item.cellCount > 8) {
+            obstacles.Fail();
+            break;
+        }
+        obstacles.U16(item.kindId);
         obstacles.U8(item.anchorHex);
         obstacles.U8((uint8_t)item.ownerSide);
         obstacles.U8(item.featureTriggered);
         obstacles.U32(item.featureDamage);
         obstacles.U32(item.featureDuration);
         obstacles.U32(item.animationIndex);
+        obstacles.U8(item.cellCount);
+        obstacles.Bytes(item.cells, item.cellCount);
+        obstacles.U8(nameLength);
+        obstacles.Bytes(item.defName, nameLength);
     }
 
     CodecWriter log;
@@ -550,6 +910,18 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
     return true;
 }
 
+// 比较编码字节，不比较对象/容器头；长度不同时 firstDiff 指向共同前缀末尾。
+static bool CodecSectionEqual_(const hbs::ArchiveSection& expected,
+    const hbs::ArchiveSection& actual, size_t* firstDiff)
+{
+    size_t first = 0;
+    const size_t limit = (std::min)(expected.bytes.size(), actual.bytes.size());
+    while (first < limit && expected.bytes[first] == actual.bytes[first]) ++first;
+    if (firstDiff) *firstDiff = first;
+    return expected.id == actual.id && first == limit
+        && expected.bytes.size() == actual.bytes.size();
+}
+
 static const hbs::ArchiveSection* FindSection_(const std::vector<hbs::ArchiveSection>& sections, uint32_t id)
 {
     const hbs::ArchiveSection* found = nullptr;
@@ -569,8 +941,9 @@ static bool ReadIntArray_(CodecReader* reader, int32_t* out, int count)
 
 static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecCapture* out, std::string* error)
 {
-    if (!out) return false;
-    *out = CodecCapture();
+    if (error) error->clear();
+    if (!out) { if (error) *error = "null capture output"; return false; }
+    CodecReset_(out);
     const hbs::ArchiveSection* battle = FindSection_(sections, kSectionBattle);
     const hbs::ArchiveSection* stacks = FindSection_(sections, kSectionStacks);
     const hbs::ArchiveSection* squares = FindSection_(sections, kSectionSquares);
@@ -607,11 +980,11 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
         out->isNotAI[side] = battleReader.U8();
         out->isHuman[side] = battleReader.U8();
         out->artifactAutoCast[side] = battleReader.U8();
-        out->heroCasted[side] = battleReader.U8();
+        out->heroCasted[side] = battleReader.U32();
     }
     out->tacticsPhase = battleReader.U8();
     if (!ReadIntArray_(&battleReader, out->fortWallsHp, 18)
-        || !ReadIntArray_(&battleReader, out->fortWallsAlive, 18)) return false;
+        || !ReadIntArray_(&battleReader, out->fortWallsAlive, 18)) { if (error) *error = "battle wall arrays are truncated"; return false; }
     battleReader.Bytes(out->massSpellTarget, sizeof(out->massSpellTarget));
     battleReader.Bytes(out->accessibleSquares, sizeof(out->accessibleSquares));
     battleReader.Bytes(out->accessibleSquares2, sizeof(out->accessibleSquares2));
@@ -625,21 +998,28 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
         for (uint32_t i = 0; i < count && battleReader.ok; ++i)
             out->eagleEye[side][i] = battleReader.I32();
     }
+    battleReader.Bytes(out->extraScalars, sizeof(out->extraScalars));
+    for (auto& tower : out->towers) {
+        for (int32_t& scalar : tower.scalars) scalar = battleReader.I32();
+        battleReader.Bytes(tower.defName, sizeof(tower.defName));
+        battleReader.Bytes(tower.missileName, sizeof(tower.missileName));
+    }
+    battleReader.Bytes(out->wallPcxNames, sizeof(out->wallPcxNames));
     if (!battleReader.Finish()) { if (error) *error = "battle section is corrupt"; return false; }
 
     CodecReader stackReader(stacks->bytes.data(), stacks->bytes.size());
-    if (stackReader.U32() != kCodecVersion) return false;
+    if (stackReader.U32() != kCodecVersion) { if (error) *error = "stack section version mismatch"; return false; }
     for (int side = 0; side < 2; ++side)
         for (int slot = 0; slot < 21; ++slot)
             ReadStackScalars_(&stackReader, &out->stacks[side][slot]);
     if (!stackReader.Finish()) { if (error) *error = "stack section is corrupt"; return false; }
 
     CodecReader squareReader(squares->bytes.data(), squares->bytes.size());
-    if (squareReader.U32() != kCodecVersion || squareReader.U32() != 187) return false;
+    if (squareReader.U32() != kCodecVersion || squareReader.U32() != 187) { if (error) *error = "square section header mismatch"; return false; }
     for (int i = 0; i < 187; ++i) {
         CodecSquare& square = out->squares[i];
+        squareReader.Bytes(square.extraScalars, sizeof(square.extraScalars));
         square.obstacleBits = squareReader.U8();
-        square.obstacleIndex = squareReader.I32();
         square.stackSide = (int8_t)squareReader.U8();
         square.stackIndex = (int8_t)squareReader.U8();
         square.twoHexMonsterSquare = squareReader.U8();
@@ -656,44 +1036,52 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     if (!squareReader.Finish()) { if (error) *error = "square section is corrupt"; return false; }
 
     CodecReader obstacleReader(obstacles->bytes.data(), obstacles->bytes.size());
-    if (obstacleReader.U32() != kCodecVersion) return false;
+    if (obstacleReader.U32() != kCodecVersion) { if (error) *error = "obstacle section version mismatch"; return false; }
     const uint32_t obstacleCount = obstacleReader.U32();
-    if (obstacleCount > 4096) return false;
+    if (obstacleCount > 4096) { if (error) *error = "obstacle count exceeds 4096"; return false; }
     out->obstacles.resize(obstacleCount);
     for (uint32_t i = 0; i < obstacleCount; ++i) {
         CodecObstacle& item = out->obstacles[i];
-        item.infoIndex = obstacleReader.I32();
+        item.kindId = obstacleReader.U16();
         item.anchorHex = obstacleReader.U8();
         item.ownerSide = (int8_t)obstacleReader.U8();
         item.featureTriggered = obstacleReader.U8();
         item.featureDamage = obstacleReader.U32();
         item.featureDuration = obstacleReader.U32();
         item.animationIndex = obstacleReader.U32();
+        item.cellCount = obstacleReader.U8();
+        if (item.cellCount > 8) obstacleReader.ok = false;
+        memset(item.cells, 0, sizeof(item.cells));
+        obstacleReader.Bytes(item.cells, obstacleReader.ok ? item.cellCount : 0);
+        const uint8_t nameLength = obstacleReader.U8();
+        if (!nameLength || nameLength >= sizeof(item.defName)) obstacleReader.ok = false;
+        memset(item.defName, 0, sizeof(item.defName));
+        obstacleReader.Bytes(item.defName, obstacleReader.ok ? nameLength : 0);
     }
-    if (!obstacleReader.Finish()) return false;
+    if (!obstacleReader.Finish()) { if (error) *error = "obstacle section is corrupt"; return false; }
 
     CodecReader logReader(log->bytes.data(), log->bytes.size());
-    if (logReader.U32() != kCodecVersion) return false;
+    if (logReader.U32() != kCodecVersion) { if (error) *error = "log section version mismatch"; return false; }
     const uint32_t logCount = logReader.U32();
-    if (logCount > 100000) return false;
+    if (logCount > 100000) { if (error) *error = "log count exceeds 100000"; return false; }
     out->logLines.resize(logCount);
     for (uint32_t i = 0; i < logCount; ++i) {
         const uint16_t length = logReader.U16();
         out->logLines[i].assign(length, '\0');
         if (length) logReader.Bytes(&out->logLines[i][0], length);
     }
-    if (!logReader.Finish()) return false;
+    if (!logReader.Finish()) { if (error) *error = "log section is corrupt"; return false; }
 
     CodecReader heroReader(heroes->bytes.data(), heroes->bytes.size());
-    if (heroReader.U32() != kCodecVersion) return false;
+    if (heroReader.U32() != kCodecVersion) { if (error) *error = "hero section version mismatch"; return false; }
     for (int side = 0; side < 2; ++side) {
         const int16_t points = (int16_t)heroReader.U16();
         if (points != out->spellPoints[side]) heroReader.ok = false;
     }
-    if (!heroReader.Finish()) return false;
+    if (!heroReader.Finish()) { if (error) *error = "hero section is corrupt or mana differs from battle section"; return false; }
 
     CodecReader relationReader(relations->bytes.data(), relations->bytes.size());
-    if (relationReader.U32() != kCodecVersion) return false;
+    if (relationReader.U32() != kCodecVersion) { if (error) *error = "relation section version mismatch"; return false; }
     for (int side = 0; side < 2 && relationReader.ok; ++side) {
         for (int slot = 0; slot < 21; ++slot) {
             for (int vector = 0; vector < 4; ++vector) {
@@ -710,10 +1098,10 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
             }
         }
     }
-    if (!relationReader.Finish()) return false;
+    if (!relationReader.Finish()) { if (error) *error = "relation section is corrupt"; return false; }
 
     CodecReader spellReader(spells->bytes.data(), spells->bytes.size());
-    if (spellReader.U32() != kCodecVersion) return false;
+    if (spellReader.U32() != kCodecVersion) { if (error) *error = "spell section version mismatch"; return false; }
     for (int side = 0; side < 2 && spellReader.ok; ++side) {
         for (int slot = 0; slot < 21; ++slot) {
             const uint32_t count = spellReader.U32();

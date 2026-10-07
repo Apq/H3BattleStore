@@ -77,3 +77,7 @@ Release/
 _build_out.txt
 
 _hb_preview.png
+_verify_logs/
+tests/codec-tmp/
+tests/abi-tmp/
+tests/tmp/
