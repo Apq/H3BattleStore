@@ -503,7 +503,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
             const bool inBar = UiPointInBar_(gameX, gameY);
             const int row = UiHitRow_(gameX, gameY);
             const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
-            const bool hitLevelItem = g_ui.logLevelOpen && UiHitLogLevelItem_(gameX, gameY) >= 0;
+            const bool hitLevelItem = UiHitLogLevelItem_(gameX, gameY) >= 0;
             const bool hitLevelTrigger = UiHitLogLevelTrigger_(gameX, gameY);
             const bool swallow = inBar || hitList || hitLevelItem || hitLevelTrigger;
             if (move)
@@ -669,7 +669,6 @@ static void BattleReset_()
     g_ui.entries.clear();
     g_ui.battleKey.clear();
     g_ui.hoverRow = -1;
-    g_ui.logLevelOpen = false;
     g_ui.logLevelHover = -1;
 
     ClearBattleInputs_();
@@ -712,11 +711,10 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
     return EXEC_DEFAULT;
 }
 
-// 悬停即时刷新日志下拉高亮：面板 mouse-over 事件频率不可靠（H3Auto 教训），
-// 展开期间每帧按光标位置重算，变化才无需额外重绘——UiDrawBar_ 每帧全量重画。
+// 悬停即时刷新日志等级行高亮：面板 mouse-over 事件频率不可靠（H3Auto 教训），
+// 每帧按光标位置重算；UiDrawBar_ 每帧全量重画，无需额外失效。
 static void UiPollLogLevelHover_()
 {
-    if (!g_ui.logLevelOpen) return;
     const H3POINT cursor = H3POINT::GetCursorPosition();
     g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
 }

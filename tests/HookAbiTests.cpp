@@ -1563,32 +1563,35 @@ static void TestPreparedDeque_()
     }
     std::printf("PASS native deque: 0/1/512/1023/1024/1025/2048, exact-multiple begin+4, multiblock readback, allocation failure cleanup\n");
 }
-static void TestLogLevelDropdown_()
+static void TestLogLevelList_()
 {
-    // Trigger sits left of the key box; expanded rows sit below the bar, right of
-    // the save list: the two dropdown rectangles must never overlap.
-    CheckAbi_(kUiLogLevelX >= kUiListWidth, "log dropdown starts right of save list");
+    // Persistent single-select list: status box left of the key box; option rows
+    // sit below the bar, right of the save list — rectangles must never overlap.
+    CheckAbi_(kUiLogLevelX >= kUiListWidth, "log rows start right of save list");
     CheckAbi_(kUiLogLevelX + kUiLogLevelWidth - 2 < kUiBarWidth - 58,
-        "log trigger never overlaps the key box");
+        "status box never overlaps the key box");
     CheckAbi_(kUiLogLevelRows == 5, "five levels trace..error");
     for (int i = 0; i < 5; ++i)
         CheckAbi_(strcmp(kUiLogLevelNames_[i], LogLevelName_(i)) == 0,
-            "dropdown labels match config level names");
+            "list labels match config level names");
     const int savedX = g_ui.x, savedY = g_ui.y;
-    const bool savedOpen = g_ui.logLevelOpen;
+    const int savedHover = g_ui.logLevelHover;
     g_ui.x = 8; g_ui.y = 8;
-    CheckAbi_(UiHitLogLevelTrigger_(8 + kUiLogLevelX, 8 + 10), "trigger hit inside its box");
-    CheckAbi_(!UiHitLogLevelTrigger_(8 + kUiLogLevelX - 1, 8 + 10), "trigger left edge exclusive");
-    CheckAbi_(!UiHitLogLevelTrigger_(8 + kUiBarWidth - 58, 8 + 10), "key box is not the trigger");
+    CheckAbi_(UiHitLogLevelTrigger_(8 + kUiLogLevelX, 8 + 10), "status box hit inside its rect");
+    CheckAbi_(!UiHitLogLevelTrigger_(8 + kUiLogLevelX - 1, 8 + 10), "status box left edge exclusive");
+    CheckAbi_(!UiHitLogLevelTrigger_(8 + kUiBarWidth - 58, 8 + 10), "key box is not the status box");
     CheckAbi_(UiHitLogLevelItem_(8 + kUiLogLevelX + 3, 8 + kUiBarHeight + 2) == 0,
-        "expanded first row hit");
+        "first option row hit");
     CheckAbi_(UiHitLogLevelItem_(8 + kUiLogLevelX + 3,
-        8 + kUiBarHeight + 4 * kUiLogLevelRowHeight + 1) == 4, "expanded last row hit");
+        8 + kUiBarHeight + 4 * kUiLogLevelRowHeight + 1) == 4, "last option row hit");
     CheckAbi_(UiHitLogLevelItem_(8 + kUiLogLevelX + 3,
         8 + kUiBarHeight + kUiLogLevelRows * kUiLogLevelRowHeight) == -1,
-        "below the expanded list misses");
+        "below the option list misses");
     CheckAbi_(UiHitLogLevelItem_(8 + 3, 8 + kUiBarHeight + 2) == -1,
         "save list area is not a log item hit");
+    // The list is always visible: rows are reachable without any open state.
+    CheckAbi_(UiHitLogLevelItem_(8 + kUiLogLevelX + 3, 8 + kUiBarHeight + 2) == 0,
+        "hover poll reaches rows without open flag");
     // Selection must persist through the user ini, not the shipped default.
     g_log_level = LOG_INFO;
     CheckAbi_(SaveLogLevel_(LOG_WARN) && g_log_level == LOG_WARN,
@@ -1598,8 +1601,8 @@ static void TestLogLevelDropdown_()
     CheckAbi_(strcmp(value, "warn") == 0, "user ini stores the selected level");
     CheckAbi_(SaveLogLevel_(LOG_INFO) && g_log_level == LOG_INFO, "restore info default");
     IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", "info");
-    g_ui.x = savedX; g_ui.y = savedY; g_ui.logLevelOpen = savedOpen;
-    std::printf("PASS log level dropdown: disjoint hit areas, trigger edges, user ini persistence\n");
+    g_ui.x = savedX; g_ui.y = savedY; g_ui.logLevelHover = savedHover;
+    std::printf("PASS log level list: always-visible rows, disjoint hit areas, user ini persistence\n");
 }
 static void TestObjectSwitch_()
 {
@@ -1741,7 +1744,7 @@ int main()
     TestRestoreReasonZh_();
     TestPreparedDeque_();
     TestObjectSwitch_();
-    TestLogLevelDropdown_();
+    TestLogLevelList_();
     HiHook* executor = _PI->WriteHiHook(reinterpret_cast<UINT32>(&MockExecute_),
         SPLICE_, EXTENDED_, THISCALL_, Hook_BattleExecute_);
     CheckAbi_(executor != nullptr, "install real production executor");

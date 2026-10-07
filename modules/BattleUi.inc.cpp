@@ -60,7 +60,7 @@ static const int kUiRowHeight = 18;
 static const int kUiListMaxRows = 10;
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
-// 日志等级下拉框：位于键位框左侧，不与键位框重叠。
+// 日志等级常驻单选列表：条内小框显示当前等级，条下五行选项固定可见。
 static const int kUiLogLevelWidth = 62;
 static const int kUiLogLevelX = kUiBarWidth - 58 - kUiLogLevelWidth - 4;
 static const int kUiLogLevelRows = 5;  // trace..error
@@ -96,8 +96,7 @@ static struct
     std::string battleKey;
     std::vector<UiSaveEntry> entries;
     int hoverRow = -1;
-    // 日志等级单选下拉：值即 g_log_level；展开时点击行选中并写 user.ini。
-    bool logLevelOpen = false;
+    // 日志等级常驻单选列表：值即 g_log_level；点击行选中并写 user.ini。
     int logLevelHover = -1;
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
@@ -472,17 +471,14 @@ static void UiDrawBar_(H3CombatManager* mgr)
         static int lastX = -1;
         static int lastY = -1;
         static int lastH = -1;
-        static bool lastLevelOpen = false;
         static H3CombatManager* lastMgr = nullptr;
         if (lastMgr != mgr) {
             lastX = lastY = lastH = -1;
             lastMgr = mgr;
         }
-        const int totalH = kUiBarHeight
-            + (rows > 0 ? rows * kUiRowHeight : 0)
-            + (g_ui.logLevelOpen ? kUiLogLevelRows * kUiLogLevelRowHeight : 0);
-        const bool rectChanged = lastX != x || lastY != y || lastH != totalH
-            || lastLevelOpen != g_ui.logLevelOpen;
+        // 日志等级列表矩形固定（五行恒在），残影跟踪只需跟随存档列表行数。
+        const int totalH = kUiBarHeight + rows * kUiRowHeight;
+        const bool rectChanged = lastX != x || lastY != y || lastH != totalH;
         // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
         c->FillRectangle(0, 0, kUiBarWidth, kUiBarHeight, 0, 0, 0);
         c->FillRectangle(0, kUiBarHeight, kUiListWidth, kUiListMaxRows * kUiRowHeight, 0, 0, 0);
@@ -556,21 +552,20 @@ static void UiDrawBar_(H3CombatManager* mgr)
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_ui.saveKey);
         UiToGbk_(keyUtf8, key, sizeof(key));
-        // 日志等级收起态：显示当前等级，与键位框同款小框。
+        // 日志等级状态框：仅显示当前等级；选择在条下常驻单选列表完成，点击无动作。
         const int levelNow = (g_log_level >= LOG_TRACE && g_log_level <= LOG_ERROR)
             ? g_log_level : LOG_INFO;
         char levelGbk[16] = {};
         UiToGbk_(kUiLogLevelNames_[levelNow], levelGbk, sizeof(levelGbk));
         font->TextDraw(c, levelGbk, kUiLogLevelX, 0, kUiLogLevelWidth - 6,
             kUiBarHeight, eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiLogLevelX, 2, kUiLogLevelWidth - 2, kUiBarHeight - 4,
-            g_ui.logLevelOpen ? 210 : 220, g_ui.logLevelOpen ? 170 : 200, 110);
+        c->DrawFrame(kUiLogLevelX, 2, kUiLogLevelWidth - 2, kUiBarHeight - 4, 220, 200, 110);
         font->TextDraw(c, key, kUiBarWidth - 58, 0, 52, kUiBarHeight,
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
         c->DrawFrame(kUiBarWidth - 58, 2, 54, kUiBarHeight - 4, 220, 200, 110);
-        // 展开列表画在悬浮条下方左侧，与存档列表同宽区域，互不重叠：
-        // 存档列表在左上角正下方，日志下拉在 x=LogLevelX 处。
-        if (g_ui.logLevelOpen) {
+        // 常驻单选列表：固定五行，当前项绿色标注，悬停行浅色高亮。
+        // 不做展开/收起——每帧 blt 矩形稳定，从源头避免开合残影（2026-10-07 用户裁定）。
+        {
             const int listY = kUiBarHeight;
             const int popX = kUiLogLevelX;
             for (int i = 0; i < kUiLogLevelRows; ++i) {
@@ -606,34 +601,27 @@ static void UiDrawBar_(H3CombatManager* mgr)
         }
         bool bltOk = false;
         redrawing = true;
-        const int drawH = kUiBarHeight + rows * kUiRowHeight;
-        if (rectChanged && lastX >= 0 && lastH > drawH && wnd->screenPcx16) {
-            const int tailY = lastY + drawH;
+        if (rectChanged && lastX >= 0 && lastH > totalH && wnd->screenPcx16) {
+            const int tailY = lastY + totalH;
             if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiListWidth,
-                lastH - drawH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiListWidth, lastH - drawH);
-            if (lastH > drawH + (lastLevelOpen ? kUiLogLevelRows * kUiLogLevelRowHeight : 0)
-                && UiBltPcx16Region_(wnd->screenPcx16, lastX + kUiLogLevelX, drawH,
-                    kUiLogLevelWidth - 2, lastH - drawH, lastX + kUiLogLevelX, drawH))
-                wnd->H3Redraw(lastX + kUiLogLevelX, drawH, kUiLogLevelWidth - 2, lastH - drawH);
+                lastH - totalH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiListWidth, lastH - totalH);
         }
         // 悬浮条(480 宽)与下拉列表(136 宽)分开 blt：列表右侧不清底、不覆盖战场
         bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, kUiBarHeight, x, y);
         if (rows > 0)
             bltOk = UiBltPcx16Region_(c, 0, kUiBarHeight, kUiListWidth, rows * kUiRowHeight,
                 x, y + kUiBarHeight) && bltOk;
-        if (g_ui.logLevelOpen)
-            bltOk = UiBltPcx16Region_(c, kUiLogLevelX, kUiBarHeight, kUiLogLevelWidth - 2,
-                kUiLogLevelRows * kUiLogLevelRowHeight, x + kUiLogLevelX,
-                y + kUiBarHeight) && bltOk;
+        bltOk = UiBltPcx16Region_(c, kUiLogLevelX, kUiBarHeight, kUiLogLevelWidth - 2,
+            kUiLogLevelRows * kUiLogLevelRowHeight, x + kUiLogLevelX,
+            y + kUiBarHeight) && bltOk;
         wnd->H3Redraw(x, y, kUiBarWidth, kUiBarHeight);
         if (rows > 0) wnd->H3Redraw(x, y + kUiBarHeight, kUiListWidth, rows * kUiRowHeight);
-        if (g_ui.logLevelOpen) wnd->H3Redraw(x + kUiLogLevelX, y + kUiBarHeight,
+        wnd->H3Redraw(x + kUiLogLevelX, y + kUiBarHeight,
             kUiLogLevelWidth - 2, kUiLogLevelRows * kUiLogLevelRowHeight);
         redrawing = false;
         lastX = x;
         lastY = y;
         lastH = totalH;
-        lastLevelOpen = g_ui.logLevelOpen;
         if (logInfo)
             LogDebug("悬浮条绘制：合成图=%p backbuffer=%p pos=(%d,%d) blt=%d",
                 c, UiDDBackBuffer_(), x, y, bltOk ? 1 : 0);
@@ -691,7 +679,7 @@ static int UiHitRow_(int px, int py)
     return row;
 }
 
-// 日志等级下拉命中：收起态命中触发框，展开态命中具体选项行。
+// 日志等级单选列表命中：条下方五行选项，返回 0..4；与存档列表矩形不相交。
 static int UiHitLogLevelItem_(int px, int py)
 {
     const int top = g_ui.y + kUiBarHeight;
@@ -702,6 +690,7 @@ static int UiHitLogLevelItem_(int px, int py)
     return row;
 }
 
+// 条内状态框：仅显示当前等级，点击吞并但无动作。
 static bool UiHitLogLevelTrigger_(int px, int py)
 {
     return px >= g_ui.x + kUiLogLevelX && px < g_ui.x + kUiLogLevelX + kUiLogLevelWidth - 2
@@ -716,9 +705,6 @@ static struct {
     UiSaveEntry entry;
 } g_restoreRequest;
 
-
-// 展开态在条下方右侧；存档列表展开在左，日志下拉在右，矩形互不重叠。
-static bool UiLogLevelOverlapsSaveList_() { return false; }
 
 static void UiSelectLogLevel_(int level)
 {
@@ -1094,7 +1080,7 @@ static void UiHandleMouse_(H3Msg* msg)
     const int py = cursor.y;
     if (msg->command == eMsgCommand::MOUSE_OVER) {
         g_ui.hoverRow = UiHitRow_(px, py);
-        g_ui.logLevelHover = g_ui.logLevelOpen ? UiHitLogLevelItem_(px, py) : -1;
+        g_ui.logLevelHover = UiHitLogLevelItem_(px, py);
         return;
     }
     if (msg->command != eMsgCommand::MOUSE_BUTTON) return;
@@ -1104,17 +1090,9 @@ static void UiHandleMouse_(H3Msg* msg)
         return;
     }
     if (msg->subtype == eMsgSubtype::LBUTTON_CLICK) {
-        if (g_ui.logLevelOpen) {
-            const int item = UiHitLogLevelItem_(px, py);
-            if (item >= 0) {
-                g_ui.logLevelOpen = false;
-                g_ui.logLevelHover = -1;
-                UiSelectLogLevel_(item);
-                return;
-            }
-            if (UiHitLogLevelTrigger_(px, py)) return;
-            g_ui.logLevelOpen = false;
-            g_ui.logLevelHover = -1;
+        const int levelItem = UiHitLogLevelItem_(px, py);
+        if (levelItem >= 0) {
+            UiSelectLogLevel_(levelItem);
             return;
         }
         if (UiHitBar_(msg)) {
@@ -1123,12 +1101,7 @@ static void UiHandleMouse_(H3Msg* msg)
                 CancelSaveWait_("rebind entered");
                 return;
             }
-            if (UiHitLogLevelTrigger_(px, py)) {
-                g_ui.logLevelOpen = true;
-                g_ui.logLevelHover = -1;
-                CancelSaveWait_("log level dropdown opened");
-                return;
-            }
+            if (UiHitLogLevelTrigger_(px, py)) return;  // 状态框无动作
             UiReloadEntries_(H3CombatManager::Get());
             return;
         }
@@ -1206,19 +1179,12 @@ static void UiPollRebindKey_()
 // 系统鼠标钩子路径的统一点击入口：gameX/gameY 为游戏逻辑坐标。
 static void UiHandleFrameClick_(int gameX, int gameY)
 {
-    // 展开的日志下拉优先处理：行选中/收起、触发框收尾保持展开，再谈其他。
-    if (g_ui.logLevelOpen) {
-        const int item = UiHitLogLevelItem_(gameX, gameY);
-        if (item >= 0) {
-            g_ui.logLevelOpen = false;
-            g_ui.logLevelHover = -1;
-            UiSelectLogLevel_(item);
-            return;
-        }
-        if (UiHitLogLevelTrigger_(gameX, gameY)) return;  // 展开的那次点击收尾
-        g_ui.logLevelOpen = false;
-        g_ui.logLevelHover = -1;
-        return;  // 点外部仅收起，不落到战场/存档行
+    // 日志等级常驻单选列表：点行即选中保存；矩形与存档列表不相交。
+    const int levelItem = UiHitLogLevelItem_(gameX, gameY);
+    if (levelItem >= 0) {
+        UiSelectLogLevel_(levelItem);
+        LogInfo("点击日志等级行：%d", levelItem);
+        return;
     }
     if (UiPointInBar_(gameX, gameY)) {
         if (gameX >= g_ui.x + kUiBarWidth - 58) {
@@ -1226,10 +1192,7 @@ static void UiHandleFrameClick_(int gameX, int gameY)
             CancelSaveWait_("rebind entered");
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else if (UiHitLogLevelTrigger_(gameX, gameY)) {
-            g_ui.logLevelOpen = true;
-            g_ui.logLevelHover = -1;
-            CancelSaveWait_("log level dropdown opened");
-            LogInfo("展开日志等级下拉：(%d,%d)", gameX, gameY);
+            LogInfo("点击日志等级状态框（无动作）：(%d,%d)", gameX, gameY);
         } else {
             UiReloadEntries_(H3CombatManager::Get());
             LogInfo("点击存档列表区域：(%d,%d)", gameX, gameY);
@@ -1247,8 +1210,8 @@ static void UiHandleFrameClick_(int gameX, int gameY)
 // 系统鼠标钩子路径的右键删除：点击列表行删除对应存档。
 static void UiHandleFrameRightClick_(int gameX, int gameY)
 {
-    if (g_ui.logLevelOpen && (UiHitLogLevelItem_(gameX, gameY) >= 0
-        || UiHitLogLevelTrigger_(gameX, gameY))) return;
+    if (UiHitLogLevelItem_(gameX, gameY) >= 0 || UiHitLogLevelTrigger_(gameX, gameY))
+        return;  // 等级行/状态框：吞并右键，不动作
     const int row = UiHitRow_(gameX, gameY);
     if (row < 0 || row >= (int)g_ui.entries.size()) return;
     hbs::ArchiveStore store(ArchiveRoot_());
