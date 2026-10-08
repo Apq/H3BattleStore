@@ -330,7 +330,6 @@ static bool TryCaptureCombat_()
     }
     LogInfo("[Archive op=%ld] persisted=1 path=%s sequence=%u", g_diag.id,
         DiagUtf8_(committed.path).c_str(), committed.sequence);
-    if (!storeError.empty()) LogWarn("[Archive op=%ld] retention warning=%s", g_diag.id, DiagUtf8_(storeError).c_str());
     DiagStage_("save.readback");
     hbs::ArchiveDocument readback;
     if (!store.Load(committed, readback, storeError)) {
@@ -400,8 +399,6 @@ static HHOOK g_combatMouseHook = nullptr;
 static volatile LONG g_pendingSaveKey = 0;
 static volatile LONG g_pendingClickX = -1;
 static volatile LONG g_pendingClickY = -1;
-static volatile LONG g_pendingRightClickX = -1;
-static volatile LONG g_pendingRightClickY = -1;
 
 static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
 {
@@ -447,8 +444,6 @@ static void ClearBattleInputs_()
 {
     InterlockedExchange(&g_pendingClickX, -1);
     InterlockedExchange(&g_pendingClickY, -1);
-    InterlockedExchange(&g_pendingRightClickX, -1);
-    InterlockedExchange(&g_pendingRightClickY, -1);
     InterlockedExchange(&g_pendingSaveKey, 0);
 }
 
@@ -467,9 +462,10 @@ static void DiagHookFault_()
     g_diag.writing = false;
     InterlockedExchange(&g_pendingClickX, -1);
     InterlockedExchange(&g_pendingClickY, -1);
-    InterlockedExchange(&g_pendingRightClickX, -1);
-    InterlockedExchange(&g_pendingRightClickY, -1);
     g_uiWaitSaveUntil = 0;
+    g_ui.scroll.dragging = false;
+    g_ui.listGesture = {};
+    g_ui.listRightHeld = false;
     InterlockedExchange(&g_pendingSaveKey, 0);
 }
 
@@ -482,53 +478,76 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
 
 static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION) {
-        const bool leftDown = wParam == WM_LBUTTONDOWN;
-        const bool leftUp = wParam == WM_LBUTTONUP;
-        const bool rightDown = wParam == WM_RBUTTONDOWN;
-        const bool rightUp = wParam == WM_RBUTTONUP;
-        const bool move = wParam == WM_MOUSEMOVE;
-        if (g_uiWaitSaveUntil) { ++g_waitMouseEvents; return true; }
-        if (move && !g_ui.dragging)
-            return false;
-        if (leftDown || leftUp || rightDown || rightUp || move) {
-            // 只在真实战斗且悬浮条显示时介入，避免战斗外误吞点击。
-            H3CombatManager* combat = H3CombatManager::Get();
-            if (g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal)
-                return false;
-            const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
-            int gameX = 0;
-            int gameY = 0;
-            if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY))
-                return false;
-            const bool inBar = UiPointInBar_(gameX, gameY);
-            const int row = UiHitRow_(gameX, gameY);
-            const bool hitList = row >= 0 && row < (int)g_ui.entries.size();
-            const bool hitLevelItem = UiHitLogLevelItem_(gameX, gameY) >= 0;
-            const bool hitUiBlock = UiPointInUiBlock_(gameX, gameY);
-            const bool swallow = inBar || hitList || hitLevelItem || hitUiBlock;
-            if (move)
-                return false;
-            if (leftDown && !swallow) UiCancelRebind_("outside mouse click");
-            if (leftDown && swallow) {
-                return true;  // 固定左上角，无拖动；抬起才执行点击。
-            } else if (leftUp && swallow) {
-                if (hitList && !CombatPlayerWindow_(combat, 0, nullptr)) return true;
-                InterlockedExchange(&g_pendingClickX, gameX);
-                InterlockedExchange(&g_pendingClickY, gameY);
-                LogDebug("点击已吞并：game=(%d,%d)", gameX, gameY);
-                return true;
-            } else if (rightDown && swallow) {
-                return true;
-            } else if (rightUp && hitList) {
-                InterlockedExchange(&g_pendingRightClickX, gameX);
-                InterlockedExchange(&g_pendingRightClickY, gameY);
-                LogDebug("右键已吞并：game=(%d,%d)", gameX, gameY);
-                return true;
-            } else if (rightUp && swallow) {
-                return true;
-            }
+    if (code != HC_ACTION) return false;
+    const bool leftDown = BattleUiLeftDown_(static_cast<unsigned>(wParam));
+    const bool leftUp = wParam == WM_LBUTTONUP;
+    const bool rightDown = BattleUiRightDown_(static_cast<unsigned>(wParam));
+    const bool rightUp = wParam == WM_RBUTTONUP;
+    const bool move = wParam == WM_MOUSEMOVE;
+    const bool wheel = wParam == WM_MOUSEWHEEL;
+    if (g_uiWaitSaveUntil) { ++g_waitMouseEvents; return true; }
+    if (!leftDown && !leftUp && !rightDown && !rightUp && !move && !wheel) return false;
+    H3CombatManager* combat = H3CombatManager::Get();
+    if (g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal) {
+        g_ui.scroll.dragging = false;
+        g_ui.listGesture = {};
+        g_ui.listRightHeld = false;
+        return false;
+    }
+    const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
+    int gameX = 0, gameY = 0;
+    if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) return false;
+    const bool hitList = UiPointInList_(gameX, gameY);
+    const bool hitScroll = UiPointInScrollbar_(gameX, gameY);
+    const bool swallow = hitList || UiPointInUiBlock_(gameX, gameY);
+    if (move || leftDown || rightDown || wheel) UiCancelReleasedPointer_();
+    if (g_ui.scroll.dragging && (move || leftUp)) {
+        UiScrollbarDrag_(gameY);
+        if (leftUp) {
+            g_ui.scroll.dragging = false;
+            g_ui.listGesture = {};
         }
+        return true;
+    }
+    if (wheel) {
+        if (g_ui.scroll.dragging) return true;
+        if (!hitList) return false;
+        const auto extended = reinterpret_cast<const MOUSEHOOKSTRUCTEX*>(lParam);
+        UiScrollWheel_(static_cast<short>(HIWORD(extended->mouseData)));
+        g_ui.listGesture.CancelClick();
+        InterlockedExchange(&g_pendingClickX, -1);
+        InterlockedExchange(&g_pendingClickY, -1);
+        LogDebug("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_ui.entries.size());
+        return true;
+    }
+    if (move) return hitList;
+    if (leftDown) {
+        g_ui.listGesture = {};
+        g_ui.scroll.dragging = false;
+        if (!swallow) { UiCancelRebind_("outside mouse click"); return false; }
+        g_ui.listGesture.Begin(hitScroll);
+        if (hitScroll) {
+            UiScrollbarDown_(gameY);
+            InterlockedExchange(&g_pendingClickX, -1);
+            InterlockedExchange(&g_pendingClickY, -1);
+        }
+        return true;
+    }
+    if (leftUp) {
+        const auto release = g_ui.listGesture.Release(swallow, hitScroll);
+        if (release == BattleUiRelease_::Pass) return false;
+        if (release == BattleUiRelease_::Swallow) return true;
+        if (hitList && !CombatPlayerWindow_(combat, 0, nullptr)) return true;
+        InterlockedExchange(&g_pendingClickX, gameX);
+        InterlockedExchange(&g_pendingClickY, gameY);
+        LogDebug("点击已吞并：game=(%d,%d)", gameX, gameY);
+        return true;
+    }
+    if (rightDown) { g_ui.listRightHeld = swallow; return swallow; }
+    if (rightUp) {
+        const bool held = g_ui.listRightHeld;
+        g_ui.listRightHeld = false;
+        return swallow || held;
     }
     return false;
 }
@@ -590,8 +609,8 @@ static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
     // Native hotkeys become 0x200 item commands, not overlay mouse clicks.
     if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
     const bool onBar = UiHitBar_(msg, true);
-    const int row = msg ? UiHitRow_(msg->position.x, msg->position.y) : -1;
-    if (onBar || row >= 0 || g_ui.dragging) {
+    const bool onList = UiPointInList_(msg->position.x, msg->position.y);
+    if (onBar || onList || g_ui.scroll.dragging) {
         UiHandleMouse_(msg);
         return true;
     }
@@ -757,6 +776,9 @@ static void BattleReset_()
     g_restoreRequest.pending = false;
     g_restoreFatal = false;
     g_ui.entries.clear();
+    g_ui.scroll = {};
+    g_ui.listGesture = {};
+    g_ui.listRightHeld = false;
     g_ui.battleKey.clear();
     g_ui.hoverRow = -1;
     g_ui.logLevelHover = -1;
@@ -867,10 +889,6 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
         if (clickX >= 0 && clickY >= 0)
             UiHandleFrameClick_((int)clickX, (int)clickY);
-        const LONG rightX = InterlockedExchange(&g_pendingRightClickX, -1);
-        const LONG rightY = InterlockedExchange(&g_pendingRightClickY, -1);
-        if (rightX >= 0 && rightY >= 0)
-            UiHandleFrameRightClick_((int)rightX, (int)rightY);
         // 存档键触发 = 松开→按下的边沿（2026-10-05 用户实测：改键单次短按
         // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。

@@ -163,7 +163,8 @@ enum LogLevel {
     LOG_WARN  = 3,
     LOG_ERROR = 4,
 };
-static int g_log_level = LOG_INFO;
+// debug 为当前出厂默认；仅在用户明确要求时改回 info。
+static int g_log_level = LOG_DEBUG;
 #include "LogPolicy.hpp"
 
 static bool LogEnabled_(int level)
@@ -178,25 +179,26 @@ static const char* LogLevelName_(int level)
     case LOG_DEBUG: return "debug";
     case LOG_INFO:  return "info";
     case LOG_WARN:  return "warn";
-    default:        return "error";
+    case LOG_ERROR: return "error";
+    default:        return "debug";
     }
 }
 
 static const char* LogLevelDisplayName_(int level)
 {
     static const char* const names[] = {"全部", "调试", "信息", "警告", "错误"};
-    return names[level >= LOG_TRACE && level <= LOG_ERROR ? level : LOG_INFO];
+    return names[level >= LOG_TRACE && level <= LOG_ERROR ? level : LOG_DEBUG];
 }
 
 static int ParseLogLevel_(const char* name)
 {
-    if (!name || !name[0]) return LOG_INFO;
+    if (!name || !name[0]) return LOG_DEBUG;
     if (_stricmp(name, "trace") == 0) return LOG_TRACE;
     if (_stricmp(name, "debug") == 0) return LOG_DEBUG;
     if (_stricmp(name, "info") == 0) return LOG_INFO;
     if (_stricmp(name, "warn") == 0 || _stricmp(name, "warning") == 0) return LOG_WARN;
     if (_stricmp(name, "error") == 0) return LOG_ERROR;
-    return LOG_INFO;
+    return LOG_DEBUG;
 }
 
 static bool SaveLogLevel_(int level)
@@ -217,12 +219,12 @@ static void LogError(const char* fmt, ...);
 static void ReadConfig()
 {
     char lv[16] = {};
-    IniReadUtf8Layered("Logging", "MinLevel", "info", lv, sizeof(lv));
+    IniReadUtf8Layered("Logging", "MinLevel", "debug", lv, sizeof(lv));
     g_log_level = ParseLogLevel_(lv);
-    // Invalid user values never disable logging: unknown text parses as info.
+    // Invalid user values never disable logging: unknown text parses as debug.
     if (_stricmp(lv, "trace") && _stricmp(lv, "debug") && _stricmp(lv, "info")
         && _stricmp(lv, "warn") && _stricmp(lv, "warning") && _stricmp(lv, "error"))
-        LogWarn("[Config] invalid MinLevel=%s; fallback=info", lv);
+        LogWarn("[Config] invalid MinLevel=%s; fallback=debug", lv);
     LogInfo("配置加载：MinLevel=%s", LogLevelName_(g_log_level));
 }
 

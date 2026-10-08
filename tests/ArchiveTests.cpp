@@ -206,158 +206,236 @@ static void TestRejects()
     Expect(!hbs::detail::Encode(huge, dupEncoded, error), "over 64MB rejected");
 }
 
-static void TestStoreLimits()
+static bool SameRecord(const ArchiveRecord& left, const ArchiveRecord& right)
 {
-    printf("store limits\n");
+    return left.path == right.path
+        && left.battleKey == right.battleKey && left.targetKey == right.targetKey
+        && left.timestampUtcMs == right.timestampUtcMs && left.sequence == right.sequence;
+}
+
+static void ExpectLoadedDocument(ArchiveStore& store, const ArchiveRecord& record,
+                                 const ArchiveDocument& expected)
+{
+    ArchiveDocument loaded;
+    std::wstring error;
+    const bool ok = store.Load(record, loaded, error);
+    Expect(ok, "load retained archive");
+    if (!ok) return;
+    bool same = loaded.battleKey == expected.battleKey && loaded.targetKey == expected.targetKey
+        && loaded.timestampUtcMs == expected.timestampUtcMs && loaded.sequence == expected.sequence
+        && loaded.sections.size() == expected.sections.size();
+    for (size_t i = 0; same && i < loaded.sections.size(); ++i) {
+        same = loaded.sections[i].id == expected.sections[i].id
+            && loaded.sections[i].bytes == expected.sections[i].bytes;
+    }
+    Expect(same, "retained identity and payload unchanged");
+}
+
+static void TestStoreKeepsAllArchives()
+{
+    printf("store keeps all archives\n");
     const std::wstring root = TempRoot();
     ArchiveStore store(root);
     const std::string battle = Key('d', 'e');
     const std::string target = Key('f', '0');
     const std::string otherTarget = Key('f', '1');
     std::wstring error;
+    std::vector<ArchiveRecord> savedRecords;
+    std::vector<ArchiveDocument> savedDocuments;
 
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 75; ++i) {
         ArchiveDocument document = Doc(battle, target, 1000 + static_cast<uint64_t>(i), static_cast<uint32_t>(i + 1), 2,
                                        static_cast<uint8_t>(i));
-        Expect(store.Save(document, error), "save within 30");
+        ArchiveRecord committed;
+        if (store.Save(document, error, &committed)) {
+            savedRecords.push_back(committed);
+            savedDocuments.push_back(document);
+        } else {
+            Expect(false, "save all 75 same-battle archives");
+        }
     }
-    ArchiveDocument overflow = Doc(battle, target, 5000, 31, 2, 99);
-    Expect(store.Save(overflow, error), "31st save succeeds");
     std::vector<ArchiveRecord> records;
-    Expect(store.List(battle, target, records, error), "list after trim");
-    Expect(records.size() == 30, "kept 30 records");
-    Expect(!records.empty() && records[0].timestampUtcMs == 5000 && records[0].sequence == 31, "newest first");
-    Expect(records.back().timestampUtcMs == 1001, "oldest dropped");
+    Expect(store.List(battle, target, records, error), "list 75 archives without trimming");
+    Expect(records.size() == 75 && CountHbs(root) == 75, "all 75 same-battle archives stay on disk");
+    Expect(!records.empty() && records.front().timestampUtcMs == 1074
+        && records.back().timestampUtcMs == 1000, "75 archives sorted newest first with oldest retained");
 
-    ArchiveDocument collision = Doc(battle, target, 5000, 31, 4, 7);
+    ArchiveDocument newest = Doc(battle, target, 5000, 76, 2, 99);
+    ArchiveRecord original;
+    Expect(store.Save(newest, error, &original), "76th save succeeds");
+    savedRecords.push_back(original);
+    savedDocuments.push_back(newest);
+
+    ArchiveDocument collision = Doc(battle, target, 5000, 76, 4, 7);
     ArchiveRecord committed;
     Expect(store.Save(collision, error, &committed), "same second bumps attempt suffix");
-    const std::wstring committedName = committed.path.empty()
-        ? std::wstring() : committed.path.substr(committed.path.find_last_of(L'\\') + 1);
-    Expect(committedName.size() > 6
+    savedRecords.push_back(committed);
+    savedDocuments.push_back(collision);
+    const std::wstring committedName = hbs::detail::FileNameOf(committed.path);
+    Expect(committedName == hbs::detail::MakeArchiveName(collision.timestampUtcMs, battle, 2)
+        && committedName.size() == 86
         && committedName.compare(committedName.size() - 6, 6, L"_2.hbs") == 0
-        && committedName.compare(0, 64, std::wstring(battle.begin(), battle.end())) == 0
-        && committedName.compare(64, 9, L"_19700101") == 0,
+        && committedName.compare(0, 64, std::wstring(battle.begin(), battle.end())) == 0,
         "collision filename is <fingerprint>_yyyymmdd_hhmmss_2.hbs");
     Expect(store.List(battle, target, records, error), "list after collision");
-    Expect(records.size() == 30 && records[0].sequence == 31 && records[0].timestampUtcMs == 5000,
-        "collision keeps document sequence");
-    Expect(committed.sequence == 31 && committed.path == records[0].path
+    Expect(records.size() == 77 && !records.empty() && records[0].sequence == 76
+        && records[0].timestampUtcMs == 5000, "collision retains both archives and document sequence");
+    Expect(!records.empty() && SameRecord(committed, records[0])
         && committed.battleKey == battle && committed.targetKey == target,
         "save returns actual committed identity");
-    ArchiveDocument committedReadback;
-    Expect(store.Load(committed, committedReadback, error), "readback committed collision");
-    Expect(committedReadback.sequence == 31 && committedReadback.sections[0].bytes[0] == 7,
-        "committed collision payload");
+    Expect(original.path != committed.path, "collision never overwrites existing archive path");
+    ExpectLoadedDocument(store, original, newest);
+    ExpectLoadedDocument(store, committed, collision);
 
-
-    ArchiveDocument other = Doc(battle, otherTarget, 1000, 31, 1, 3);
-    Expect(store.Save(other, error), "other target does not collide");
+    ArchiveDocument other = Doc(battle, otherTarget, 1000, 76, 1, 3);
+    ArchiveRecord otherCommitted;
+    Expect(store.Save(other, error, &otherCommitted), "save older archive for another target");
+    savedRecords.push_back(otherCommitted);
+    savedDocuments.push_back(other);
     std::vector<ArchiveRecord> battleRecords;
     Expect(store.List(battle, "", battleRecords, error), "list whole battle");
-    Expect(battleRecords.size() == 30, "30 records cover every target in one battle");
-    int otherKept = 0;
-    for (size_t i = 0; i < battleRecords.size(); ++i) {
-        if (battleRecords[i].targetKey == otherTarget) ++otherKept;
-    }
-    Expect(otherKept == 0, "older other target yields to the newer same-battle record");
-
-    ArchiveDocument loaded;
-    Expect(store.Load(records[0], loaded, error), "load newest");
-    Expect(loaded.sections.size() == 1 && loaded.sections[0].id == 4 && loaded.sections[0].bytes.size() == 1
-               && loaded.sections[0].bytes[0] == 7,
-           "loaded payload");
+    Expect(battleRecords.size() == 78, "all targets retained in one battle");
+    std::vector<ArchiveRecord> otherRecords;
+    Expect(store.List(battle, otherTarget, otherRecords, error)
+        && otherRecords.size() == 1 && SameRecord(otherRecords[0], otherCommitted),
+        "older other-target archive stays visible");
+    Expect(battleRecords.size() >= 2
+        && battleRecords[battleRecords.size() - 2].timestampUtcMs == 1000
+        && battleRecords[battleRecords.size() - 2].sequence == 76
+        && battleRecords.back().sequence == 1, "equal UTC timestamps sort by descending sequence");
 
     ArchiveDocument invalid = collision;
     invalid.battleKey = "bad";
     Expect(!store.Save(invalid, error, &committed), "invalid save rejected");
     Expect(committed.path.empty() && committed.battleKey.empty() && committed.sequence == 0,
         "failed save clears committed identity");
-
+    Expect(CountHbs(root) == 78, "invalid save leaves all committed archives untouched");
 
     ArchiveStore restarted(root);
     std::vector<ArchiveRecord> again;
     Expect(restarted.List(battle, target, again, error), "restart list");
-    Expect(again.size() == records.size() && again[0].path == records[0].path && again[0].sequence == 31,
-           "restart keeps order");
+    bool sameOrder = again.size() == records.size();
+    for (size_t i = 0; sameOrder && i < again.size(); ++i)
+        sameOrder = SameRecord(again[i], records[i]);
+    Expect(sameOrder, "restart keeps every identity and full sort order including filename ties");
 
     std::vector<std::string> battles;
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 35; ++i) {
         const char fill = "0123456789abcdef"[i % 16];
         const char tail = "0123456789abcdef"[i / 16];
         battles.push_back(Key(fill, tail));
         ArchiveDocument battleDoc = Doc(battles.back(), target, 10000 + static_cast<uint64_t>(i), 1, 1,
                                         static_cast<uint8_t>(i));
-        Expect(store.Save(battleDoc, error), "save battle");
+        ArchiveRecord battleCommitted;
+        Expect(store.Save(battleDoc, error, &battleCommitted), "save another battle without eviction");
+        savedRecords.push_back(battleCommitted);
+        savedDocuments.push_back(battleDoc);
     }
-    Expect(store.List("", "", records, error), "list all after 31 battles");
+    Expect(store.List("", "", records, error), "list all 36 battles");
+    Expect(records.size() == 113 && CountHbs(root) == 113,
+        "78 same-battle archives plus 35 other battles all remain on disk");
+    Expect(!records.empty() && records.front().battleKey == battles.back()
+        && records.front().timestampUtcMs == 10034 && records.back().battleKey == battle
+        && records.back().timestampUtcMs == 1000 && records.back().sequence == 1,
+        "global ordering uses header UTC and sequence across every battle");
     int keptOld = 0;
-    int keptNew = 0;
     for (size_t i = 0; i < records.size(); ++i) {
         if (records[i].battleKey == battle) ++keptOld;
-        if (records[i].battleKey == battles.back()) ++keptNew;
     }
-    Expect(keptOld == 0, "oldest battle removed by retention");
-    Expect(keptNew == 1, "newest battle retained");
-    Expect(CountHbs(root) == 30, "disk holds 30 battles of one record");
+    Expect(keptOld == 78, "oldest battle retains all archives beyond 30 battles");
+    for (size_t b = 0; b < battles.size(); ++b) {
+        int kept = 0;
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (records[i].battleKey == battles[b]) ++kept;
+        }
+        Expect(kept == 1, "each of the 35 newer battles is retained");
+    }
+
+    ArchiveStore restartedAll(root);
+    Expect(restartedAll.List("", "", again, error), "restart lists all retained battles");
+    sameOrder = again.size() == records.size();
+    for (size_t i = 0; sameOrder && i < again.size(); ++i)
+        sameOrder = SameRecord(again[i], records[i]);
+    Expect(sameOrder && again.size() == 113, "restart preserves complete multi-battle order");
+    for (size_t i = 0; i < savedRecords.size(); ++i)
+        ExpectLoadedDocument(restartedAll, savedRecords[i], savedDocuments[i]);
 
     RemoveTree(root);
 }
 
-static void TestDeleteFailure()
+static void TestHiddenArchivesStayOnDisk()
 {
-    printf("delete failure\n");
+    printf("hidden archives stay on disk\n");
     const std::wstring root = TempRoot();
     ArchiveStore store(root);
     std::wstring error;
     ArchiveDocument document = Doc(Key('1', '2'), Key('3', '4'), 42, 1, 8, 9);
-    Expect(store.Save(document, error), "save for delete");
+    ArchiveRecord original;
+    Expect(store.Save(document, error, &original), "save visible archive");
     std::vector<ArchiveRecord> records;
-    Expect(store.List("", "", records, error) && records.size() == 1, "one record");
+    Expect(store.List("", "", records, error) && records.size() == 1, "one valid record");
 
-    HANDLE held = CreateFileW(records[0].path.c_str(), GENERIC_READ, 0, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    Expect(held != INVALID_HANDLE_VALUE, "lock archive");
-    Expect(!store.Delete(records[0], error), "locked delete fails");
-    Expect(error.find(L"failed") != std::wstring::npos, "delete failure diagnostic");
-    Expect(GetFileAttributesW(records[0].path.c_str()) != INVALID_FILE_ATTRIBUTES, "file remains");
-    CloseHandle(held);
-
-    Expect(store.Delete(records[0], error), "delete succeeds");
-    Expect(GetFileAttributesW(records[0].path.c_str()) == INVALID_FILE_ATTRIBUTES, "file removed");
-
-    ArchiveRecord outside = records[0];
+    ArchiveDocument loaded;
+    ArchiveRecord outside = original;
     outside.path = root + L"..\\not-owned.hbs";
-    Expect(!store.Delete(outside, error), "outside path refused");
-    outside.path = root + L"foreign.hbs";
-    const HANDLE foreign = CreateFileW(outside.path.c_str(), GENERIC_WRITE, 0, nullptr,
-                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (foreign != INVALID_HANDLE_VALUE) {
-        const char text[] = "nope";
-        DWORD wrote = 0;
-        WriteFile(foreign, text, sizeof(text), &wrote, nullptr);
-        CloseHandle(foreign);
-    }
-    Expect(!store.Delete(outside, error), "foreign hbs refused");
-    Expect(GetFileAttributesW(outside.path.c_str()) != INVALID_FILE_ATTRIBUTES, "foreign file remains");
+    Expect(!store.Load(outside, loaded, error), "outside load path refused");
+    ArchiveRecord forged = original;
+    ++forged.sequence;
+    Expect(!store.Load(forged, loaded, error), "forged record metadata refused");
+    Expect(GetFileAttributesW(original.path.c_str()) != INVALID_FILE_ATTRIBUTES,
+        "refused loads leave valid archive untouched");
 
-    const std::wstring corrupt = root
-        + std::wstring(document.battleKey.begin(), document.battleKey.end())
-        + L"_19700101_080000.hbs";
-    const HANDLE bad = CreateFileW(corrupt.c_str(), GENERIC_WRITE, 0, nullptr,
-                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (bad != INVALID_HANDLE_VALUE) {
-        const char text[] = "truncated";
-        DWORD wrote = 0;
-        WriteFile(bad, text, sizeof(text) - 1, &wrote, nullptr);
-        CloseHandle(bad);
-    }
-    std::vector<ArchiveRecord> listed;
-    Expect(store.List("", "", listed, error), "corrupt scan continues");
-    Expect(listed.empty(), "corrupt file skipped");
-    Expect(error.find(L"truncated") != std::wstring::npos || error.find(L"CRC") != std::wstring::npos
-               || error.find(corrupt.substr(corrupt.find_last_of(L'\\') + 1)) != std::wstring::npos,
-           "corrupt diagnostic");
+    const std::wstring foreignPath = root + L"foreign.hbs";
+    const std::wstring corruptPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 2);
+    const std::wstring crcPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 3);
+    const std::wstring wrongName = hbs::detail::MakeArchiveName(document.timestampUtcMs, Key('5', '6'), 1);
+    const std::wstring wrongPath = root + wrongName;
+    const uint8_t foreignText[] = { 'n', 'o', 'p', 'e' };
+    const std::vector<uint8_t> foreignBytes(foreignText, foreignText + sizeof(foreignText));
+    Expect(hbs::detail::WriteNewFile(foreignPath, foreignBytes, error), "write foreign hbs fixture");
+    const uint8_t corruptText[] = { 't', 'r', 'u', 'n', 'c', 'a', 't', 'e', 'd' };
+    const std::vector<uint8_t> corruptBytes(corruptText, corruptText + sizeof(corruptText));
+    Expect(hbs::detail::WriteNewFile(corruptPath, corruptBytes, error), "write truncated fixture");
+    std::vector<uint8_t> encoded;
+    Expect(hbs::detail::Encode(document, encoded, error), "encode wrong-name fixture");
+    Expect(hbs::detail::WriteNewFile(wrongPath, encoded, error), "write mismatched fingerprint fixture");
+    std::vector<uint8_t> badCrc = encoded;
+    if (!badCrc.empty()) badCrc.back() ^= 0xFF;
+    Expect(hbs::detail::WriteNewFile(crcPath, badCrc, error), "write bad CRC fixture");
+
+    Expect(store.List("", "", records, error), "bad archives do not abort scan");
+    Expect(records.size() == 1 && SameRecord(records[0], original), "bad and foreign-name archives hidden only");
+    Expect(error.find(L"foreign.hbs") != std::wstring::npos
+        && error.find(hbs::detail::FileNameOf(corruptPath)) != std::wstring::npos
+        && error.find(L"CRC") != std::wstring::npos
+        && error.find(wrongName) != std::wstring::npos
+        && error.find(L"filename does not match") != std::wstring::npos,
+        "scan reports bad bytes and mismatched fingerprint");
+    forged = original;
+    forged.path = wrongPath;
+    Expect(!store.Load(forged, loaded, error), "mismatched filename cannot be loaded");
+    forged.path = corruptPath;
+    Expect(!store.Load(forged, loaded, error), "truncated archive cannot be loaded");
+    forged.path = crcPath;
+    Expect(!store.Load(forged, loaded, error), "bad CRC archive cannot be loaded");
+
+    ArchiveDocument later = Doc(document.battleKey, document.targetKey, 5000, 2, 8, 10);
+    ArchiveRecord laterCommitted;
+    Expect(store.Save(later, error, &laterCommitted) && error.empty(),
+        "save succeeds without rescanning or deleting existing bad archives");
+    Expect(store.List("", "", records, error) && records.size() == 2,
+        "new archive stays visible alongside original");
+    Expect(CountHbs(root) == 6, "all valid and hidden archives remain on disk after save");
+    std::vector<uint8_t> readback;
+    Expect(hbs::detail::ReadWholeFile(foreignPath, readback, error) && readback == foreignBytes,
+        "foreign bytes unchanged");
+    Expect(hbs::detail::ReadWholeFile(corruptPath, readback, error) && readback == corruptBytes,
+        "truncated bytes unchanged");
+    Expect(hbs::detail::ReadWholeFile(crcPath, readback, error) && readback == badCrc,
+        "bad CRC bytes unchanged");
+    Expect(hbs::detail::ReadWholeFile(wrongPath, readback, error) && readback == encoded,
+        "mismatched filename bytes unchanged");
+    ExpectLoadedDocument(store, original, document);
 
     // Local filename time is not an identity gate: the saving timezone may differ.
     // Header UTC and CRC remain authoritative.
@@ -376,8 +454,8 @@ static void TestDeleteFailure()
         Expect(found, "valid archive remains visible with different local filename time");
         for (const ArchiveRecord& record : renamedList) {
             if (record.path != renamed) continue;
-            ArchiveDocument loaded;
-            Expect(store.Load(record, loaded, error) && loaded.timestampUtcMs == honest.timestampUtcMs,
+            ArchiveDocument renamedLoaded;
+            Expect(store.Load(record, renamedLoaded, error) && renamedLoaded.timestampUtcMs == honest.timestampUtcMs,
                 "load uses header UTC rather than current timezone interpretation");
         }
         std::wstring invalidDate = std::wstring(document.battleKey.begin(), document.battleKey.end())
@@ -388,6 +466,37 @@ static void TestDeleteFailure()
         Expect(false, "rename for tamper test");
     }
 
+    ArchiveStore restarted(root);
+    Expect(restarted.List("", "", records, error) && records.size() == 3 && CountHbs(root) == 7,
+        "restart hides only invalid archives without deleting them");
+    ExpectLoadedDocument(restarted, original, document);
+    ExpectLoadedDocument(restarted, laterCommitted, later);
+    RemoveTree(root);
+}
+
+static void TestExistingTemporaryFileIsPreserved()
+{
+    printf("existing temporary file is preserved\n");
+    const std::wstring root = TempRoot();
+    ArchiveStore store(root);
+    const ArchiveDocument document = Doc(Key('7', '8'), Key('9', 'a'), 1000, 1, 1, 7);
+    const std::wstring finalPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 1);
+    const std::wstring tempPath = finalPath + L".tmp";
+    const std::vector<uint8_t> sentinel(8, 0x5A);
+    std::wstring error;
+    Expect(hbs::detail::WriteNewFile(tempPath, sentinel, error), "create preexisting tmp fixture");
+    ArchiveRecord committed;
+    committed.path = L"stale";
+    committed.sequence = 42;
+    Expect(!store.Save(document, error, &committed), "save refuses preexisting temporary file");
+    Expect(committed.path.empty() && committed.sequence == 0, "tmp collision clears committed identity");
+    Expect(GetFileAttributesW(finalPath.c_str()) == INVALID_FILE_ATTRIBUTES && CountHbs(root) == 0,
+        "failed tmp creation never commits an archive");
+    std::vector<uint8_t> readback;
+    Expect(hbs::detail::ReadWholeFile(tempPath, readback, error) && readback == sentinel,
+        "failed save neither overwrites nor deletes preexisting tmp");
+    std::vector<ArchiveRecord> records;
+    Expect(store.List("", "", records, error) && records.empty(), "tmp file is not listed as an archive");
     RemoveTree(root);
 }
 
@@ -454,8 +563,9 @@ int main()
     TestLocalStamp();
     TestCodec();
     TestRejects();
-    TestStoreLimits();
-    TestDeleteFailure();
+    TestStoreKeepsAllArchives();
+    TestHiddenArchivesStayOnDisk();
+    TestExistingTemporaryFileIsPreserved();
     printf(g_failed ? "FAILED %d\n" : "ALL PASSED\n", g_failed);
     return g_failed ? 1 : 0;
 }

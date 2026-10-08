@@ -1,5 +1,5 @@
 // ========== BattleArchive.inc.cpp ==========
-// 战斗时刻档的可复用文件层：编码、原子落盘、扫描索引和保留策略。
+// 战斗时刻档的可复用文件层：编码、原子新写入和扫描索引；所有档案存盘保留。
 // 本文件不读取或修改游戏战斗对象；快照内容只作为不透明 section 字节。
 //
 // 插件按 /Zp1 编译，本文件的 STL 对象必须回到默认对齐，否则 vector/string
@@ -25,8 +25,6 @@ namespace hbs {
 
 static const uint32_t kMagic = 0x31425348u; // 小端字节序 48 53 42 31 = "HSB1"（2026-10-06 实测盘上四档核验）
 static const uint16_t kFormatVersion = 1;
-static const uint32_t kMaxRecordsPerBattle = 30;
-static const uint32_t kMaxBattlesOnDisk = 30;
 static const uint32_t kMaxSections = 16;
 static const uint32_t kMinSectionId = 1;
 static const uint32_t kMaxSectionId = 16;
@@ -67,7 +65,6 @@ public:
               std::vector<ArchiveRecord>& records,
               std::wstring& error);
     bool Load(const ArchiveRecord& record, ArchiveDocument& document, std::wstring& error);
-    bool Delete(const ArchiveRecord& record, std::wstring& error);
 
 private:
     std::wstring root_;
@@ -605,7 +602,6 @@ inline bool WriteNewFile(const std::wstring& path, const std::vector<uint8_t>& b
 struct Scanned {
     ArchiveRecord record;
     std::wstring name;
-    std::vector<uint8_t> bytes;
 };
 
 inline bool Newer(const Scanned& a, const Scanned& b)
@@ -834,7 +830,6 @@ inline bool Scan(const std::wstring& root,
         item.record.timestampUtcMs = document.timestampUtcMs;
         item.record.sequence = document.sequence;
         item.name = name;
-        item.bytes = std::move(bytes);
         records.push_back(std::move(item));
     } while (FindNextFileW(search, &found));
     const DWORD scanError = GetLastError();
@@ -844,109 +839,6 @@ inline bool Scan(const std::wstring& root,
         return false;
     }
     std::sort(records.begin(), records.end(), Newer);
-    return true;
-}
-
-inline bool DeleteVerifiedBytes(const std::wstring& root,
-                                const std::wstring& path,
-                                const std::vector<uint8_t>& bytes,
-                                std::wstring& error)
-{
-    std::wstring rootFinal;
-    if (!EnsureRoot(root, rootFinal, error)) return false;
-    const std::wstring name = FileNameOf(path);
-    if (IsReservedName(name) || !HasHbsExtension(name) || path != JoinRoot(root, name)) {
-        SetError(error, L"refusing archive path outside the store root");
-        return false;
-    }
-    ArchiveDocument document;
-    if (!Decode(bytes.data(), bytes.size(), document, error)) return false;
-    if (!ParseGeneratedName(name, document.timestampUtcMs, document.battleKey)) {
-        SetError(error, L"refusing archive whose filename does not match its contents");
-        return false;
-    }
-    std::wstring finalPath;
-    HANDLE opened = INVALID_HANDLE_VALUE;
-    if (!OpenFinalPath(path, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                       OPEN_EXISTING, finalPath, opened, error)) {
-        return false;
-    }
-    CloseHandle(opened);
-    if (!SameDirectory(finalPath, rootFinal, error) || !HasHbsExtension(FileNameOf(finalPath))) {
-        SetError(error, L"refusing archive path outside the store root");
-        return false;
-    }
-    if (!DeleteFileW(path.c_str())) {
-        SetError(error, L"DeleteFileW failed");
-        return false;
-    }
-    return true;
-}
-
-inline bool DeleteOwnedFile(const std::wstring& root, const std::wstring& path, std::wstring& error)
-{
-    std::wstring rootFinal;
-    if (!EnsureRoot(root, rootFinal, error)) return false;
-    const std::wstring name = FileNameOf(path);
-    if (IsReservedName(name) || !HasHbsExtension(name)) {
-        SetError(error, L"refusing path that is not a generated .hbs name");
-        return false;
-    }
-    if (path != JoinRoot(root, name)) {
-        SetError(error, L"refusing archive path outside the store root");
-        return false;
-    }
-
-    std::wstring finalPath;
-    HANDLE opened = INVALID_HANDLE_VALUE;
-    if (!OpenFinalPath(path, DELETE | GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                       OPEN_EXISTING, finalPath, opened, error)) {
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
-            SetError(error, L"DeleteFileW failed");
-        return false;
-    }
-    if (!SameDirectory(finalPath, rootFinal, error) || !HasHbsExtension(FileNameOf(finalPath))) {
-        CloseHandle(opened);
-        SetError(error, L"refusing archive path outside the store root");
-        return false;
-    }
-
-    std::vector<uint8_t> bytes;
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(opened, &size) || size.QuadPart < 0
-        || static_cast<uint64_t>(size.QuadPart) > kMaxTotalBytes) {
-        CloseHandle(opened);
-        SetError(error, L"cannot validate archive before delete");
-        return false;
-    }
-    bytes.resize(static_cast<size_t>(size.QuadPart));
-    size_t done = 0;
-    while (done < bytes.size()) {
-        DWORD got = 0;
-        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(bytes.size() - done, 1u << 20));
-        if (!ReadFile(opened, bytes.data() + done, chunk, &got, nullptr)) {
-            CloseHandle(opened);
-            SetError(error, L"cannot read archive before delete");
-            return false;
-        }
-        if (got == 0) break;
-        done += got;
-    }
-    CloseHandle(opened);
-    if (done != bytes.size()) {
-        SetError(error, L"short read before delete");
-        return false;
-    }
-    ArchiveDocument document;
-    if (!Decode(bytes.data(), bytes.size(), document, error)) return false;
-    if (!ParseGeneratedName(name, document.timestampUtcMs, document.battleKey)) {
-        SetError(error, L"refusing archive whose filename does not match its contents");
-        return false;
-    }
-    if (!DeleteFileW(path.c_str())) {
-        SetError(error, L"DeleteFileW failed");
-        return false;
-    }
     return true;
 }
 
@@ -976,13 +868,6 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
 
     std::wstring rootFinal;
     if (!detail::EnsureRoot(root_, rootFinal, error)) return false;
-
-    std::vector<detail::Scanned> existing;
-    std::wstring scanError;
-    if (!detail::Scan(root_, existing, scanError)) {
-        error = scanError;
-        return false;
-    }
 
     // 撞名循环：同指纹同秒多次保存追加 _2、_3…（上限 999）
     uint32_t attempt = 1;
@@ -1027,59 +912,6 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
         committed->sequence = stamped.sequence;
     }
 
-    std::vector<detail::Scanned> after;
-    std::wstring trimError;
-    if (!detail::Scan(root_, after, trimError)) {
-        detail::AppendError(trimError, L"saved but retention scan failed");
-        error = trimError;
-        return true;
-    }
-
-    std::vector<detail::Scanned*> mine;
-    for (size_t i = 0; i < after.size(); ++i) {
-        if (after[i].record.battleKey == stamped.battleKey)
-            mine.push_back(&after[i]);
-    }
-    for (size_t i = kMaxRecordsPerBattle; i < mine.size(); ++i) {
-        std::wstring deleteError;
-        if (!detail::DeleteVerifiedBytes(root_, mine[i]->record.path, mine[i]->bytes, deleteError))
-            detail::AppendError(trimError, mine[i]->name + L": trim failed: " + deleteError);
-    }
-
-    std::vector<std::string> battles;
-    std::vector<uint64_t> newest;
-    for (size_t i = 0; i < after.size(); ++i) {
-        const std::string& key = after[i].record.battleKey;
-        size_t slot = battles.size();
-        for (size_t b = 0; b < battles.size(); ++b) {
-            if (battles[b] == key) {
-                slot = b;
-                break;
-            }
-        }
-        if (slot == battles.size()) {
-            battles.push_back(key);
-            newest.push_back(after[i].record.timestampUtcMs);
-        } else if (after[i].record.timestampUtcMs > newest[slot]) {
-            newest[slot] = after[i].record.timestampUtcMs;
-        }
-    }
-    std::vector<size_t> order(battles.size());
-    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        if (newest[a] != newest[b]) return newest[a] > newest[b];
-        return battles[a] > battles[b];
-    });
-    for (size_t n = kMaxBattlesOnDisk; n < order.size(); ++n) {
-        const std::string& drop = battles[order[n]];
-        for (size_t i = 0; i < after.size(); ++i) {
-            if (after[i].record.battleKey != drop) continue;
-            std::wstring deleteError;
-            if (!detail::DeleteVerifiedBytes(root_, after[i].record.path, after[i].bytes, deleteError))
-                detail::AppendError(trimError, after[i].name + L": battle trim failed: " + deleteError);
-        }
-    }
-    error = trimError;
     return true;
 }
 
@@ -1141,17 +973,6 @@ inline bool ArchiveStore::Load(const ArchiveRecord& record, ArchiveDocument& doc
         || record.sequence != document.sequence) {
         document = ArchiveDocument();
         detail::SetError(error, L"record metadata does not match archive");
-        return false;
-    }
-    return true;
-}
-
-inline bool ArchiveStore::Delete(const ArchiveRecord& record, std::wstring& error)
-{
-    error.clear();
-    if (!detail::DeleteOwnedFile(root_, record.path, error)) return false;
-    if (GetFileAttributesW(record.path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        detail::SetError(error, L"archive still present after delete");
         return false;
     }
     return true;

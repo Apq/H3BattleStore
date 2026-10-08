@@ -184,7 +184,7 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
     // 开头要补 3 字节 BOM、LF 要换成 CRLF，输出经常比输入长；append 用
     // out_len + n < cap 判断，超了就静默丢弃——文件里只要有注释或空行，
     // 新键那一行就会被截掉，界面却照报「已保存」。日志级别因此永远写不进
-    // user.ini，下次启动又读回默认 info。
+    // user.ini，下次启动又读回出厂默认级别（当前为 debug）。
     long cap = (old ? sz : 0) + 1024;
     char* out = new char[cap];
     long out_len = 0;

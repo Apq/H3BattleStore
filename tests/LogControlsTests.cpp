@@ -96,11 +96,41 @@ static void TestLogPolicies_(const std::wstring& root)
     window.humanTurn = false;
     Check(!BattleStorageAllowed_(window), "nonhuman turn rejects storage");
     std::puts("PASS: idle animation allowed, submitted action/executor/spell/nonhuman turn rejected");
-    // 列表最大行数固定 30（2026-10-08 用户裁定），与同场磁盘保留条数一致。
-    Check(hbs_ui::kUiListMaxRows == 30, "list rows fixed at 30 retained records");
-    Check(hbs_ui::ForFont(16).Height(hbs_ui::kUiListMaxRows) == 588,
-        "30 default-font rows are 588 tall; at y=8 they end at 596 of 600");
-    std::puts("PASS: list rows fixed at 30, fitting 600-height default font");
+    Check(g_log_level == LOG_DEBUG, "initial default log level is debug");
+    Check(hbs_ui::kUiListVisibleRows == 20, "list viewport holds 20 rows");
+    Check(hbs_ui_test::ScrollListRegression(), "scroll offsets, wheel, hit mapping and thumb endpoints");
+    Check(hbs_ui_test::ScrollbarDragRegression(), "relative drag retains zero-motion position for long lists");
+    hbs_ui::ScrollList activeDrag;
+    activeDrag.first = 3;
+    activeDrag.dragging = true;
+    activeDrag.Wheel(-120, 1000);
+    Check(activeDrag.first == 3 && activeDrag.wheelRemainder == 0,
+        "wheel during thumb drag is consumed without fighting the drag origin");
+    BattleUiPointerGesture_ gesture;
+    gesture.Begin(false);
+    gesture.CancelClick();
+    Check(gesture.Release(true, false) == BattleUiRelease_::Swallow,
+        "row down then wheel then row up never loads a different archive");
+    gesture.Begin(true);
+    Check(gesture.Release(true, false) == BattleUiRelease_::Swallow,
+        "scrollbar down then row up cannot become an archive click");
+    gesture.Begin(false);
+    Check(gesture.Release(false, false) == BattleUiRelease_::Swallow,
+        "overlay down then outside up still consumes release");
+    Check(gesture.Release(false, false) == BattleUiRelease_::Pass,
+        "unowned release outside overlay passes through");
+    gesture.Begin(false);
+    Check(gesture.Release(true, false) == BattleUiRelease_::Activate,
+        "normal owned row click activates");
+    gesture.Begin(true);
+    bool dragging = true;
+    gesture.StopReleasedDrag(dragging, false);
+    Check(!dragging && gesture.Release(true, false) == BattleUiRelease_::Swallow,
+        "physical release outside window stops drag and cancels activation");
+    Check(BattleUiLeftDown_(WM_LBUTTONDOWN) && BattleUiLeftDown_(WM_LBUTTONDBLCLK)
+        && BattleUiRightDown_(WM_RBUTTONDOWN) && BattleUiRightDown_(WM_RBUTTONDBLCLK)
+        && !BattleUiLeftDown_(WM_MOUSEMOVE), "double clicks share overlay down routing");
+    std::puts("PASS: 20-row viewport, wheel/drag mapping, cancelled gestures and double-click routing");
     Check(LogStageLevel_("capture.stacks") == LOG_DEBUG
         && LogStageLevel_("restore.commit-objects") == LOG_INFO
         && LogStageLevel_("restore.rollback") == LOG_WARN, "phase severity policy");
@@ -177,8 +207,14 @@ int wmain(int argc, wchar_t** argv)
     g_log_path_w[0] = 0;
     SetPath(g_ini_path, root + L"\\H3BattleStore.default.ini");
     SetPath(g_user_ini_path, root + L"\\H3BattleStore.user.ini");
-    Check(ParseLogLevel_(nullptr) == LOG_INFO && ParseLogLevel_("garbage") == LOG_INFO,
-        "missing and invalid levels default to info");
+    Check(ParseLogLevel_(nullptr) == LOG_DEBUG && ParseLogLevel_("") == LOG_DEBUG
+        && ParseLogLevel_("garbage") == LOG_DEBUG, "missing and invalid levels default to debug");
+    Check(ParseLogLevel_("INFO") == LOG_INFO && ParseLogLevel_("error") == LOG_ERROR,
+        "valid info and error levels still parse normally");
+    Check(std::strcmp(LogLevelName_(-1), "debug") == 0
+        && std::strcmp(LogLevelName_(5), "debug") == 0
+        && std::strcmp(LogLevelDisplayName_(-1), "调试") == 0
+        && std::strcmp(LogLevelDisplayName_(5), "调试") == 0, "invalid level display falls back to debug");
     Check(std::strcmp(LogLevelName_(LOG_TRACE), "trace") == 0
         && std::strcmp(LogLevelName_(LOG_ERROR), "error") == 0,
         "persisted level names remain English");
@@ -194,7 +230,14 @@ int wmain(int argc, wchar_t** argv)
         && std::strstr(kLogPackSuccess_, "00_说明.txt"),
         "pack feedback contacts are present");
     ReadConfig();
-    Check(g_log_level == LOG_INFO, "missing layered config defaults to info");
+    Check(g_log_level == LOG_DEBUG, "missing layered config defaults to debug");
+    Check(IniWriteKeyUtf8(g_ini_path, "Logging", "MinLevel", "debug"), "write default fixture");
+    Check(IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", "info"), "write user override fixture");
+    ReadConfig();
+    Check(g_log_level == LOG_INFO, "user info override remains higher priority than default debug");
+    Check(IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", "garbage"), "write invalid override fixture");
+    ReadConfig();
+    Check(g_log_level == LOG_DEBUG, "invalid user level falls back to debug without rewriting it");
     for (int i = 0; i < 5; ++i) {
         Check(SaveLogLevel_(i) && g_log_level == i, "selection writes before applying");
         ReadConfig();
@@ -220,7 +263,7 @@ int wmain(int argc, wchar_t** argv)
         "clipboard failure reports generated file");
     Check(GetFileAttributesW(copiedPath.c_str()) != INVALID_FILE_ATTRIBUTES,
         "clipboard failure preserves generated archive");
-    std::puts("PASS: default info, five levels persisted/reloaded, failed write preserves level");
+    std::puts("PASS: default debug, user override priority, five levels persisted/reloaded, failed write preserves level");
     std::puts("PASS: newest five full logs, LZMA 7z, Unicode CF_HDROP, clipboard failure");
     return 0;
 }
