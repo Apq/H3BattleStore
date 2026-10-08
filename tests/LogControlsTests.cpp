@@ -96,6 +96,12 @@ static void TestLogPolicies_(const std::wstring& root)
     window.humanTurn = false;
     Check(!BattleStorageAllowed_(window), "nonhuman turn rejects storage");
     std::puts("PASS: idle animation allowed, submitted action/executor/spell/nonhuman turn rejected");
+    // 列表行数上限按 600 高度取满（2026-10-08 用户裁定），封顶磁盘保留 30 条。
+    Check(hbs_ui::RowsForHeight(56, 600, 18) == 30, "600-height default font fits all 30 records");
+    Check(hbs_ui::RowsForHeight(65, 600, 30) == 17, "30px font rows shrink with row height");
+    Check(hbs_ui::RowsForHeight(56, 1080, 18) == 30, "taller screens still cap at retention limit");
+    Check(hbs_ui::RowsForHeight(56, 56, 18) == 1, "no available height keeps at least one row");
+    std::puts("PASS: list rows fill available height, capped at 30 retained records");
     Check(LogStageLevel_("capture.stacks") == LOG_DEBUG
         && LogStageLevel_("restore.commit-objects") == LOG_INFO
         && LogStageLevel_("restore.rollback") == LOG_WARN, "phase severity policy");

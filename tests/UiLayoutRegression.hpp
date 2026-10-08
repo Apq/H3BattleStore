@@ -14,6 +14,15 @@ static_assert(tall.OriginY(8) + tall.bandHeight / 2 == 8 + 24 / 2);
 static_assert(hbs_ui::ForFont(64).OriginY(8) == 0);
 static_assert(hbs_ui::ForFont(22).bandHeight == 24 && hbs_ui::ForFont(22).rowHeight == 22);
 static_assert(hbs_ui::ForFont(0).rowHeight == 18);
+// 列表行数上限（2026-10-08 用户裁定）：按 600 高度基准取满，封顶 30 条磁盘保留。
+// 默认字体 y=8+48=56 起、行高 18：(600-56)/18=30，恰好整场 30 条全部可见。
+static_assert(hbs_ui::RowsForHeight(56, 600, 18) == 30);
+static_assert(hbs_ui::RowsForHeight(65, 600, 30) == 17);   // 30px 大字体行高
+static_assert(hbs_ui::RowsForHeight(56, 560, 18) == 28);
+static_assert(hbs_ui::RowsForHeight(56, 1080, 18) == 30);  // 大屏不超保留上限
+static_assert(hbs_ui::RowsForHeight(56, 56, 18) == 1);     // 无可用高度至少 1 行
+static_assert(hbs_ui::RowsForHeight(60, 56, 18) == 1);
+static_assert(hbs_ui::kUiListHardCap == 30);
 static_assert(tall.HitRow(59, 10) == -1 && tall.HitRow(60, 10) == 0);
 static_assert(tall.HitRow(89, 10) == 0 && tall.HitRow(90, 10) == 1);
 static_assert(tall.HitRow(359, 10) == 9 && tall.HitRow(360, 10) == -1);

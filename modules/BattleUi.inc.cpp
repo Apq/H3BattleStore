@@ -60,7 +60,18 @@ static const int kUiBarWidth = 480;
 // 内容只有 "yyyymmdd-hhmmss" 15 字符，小字体约 6px/字符，136px 含边距足够。
 static const int kUiListWidth = 136;
 static int UiRowHeight_() { return g_uiLayout.rowHeight; }
-static const int kUiListMaxRows = 10;
+// 列表行数上限：按战场对话框可用高度动态取满（2026-10-08 用户裁定，
+// 600 高度基准），封顶 30 条磁盘保留；dlg 未知时按最小 800x600 估底。
+static int UiListBottomY_(const H3CombatManager* mgr)
+{
+    const H3CombatDlg* dlg = mgr ? mgr->dlg : nullptr;
+    if (dlg) return dlg->GetY() + dlg->GetHeight();
+    return 600;
+}
+static int UiListMaxRows_(const hbs_ui::Layout& layout, int y, int bottomY)
+{
+    return hbs_ui::RowsForHeight(y + layout.ListTop(), bottomY, layout.rowHeight);
+}
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
 // HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
@@ -465,7 +476,6 @@ static void CancelSaveWait_(const char* reason)
 
 static void UiDrawBar_(H3CombatManager* mgr)
 {
-    (void)mgr;
     static bool redrawing = false;
     if (redrawing) return;
     __try {
@@ -473,14 +483,16 @@ static void UiDrawBar_(H3CombatManager* mgr)
         H3Font* font = H3SmallFont::Get();
         if (!wnd || !font || !UiDDBackBuffer_()) return;
         const hbs_ui::Layout layout = hbs_ui::ForFont(font->height);
-        const int compositeH = layout.Height(kUiListMaxRows);
+        g_uiLayout = layout;
+        const int y = UiOriginY_();
+        const int listMaxRows = UiListMaxRows_(layout, y, UiListBottomY_(mgr));
+        const int compositeH = layout.Height(listMaxRows);
         if (!g_barComposite || !g_barComposite->buffer
             || g_barComposite->height != compositeH || g_barComposite->width != kUiBarWidth) {
             if (g_barComposite) g_barComposite->Destroy();
             g_barComposite = H3LoadedPcx16::Create(kUiBarWidth, compositeH);
             if (!g_barComposite || !g_barComposite->buffer) return;
         }
-        g_uiLayout = layout;
         static DWORD lastDrawInfo = 0;
         const DWORD infoNow = GetTickCount();
         const bool logInfo = LogEnabled_(LOG_TRACE) && infoNow - lastDrawInfo >= 30000;
@@ -490,10 +502,9 @@ static void UiDrawBar_(H3CombatManager* mgr)
         g_ui.x = 8;
         g_ui.y = 8;
         const int x = g_ui.x;
-        const int y = UiOriginY_();
         const int rows = (!g_ui.entries.empty())
-            ? (g_ui.entries.size() < (size_t)kUiListMaxRows
-                ? (int)g_ui.entries.size() : kUiListMaxRows)
+            ? ((int)g_ui.entries.size() < listMaxRows
+                ? (int)g_ui.entries.size() : listMaxRows)
             : 0;
         // 列表高度随实际行数自适应（2026-10-05 用户实测纠正：固定满高会显示
         // 一堆空行背景板）；成品图行分隔线在每行底部，任意行数展开底边闭合。
@@ -517,7 +528,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         c->FillRectangle(0, 0, kUiBarWidth, UiBandHeight_(), 0, 0, 0);
         c->FillRectangle(0, UiBandHeight_(), kUiBarWidth, UiBandHeight_(), 0, 0, 0);
         c->FillRectangle(0, UiBandHeight_() + UiBandHeight_(), kUiListWidth,
-            kUiListMaxRows * UiRowHeight_(), 0, 0, 0);
+            listMaxRows * UiRowHeight_(), 0, 0, 0);
         H3LoadedPcx16* bg = UiLoadBarBg_();
         const bool bgOk = bg && bg->buffer
             && bg->width == kUiBarWidth && bg->height == kUiBgHeight;
@@ -761,8 +772,11 @@ static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
 static int UiHitRow_(int px, int py)
 {
     if (px < g_ui.x || px >= g_ui.x + kUiListWidth) return -1;
-    const int rows = g_ui.entries.size() < (size_t)kUiListMaxRows
-        ? (int)g_ui.entries.size() : kUiListMaxRows;
+    // 与绘制同一行数上限（按战场可用高度取满），命中区不超过实际绘制区。
+    const int listMaxRows = UiListMaxRows_(g_uiLayout, UiOriginY_(),
+        UiListBottomY_(H3CombatManager::Get()));
+    const int rows = (int)g_ui.entries.size() < listMaxRows
+        ? (int)g_ui.entries.size() : listMaxRows;
     return g_uiLayout.HitRow(py - UiOriginY_(), rows);
 }
 
