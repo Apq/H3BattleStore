@@ -1,6 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 $gameDir = 'D:\Heroes3\Heroes3_2026.10.07'
-$packsDst = "$gameDir\_HD3_Data\Packs\战场存档"
+# 热血插件目录与 H3Auto、H3RndNew 共用；img 下 HB_bg.pcx 与 H3Auto 的 HA_* 不冲突。
+$packsDst = "$gameDir\_HD3_Data\Packs\热血插件"
 $src = "$PSScriptRoot\Release"
 
 try {
