@@ -13,15 +13,9 @@ struct Layout {
     }
 };
 constexpr Layout ForFont(int fontHeight) { return { Max(24, fontHeight), Max(18, fontHeight) }; }
-// 列表可见行数上限（2026-10-08 用户裁定）：按可用高度取满——600 高度基准下
-// 能显示多少行就列多少行；更大屏也不超过磁盘保留的同场 30 条。
-constexpr int kUiListHardCap = 30;
-constexpr int RowsForHeight(int listTopY, int bottomY, int rowHeight) {
-    if (rowHeight <= 0) return 1;
-    const int avail = bottomY - listTopY;
-    const int rows = avail > 0 ? avail / rowHeight : 1;
-    return rows < 1 ? 1 : (rows > kUiListHardCap ? kUiListHardCap : rows);
-}
+// 存档列表最大行数固定 30（2026-10-08 用户裁定）：与同场磁盘保留条数一致，
+// With 18px rows: origin 8 + bands 48 + rows 30*18 = bottom 596.
+constexpr int kUiListMaxRows = 30;
 constexpr int HotkeyX = 480 - 58;
 constexpr int StatusLampRadius = 7;
 constexpr int StatusLampX = HotkeyX - 16;
