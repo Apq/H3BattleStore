@@ -733,8 +733,11 @@ inline std::wstring MakeArchiveName(uint64_t timestampUtcMs,
 
 inline bool ParseGeneratedName(const std::wstring& name,
                                uint64_t timestampUtcMs,
-                               const std::string& battleKey)
+                               const std::string& battleKey,
+                               uint32_t* filenameAttempt = nullptr)
 {
+    if (filenameAttempt) *filenameAttempt = 0;
+    uint32_t parsedAttempt = 1;
     const wchar_t* p = name.c_str();
     if (!WideHexEquals(p, battleKey)) return false;
     p += kKeyHexChars;
@@ -755,6 +758,7 @@ inline bool ParseGeneratedName(const std::wstring& name,
             ++p;
         }
         if (digits == 0 || attempt < 2 || attempt > 999) return false;
+        parsedAttempt = static_cast<uint32_t>(attempt);
     }
     if (_wcsicmp(p, L".hbs") != 0) return false;
     SYSTEMTIME local = {};
@@ -768,7 +772,22 @@ inline bool ParseGeneratedName(const std::wstring& name,
     // timezone is not stored, so changing system timezone must not hide valid saves.
     (void)timestampUtcMs;
     FILETIME date = {};
-    return SystemTimeToFileTime(&local, &date) != FALSE;
+    if (!SystemTimeToFileTime(&local, &date)) return false;
+    if (filenameAttempt) *filenameAttempt = parsedAttempt;
+    return true;
+}
+
+inline bool FormatNumberedArchiveStamp(uint64_t utcMs, uint32_t attempt, char* out, size_t cap,
+                                       const TIME_ZONE_INFORMATION* zone)
+{
+    if (!out || cap == 0) return false;
+    out[0] = 0;
+    if (attempt < 1 || attempt > 999) return false;
+    char stamp[32] = {};
+    if (!FormatLocalArchiveStamp(utcMs, stamp, sizeof(stamp), zone)) return false;
+    if (attempt > 1)
+        return _snprintf_s(out, cap, _TRUNCATE, "%s_%u", stamp, (unsigned)attempt) >= 0;
+    return _snprintf_s(out, cap, _TRUNCATE, "%s", stamp) >= 0;
 }
 
 inline bool Scan(const std::wstring& root,

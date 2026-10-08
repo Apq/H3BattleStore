@@ -98,6 +98,8 @@ static void TestLogPolicies_(const std::wstring& root)
     std::puts("PASS: idle animation allowed, submitted action/executor/spell/nonhuman turn rejected");
     Check(g_log_level == LOG_DEBUG, "initial default log level is debug");
     Check(hbs_ui::kUiListVisibleRows == 20, "list viewport holds 20 rows");
+    Check(hbs_ui::ListWidth == 168 && hbs_ui::ListWidth + hbs_ui::ScrollbarWidth == 182,
+        "wider numbered list reserves 168px plus 14px scrollbar");
     Check(hbs_ui_test::ScrollListRegression(), "scroll offsets, wheel, hit mapping and thumb endpoints");
     Check(hbs_ui_test::ScrollbarDragRegression(), "relative drag retains zero-motion position for long lists");
     hbs_ui::ScrollList activeDrag;

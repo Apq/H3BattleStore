@@ -15,7 +15,7 @@ struct Layout {
 };
 constexpr Layout ForFont(int fontHeight) { return { Max(24, fontHeight), Max(18, fontHeight) }; }
 constexpr int kUiListVisibleRows = 20;
-constexpr int ListWidth = 136;
+constexpr int ListWidth = 168;
 constexpr int ScrollbarWidth = 14;
 struct ScrollList {
     size_t first = 0;

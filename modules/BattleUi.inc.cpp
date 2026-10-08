@@ -56,8 +56,8 @@ static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
 static hbs_ui::Layout g_uiLayout = hbs_ui::ForFont(0);
 static int UiBandHeight_() { return g_uiLayout.bandHeight; }
 static const int kUiBarWidth = 480;
-// 常驻列表宽度：能显示完时间即可，不跟悬浮条同宽。
-// 内容只有 "yyyymmdd-hhmmss" 15 字符，小字体约 6px/字符，136px 含边距足够。
+// 常驻列表为时间和同秒文件编号留出空间，不跟悬浮条同宽。
+// 正文168px，包含 "yyyymmdd-hhmmss_99" 的编号与左右边距。
 static const int kUiListWidth = hbs_ui::ListWidth;
 static int UiRowHeight_() { return g_uiLayout.rowHeight; }
 static const int kUiListVisibleRows = hbs_ui::kUiListVisibleRows;
@@ -76,6 +76,7 @@ struct UiSaveEntry
 {
     uint64_t timestampUtcMs;
     uint32_t sequence;
+    uint32_t filenameAttempt = 1;
     std::wstring path;
 };
 
@@ -199,6 +200,8 @@ static bool UiReloadEntries_(const H3CombatManager* mgr)
         entry.timestampUtcMs = records[i].timestampUtcMs;
         entry.sequence = records[i].sequence;
         entry.path = records[i].path;
+        hbs::detail::ParseGeneratedName(hbs::detail::FileNameOf(entry.path),
+            entry.timestampUtcMs, records[i].battleKey, &entry.filenameAttempt);
         g_ui.entries.push_back(entry);
     }
     return true;
@@ -235,7 +238,7 @@ static void UiSaveHotkey_()
 
 static void UiFormatStamp_(const UiSaveEntry& entry, char* out, size_t cap)
 {
-    if (!hbs::detail::FormatLocalArchiveStamp(entry.timestampUtcMs, out, cap, nullptr)
+    if (!hbs::detail::FormatNumberedArchiveStamp(entry.timestampUtcMs, entry.filenameAttempt, out, cap, nullptr)
         && out && cap > 0)
         _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }

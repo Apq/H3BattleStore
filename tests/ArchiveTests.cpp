@@ -550,6 +550,32 @@ static void TestLocalStamp()
     std::wstring filenameTime = name.substr(65, 15);
     filenameTime[8] = L'-';
     Expect(filenameTime == std::wstring(text, text + strlen(text)), "filename and UI share local conversion");
+    uint32_t attempt = 0;
+    Expect(hbs::detail::ParseGeneratedName(name, stamp, key, &attempt) && attempt == 1,
+        "unsuffixed filename displays the original archive without a number");
+    zone = {};
+    zone.Bias = -480;
+    const uint32_t attempts[] = {1, 2, 9, 10, 99, 100, 999};
+    for (const uint32_t number : attempts) {
+        const std::wstring numbered = hbs::detail::MakeArchiveName(stamp, key, number);
+        Expect(hbs::detail::ParseGeneratedName(numbered, stamp, key, &attempt) && attempt == number,
+            "filename collision number parses without using document sequence");
+        char numberedText[32] = {};
+        char expectedNumbered[32] = {};
+        if (number == 1) strcpy_s(expectedNumbered, "20261008-001526");
+        else _snprintf_s(expectedNumbered, sizeof(expectedNumbered), _TRUNCATE,
+            "20261008-001526_%u", (unsigned)number);
+        Expect(hbs::detail::FormatNumberedArchiveStamp(stamp, attempt, numberedText, sizeof(numberedText), &zone)
+            && strcmp(numberedText, expectedNumbered) == 0, "UI timestamp preserves one/two/three-digit filename suffix");
+    }
+    attempt = 123;
+    Expect(!hbs::detail::ParseGeneratedName(hbs::detail::MakeArchiveName(stamp, key, 1000), stamp, key, &attempt)
+        && attempt == 0, "invalid suffix never leaks a valid display number");
+    char shortNumbered[18] = {};
+    Expect(!hbs::detail::FormatNumberedArchiveStamp(stamp, 99, shortNumbered, sizeof(shortNumbered), &zone)
+        && shortNumbered[17] == 0, "numbered label short buffer stays terminated");
+    Expect(!hbs::detail::FormatNumberedArchiveStamp(stamp, 0, text, sizeof(text), &zone)
+        && text[0] == 0, "invalid display number rejected");
     char tinyBuffer[4] = {};
     Expect(!hbs::detail::FormatLocalArchiveStamp(stamp, tinyBuffer, sizeof(tinyBuffer), nullptr)
         && tinyBuffer[3] == 0, "short display buffer is terminated");
