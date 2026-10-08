@@ -43,6 +43,7 @@ PatcherInstance* _PI = nullptr;
 #include "modules/BattleDiagnostics.inc.cpp"
 #include "modules/BattleCapture.inc.cpp"
 #include "modules/BattleInputPolicy.hpp"
+#include "modules/BattleFingerprint.hpp"
 #include "modules/BattleRestore.inc.cpp"
 #include "modules/BattleUi.inc.cpp"
 #include "modules/Entry.inc.cpp"

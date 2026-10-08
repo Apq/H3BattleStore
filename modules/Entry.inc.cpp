@@ -206,17 +206,33 @@ static bool Sha256Hex_(const uint8_t* data, size_t size, std::string* out)
 static std::string g_preBattleKey_;
 static const H3CombatManager* g_preBattleManager_ = nullptr;
 
+static_assert(offsetof(H3Main, mapInfo) + offsetof(H3MapInfo, mapName) == 0x1FB3C,
+    "SoD map title layout");
+
+static bool ReadFingerprintMap_(std::string* title)
+{
+    const H3Main* main = H3Main::Get();
+    if (!main || !Readable_(&main->mapInfo.mapName, sizeof(H3String))) return false;
+    const H3String& mapName = main->mapInfo.mapName;
+    const UINT length = mapName.Length();
+    const char* text = mapName.String();
+    if (length > kPathCap_ || length > mapName.MaxLength()
+        || (length && (!Readable_(text, (size_t)length + 1) || text[length] != 0))) return false;
+    title->assign(length ? text : "", length);
+    return true;
+}
+
 static bool BattleInitialFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error)
 {
     if (!CombatIsReadable_(mgr) || !out) return false;
+    std::string mapTitle;
+    if (!ReadFingerprintMap_(&mapTitle)) {
+        if (error) *error = "战前地图身份不可读取";
+        return false;
+    }
     std::vector<uint8_t> bytes;
-    auto put32 = [&](int32_t value) {
-        const uint32_t u = (uint32_t)value;
-        bytes.push_back((uint8_t)u);
-        bytes.push_back((uint8_t)(u >> 8));
-        bytes.push_back((uint8_t)(u >> 16));
-        bytes.push_back((uint8_t)(u >> 24));
-    };
+    FingerprintAppendMap_(bytes, mapTitle);
+    auto put32 = [&](int32_t value) { FingerprintPut32_(bytes, (uint32_t)value); };
     put32(mgr->landType);
     put32(mgr->specialTerrain);
     put32(mgr->siegeKind2); // Fortification level, not mutable door status at +0x53A4.

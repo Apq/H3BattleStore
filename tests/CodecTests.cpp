@@ -10,6 +10,7 @@
 #include "../modules/BattleArchive.inc.cpp"
 
 #include "../modules/BattleCodec.inc.cpp"
+#include "../modules/BattleFingerprint.hpp"
 
 static int g_failures = 0;
 
@@ -19,6 +20,33 @@ static void Expect(bool condition, const char* name)
         printf("FAIL %s\n", name);
         ++g_failures;
     }
+}
+
+static void TestMapFingerprint_()
+{
+    const auto encode = [](const std::string& title) {
+        std::vector<uint8_t> bytes;
+        FingerprintAppendMap_(bytes, title);
+        FingerprintPut32_(bytes, 0x12345678);
+        return bytes;
+    };
+    const auto first = encode("Map title");
+    Expect(first == encode("Map title"), "same title bytes encode identically");
+    Expect(first != encode("Other title"), "map titles participate in identity");
+    Expect(encode("").size() == 12, "empty title preserves schema and battle scalar");
+    Expect(encode("a") != encode("a "), "title whitespace is preserved");
+    Expect(encode("a") != encode("{~c}a"), "title color codes are preserved");
+    const std::string chinese("\xB5\xD8\xCD\xBC", 4);
+    Expect(encode(chinese) == encode(chinese), "native Chinese bytes are stable");
+    Expect(encode(std::string("a\0b", 3)) != encode("a"),
+        "length framing preserves embedded zero bytes");
+    const auto framed = encode("a");
+    Expect(framed.size() == 13 && framed[0] == 'M' && framed[1] == 'A'
+        && framed[2] == 'P' && framed[3] == '2'
+        && framed[4] == 1 && framed[5] == 0 && framed[8] == 'a'
+        && framed[9] == 0x78 && framed[12] == 0x12,
+        "title-only framing and following battle fields use little endian");
+    printf("PASS map fingerprint: title only, empty and native bytes\n");
 }
 
 static uint32_t FixtureNext_(uint32_t& state)
@@ -252,6 +280,7 @@ static void TestV5Roundtrip_()
 
 int main()
 {
+    TestMapFingerprint_();
     TestControlStatePolicy_();
     TestNormalizeStaleLinks_();
     TestV5Roundtrip_();
