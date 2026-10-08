@@ -254,8 +254,9 @@ static bool BattleInitialFingerprint_(const H3CombatManager* mgr, std::string* o
         }
     }
     // v5 增补（2026-10-06 用户拍板）：双方英雄身份（id/经验/等级）、19 个穿戴槽
-    // 宝物 id、城镇身份（编号/类型/归属）。全部为战斗中恒定字段，用于阻断
+    // 宝物 id、城镇身份（编号/类型/归属）。只取开战初态并冻结，用于阻断
     // "同色同阵容的不同英雄"与"穿戴不同导致强度不同"的跨场互读。
+    // 机器死亡会移除战斗英雄的对应装备；其动态状态另外进入 codec v7。
     // Only called before native battle initialization. Mutable combat slots and
     // obstacles never participate, and subsequent requests use the frozen digest.
     for (int side = 0; side < 2; ++side) {

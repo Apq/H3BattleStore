@@ -303,10 +303,25 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
             return false;
         }
 
+    static_assert(offsetof(H3CombatCreature, info) + offsetof(H3CreatureInformation, numberShots) == 0xD8,
+        "native remaining ammunition offset");
+    static_assert(offsetof(H3Hero, bodyArtifacts) == 0x12D && sizeof(H3Artifact) == 8,
+        "native hero equipment layout");
+    static_assert(kMachineBodySlot_ == 13 && kMachineSlotsBytes_ == 4 * sizeof(H3Artifact),
+        "native war-machine slots 13..16");
     DiagStage_("capture.heroes");
     for (int side = 0; side < 2; ++side) {
-        if (mgr->hero[side] && Readable_(mgr->hero[side], 0x1A))
-            out->spellPoints[side] = *(const int16_t*)((const uint8_t*)mgr->hero[side] + 0x18);
+        const H3Hero* hero = mgr->hero[side];
+        out->heroPresent[side] = hero != nullptr;
+        if (hero) {
+            const H3Artifact* machines = hero->bodyArtifacts + kMachineBodySlot_;
+            if (!Readable_(hero, 0x1A) || !Readable_(machines, kMachineSlotsBytes_)) {
+                if (error) *error = "combat hero state is not readable";
+                return false;
+            }
+            out->spellPoints[side] = hero->spellPoints;
+            CodecCaptureWarMachines_(machines, out->warMachines[side]);
+        }
         if (!ReadSpellSet_((const uint8_t*)mgr + 0x545C + side * 0x10, &out->eagleEye[side])) {
             if (error) *error = "eagle-eye set is invalid";
             return false;

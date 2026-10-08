@@ -49,6 +49,96 @@ static void TestMapFingerprint_()
     printf("PASS map fingerprint: title only, empty and native bytes\n");
 }
 
+static void TestWarMachineEquipment_()
+{
+    std::unique_ptr<CodecCapture> state(new CodecCapture{});
+    state->version = kCodecVersion;
+    for (int side = 0; side < 2; ++side) {
+        state->heroPresent[side] = true;
+        for (int i = 0; i < kMachineSlotCount_; ++i)
+            state->warMachines[side][i] = {kMachineArtifactIds_[i], -1};
+    }
+    state->warMachines[0][0].subtype = 123; // Preserve the full record, not just presence.
+    state->stacks[1][1].occupied = true;
+    state->stacks[1][1].type = 41;
+    state->stacks[1][1].infoCombat[6] = 7;
+    state->stacks[1][7].occupied = true;
+    state->stacks[1][7].type = 148;
+    state->stacks[1][7].numberAlive = 0;
+    state->warMachines[1][1] = {-1, -1};
+    std::vector<hbs::ArchiveSection> sections;
+    std::string error;
+    std::unique_ptr<CodecCapture> decoded(new CodecCapture{});
+    Expect(CodecEncode(*state, &sections, &error) && CodecDecode(sections, decoded.get(), &error),
+        "v7 dead-cart snapshot encodes hero equipment and remaining shots");
+    Expect(decoded->heroPresent[1] && decoded->warMachines[1][1].id == -1
+        && decoded->stacks[1][1].infoCombat[6] == 7 && decoded->warMachines[0][0].subtype == 123,
+        "machine absence, subtype and D8 ammunition survive codec");
+    Expect(FindSection_(sections, kSectionHeroes)->bytes.size() == 74,
+        "hero section contains both presence flags and eight complete machine records");
+
+    // Fake native hero buffers with sentinels around slots 13..16. Production uses
+    // the same byte transfer helpers; no game functions or real player data.
+    uint8_t heroes[2][0x1D4];
+    memset(heroes, 0xA5, sizeof(heroes));
+    const size_t at = 0x12D + kMachineBodySlot_ * 8;
+    CodecWarMachine_ initial[4];
+    for (int i = 0; i < kMachineSlotCount_; ++i) initial[i] = {kMachineArtifactIds_[i], -1};
+    const auto ammoPresent = [&](int side) {
+        int32_t id = -1;
+        memcpy(&id, heroes[side] + 0x19D, 4);
+        return id == 5;
+    };
+    for (int side = 0; side < 2; ++side) CodecRestoreWarMachines_(heroes[side] + at, initial);
+    Expect(ammoPresent(1), "fresh battle has ammo-cart exemption before loading dead cart");
+    CodecWarMachine_ before[2][4];
+    for (int side = 0; side < 2; ++side) {
+        CodecCaptureWarMachines_(heroes[side] + at, before[side]);
+        CodecRestoreWarMachines_(heroes[side] + at, decoded->warMachines[side]);
+    }
+    Expect(ammoPresent(0) && !ammoPresent(1), "dead cart restore removes only the saved side's exemption");
+    int shots = decoded->stacks[1][1].infoCombat[6];
+    if (!ammoPresent(1)) --shots; // Model the audited 0x43F723 native guard.
+    Expect(shots == 6, "native shooting consumes restored ammunition without cart equipment");
+    for (int side = 0; side < 2; ++side) {
+        CodecRestoreWarMachines_(heroes[side] + at, before[side]);
+        Expect(heroes[side][at - 1] == 0xA5 && heroes[side][at + kMachineSlotsBytes_] == 0xA5,
+            "machine commit and rollback leave neighboring equipment bytes unchanged");
+    }
+    Expect(ammoPresent(0) && ammoPresent(1), "failed restore rolls back both original equipment states");
+    shots = 7;
+    if (!ammoPresent(1)) --shots;
+    Expect(shots == 7, "living cart retains original unlimited-ammunition rule");
+    CodecWarMachine_ actual[4];
+    CodecCaptureWarMachines_(heroes[1] + at, actual);
+    for (int i = 0; i < kMachineSlotCount_; ++i)
+        Expect(actual[i].id == initial[i].id && actual[i].subtype == initial[i].subtype,
+            "recapture verifies complete restored machine records");
+
+    // Strict verification must notice equipment differences even when stacks match.
+    std::unique_ptr<CodecCapture> mismatch(new CodecCapture(*decoded));
+    mismatch->warMachines[1][1] = {5, -1};
+    std::vector<hbs::ArchiveSection> different;
+    Expect(CodecEncode(*mismatch, &different, &error)
+        && !CodecSectionEqual_(*FindSection_(sections, kSectionHeroes), *FindSection_(different, kSectionHeroes), nullptr)
+        && CodecSectionEqual_(*FindSection_(sections, kSectionStacks), *FindSection_(different, kSectionStacks), nullptr),
+        "strict verify detects wrong cart equipment even when stack section is equal");
+    auto bad = sections;
+    bad[5].bytes[6] = 2;
+    Expect(!CodecDecode(bad, decoded.get(), &error), "invalid hero presence flag rejected");
+    bad = sections;
+    bad[5].bytes[7] = 5; // Slot 13 cannot contain the cart normally worn in slot 14.
+    Expect(!CodecDecode(bad, decoded.get(), &error), "artifact in wrong machine slot rejected");
+    mismatch->heroPresent[1] = false;
+    Expect(!CodecEncode(*mismatch, &different, &error), "absent hero cannot carry machine equipment");
+    for (size_t i = 0; i < sections.size(); ++i) {
+        bad = sections;
+        bad[i].bytes[0] = 6;
+        Expect(!CodecDecode(bad, decoded.get(), &error), "v6 sections rejected instead of guessing lost equipment");
+    }
+    printf("PASS war-machine equipment: dead/live cart, native ammo guard, rollback, strict verification, v6 rejection\n");
+}
+
 static uint32_t FixtureNext_(uint32_t& state)
 {
     state = state * 1664525u + 1013904223u;
@@ -281,6 +371,7 @@ static void TestV5Roundtrip_()
 int main()
 {
     TestMapFingerprint_();
+    TestWarMachineEquipment_();
     TestControlStatePolicy_();
     TestNormalizeStaleLinks_();
     TestV5Roundtrip_();

@@ -678,8 +678,13 @@ static bool RestoreApply_(H3CombatManager* mgr, const CodecCapture& capture,
     memcpy(mgr->fortWallsAlive, capture.fortWallsAlive, sizeof(capture.fortWallsAlive));
     memcpy(mgr->massSpellTarget, capture.massSpellTarget, sizeof(capture.massSpellTarget));
     RestoreDisplayCaches_(mgr, capture);
-    for (int side = 0; side < 2; ++side)
-        if (mgr->hero[side]) mgr->hero[side]->spellPoints = capture.spellPoints[side];
+    for (int side = 0; side < 2; ++side) {
+        if (!mgr->hero[side]) continue;
+        mgr->hero[side]->spellPoints = capture.spellPoints[side];
+        // War-machine death clears equipment on the combat hero copy. Restoring
+        // the stack alone leaves WearsArtifact(5) granting infinite ammunition.
+        CodecRestoreWarMachines_(mgr->hero[side]->bodyArtifacts + kMachineBodySlot_, capture.warMachines[side]);
+    }
     return true;
 }
 
@@ -875,9 +880,15 @@ static bool RestoreSameBattle_(H3CombatManager* mgr, const CodecCapture& capture
     // 当前战场不参与任何语义校验——游戏正常产生的状态一律接受；Before 快照仅作为
     // 回滚数据源采集（内存不可读仍属硬故障拒绝：没有快照就没有回滚保证）。
     if (!CaptureBattle_(mgr, &before, error) || !RestorePolicy_(capture, error)) return false;
+    DiagSummary_(before, "before-restore");
     for (int side = 0; side < 2; ++side) {
-        if (mgr->hero[side] && IsBadWritePtr(&mgr->hero[side]->spellPoints, sizeof(INT16))) {
-            if (error) *error = "hero mana not writable"; return false;
+        H3Hero* hero = mgr->hero[side];
+        if (capture.heroPresent[side] != (hero != nullptr)) {
+            if (error) *error = "combat hero presence differs from snapshot"; return false;
+        }
+        if (hero && (IsBadWritePtr(&hero->spellPoints, sizeof(INT16))
+            || IsBadWritePtr(hero->bodyArtifacts + kMachineBodySlot_, kMachineSlotsBytes_))) {
+            if (error) *error = "combat hero state not writable"; return false;
         }
     }
     if (IsBadWritePtr(mgr, sizeof(*mgr))) {

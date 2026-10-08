@@ -1,5 +1,5 @@
 // 单游戏线程操作上下文。仅在请求/阶段变化时落盘，不逐帧刷战场状态。
-static const char* kDiagnosticBuild_ = "battle-diag-20261007-log-audit-v6";
+static const char* kDiagnosticBuild_ = "battle-diag-ammo-equipment-v7";
 static LONG g_diagSequence = 0;
 static struct {
     LONG id;
@@ -108,11 +108,17 @@ static void DiagSummary_(const CodecCapture& capture, const char* event)
             if (s.numberAlive > 0) ++alive;
             spells += (unsigned)s.spellIds.size();
             for (int i = 0; i < 4; ++i) relations += (unsigned)s.relations[i].size();
-            LogDebug("[Stack op=%ld] event=%s slot=%d:%d type=%d pos=%d alive=%d dead=%d hpLost=%d start=%d morale=%d luck=%d spells=%u clone=%d animation=%d/%d",
+            LogDebug("[Stack op=%ld] event=%s slot=%d:%d type=%d pos=%d alive=%d dead=%d hpLost=%d start=%d morale=%d luck=%d spells=%u clone=%d animation=%d/%d shots=%d ammoCart=%d",
                 g_diag.id, event, side, slot, s.type, s.position, s.numberAlive, s.numberForeverDead,
                 s.healthLost, s.numberAtStart, s.morale, s.luck, (unsigned)s.spellIds.size(),
-                s.cloneId, s.animation, s.animationFrame);
+                s.cloneId, s.animation, s.animationFrame, s.infoCombat[6], capture.warMachines[side][1].id);
         }
+        LogDebug("[Hero op=%ld] event=%s side=%d present=%d machines=%d/%d,%d/%d,%d/%d,%d/%d",
+            g_diag.id, event, side, capture.heroPresent[side] ? 1 : 0,
+            capture.warMachines[side][0].id, capture.warMachines[side][0].subtype,
+            capture.warMachines[side][1].id, capture.warMachines[side][1].subtype,
+            capture.warMachines[side][2].id, capture.warMachines[side][2].subtype,
+            capture.warMachines[side][3].id, capture.warMachines[side][3].subtype);
     }
     LogInfo("[Snapshot op=%ld] event=%s version=%u turn=%d current=%d:%d occupied=%u alive=%u obstacles=%u logs=%u spells=%u relations=%u mana=%d/%d casted=%d/%d rngTls=%08X rngMirror=%08X",
         g_diag.id, event, capture.version, capture.turn, capture.currentMonSide, capture.currentMonIndex,

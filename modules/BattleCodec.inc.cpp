@@ -13,7 +13,41 @@ static const uint32_t kSectionLog = 5;
 static const uint32_t kSectionHeroes = 6;
 static const uint32_t kSectionRelations = 7;
 static const uint32_t kSectionSpells = 8;
-static const uint32_t kCodecVersion = 6;
+static const uint32_t kCodecVersion = 7;
+
+// Hero body slots 13..16: ballista, ammo cart, tent, catapult. No pointers.
+static constexpr int kMachineBodySlot_ = 13;
+static constexpr int kMachineSlotCount_ = 4;
+static constexpr size_t kMachineSlotsBytes_ = 32;
+static constexpr int32_t kMachineArtifactIds_[] = {4, 5, 6, 3};
+struct CodecWarMachine_ {
+    int32_t id = -1;
+    int32_t subtype = -1;
+};
+static void CodecCaptureWarMachines_(const void* nativeSlots, CodecWarMachine_ (&out)[4])
+{
+    const uint8_t* bytes = (const uint8_t*)nativeSlots;
+    for (int i = 0; i < kMachineSlotCount_; ++i) {
+        memcpy(&out[i].id, bytes + i * 8, 4);
+        memcpy(&out[i].subtype, bytes + i * 8 + 4, 4);
+    }
+}
+static void CodecRestoreWarMachines_(void* nativeSlots, const CodecWarMachine_ (&saved)[4])
+{
+    uint8_t* bytes = (uint8_t*)nativeSlots;
+    for (int i = 0; i < kMachineSlotCount_; ++i) {
+        memcpy(bytes + i * 8, &saved[i].id, 4);
+        memcpy(bytes + i * 8 + 4, &saved[i].subtype, 4);
+    }
+}
+static bool CodecWarMachinesValid_(bool heroPresent, const CodecWarMachine_ (&saved)[4])
+{
+    for (int i = 0; i < kMachineSlotCount_; ++i) {
+        if (saved[i].id != -1 && (!heroPresent || saved[i].id != kMachineArtifactIds_[i])) return false;
+        if (saved[i].id == -1 && saved[i].subtype != -1) return false;
+    }
+    return true;
+}
 
 struct CodecScalarRange_ { uint32_t offset, size; };
 // Audited numeric fields omitted by H3API; never includes resource/container pointers.
@@ -368,6 +402,8 @@ struct CodecCapture
     uint8_t accessibleSquares[187];
     uint8_t accessibleSquares2[187];
     int16_t spellPoints[2];
+    bool heroPresent[2] = {};
+    CodecWarMachine_ warMachines[2][kMachineSlotCount_];
     uint32_t rngTlsSeed;
     uint32_t rngMirrorSeed;
     std::vector<int32_t> eagleEye[2];
@@ -509,6 +545,9 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
     auto reject = [&](const char* why) { if (error) *error = why; return false; };
     if (saved.version != kCodecVersion)
         return reject("存档数据版本不兼容，请重新保存战场存档");
+    for (int side = 0; side < 2; ++side)
+        if (!CodecWarMachinesValid_(saved.heroPresent[side], saved.warMachines[side]))
+            return reject("invalid hero war-machine equipment");
     if (saved.action || saved.finished || saved.autoCombat || saved.tacticsPhase
         || saved.currentMonSide < 0 || saved.currentMonSide > 1
         || saved.currentMonIndex < 0 || saved.currentMonIndex >= 20
@@ -817,6 +856,12 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
 {
     if (!out) return false;
     out->clear();
+    for (int side = 0; side < 2; ++side) {
+        if (!CodecWarMachinesValid_(capture.heroPresent[side], capture.warMachines[side])) {
+            if (error) *error = "invalid hero war-machine equipment";
+            return false;
+        }
+    }
     CodecWriter battle;
     battle.U32(kCodecVersion);
     const int32_t fields[] = {
@@ -926,7 +971,14 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
 
     CodecWriter heroes;
     heroes.U32(kCodecVersion);
-    for (int side = 0; side < 2; ++side) heroes.U16((uint16_t)capture.spellPoints[side]);
+    for (int side = 0; side < 2; ++side) {
+        heroes.U16((uint16_t)capture.spellPoints[side]);
+        heroes.U8(capture.heroPresent[side] ? 1 : 0);
+        for (const CodecWarMachine_& machine : capture.warMachines[side]) {
+            heroes.I32(machine.id);
+            heroes.I32(machine.subtype);
+        }
+    }
 
     CodecWriter relations;
     relations.U32(kCodecVersion);
@@ -1143,6 +1195,14 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     for (int side = 0; side < 2; ++side) {
         const int16_t points = (int16_t)heroReader.U16();
         if (points != out->spellPoints[side]) heroReader.ok = false;
+        const uint8_t present = heroReader.U8();
+        if (present > 1) heroReader.ok = false;
+        out->heroPresent[side] = present == 1;
+        for (CodecWarMachine_& machine : out->warMachines[side]) {
+            machine.id = heroReader.I32();
+            machine.subtype = heroReader.I32();
+        }
+        if (!CodecWarMachinesValid_(out->heroPresent[side], out->warMachines[side])) heroReader.ok = false;
     }
     if (!heroReader.Finish()) { if (error) *error = "hero section is corrupt or mana differs from battle section"; return false; }
 
