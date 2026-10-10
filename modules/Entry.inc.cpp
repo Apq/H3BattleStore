@@ -379,24 +379,7 @@ static bool TryCaptureCombat_()
     return true;
 }
 
-// 2026-10-06 用户裁定：保存窗口 = 轮到该玩家行动且尚未下令。
-// 窗口外按存档键静默丢弃，不等待动画、不加输入锁。
-// Native path cache (+0x14031) is not an executor busy flag. H3API's
-// travelingSquares member starts one byte early; do not use it as a gate.
-static bool CombatPlayerWindow_(const H3CombatManager* mgr, int messageResult, const char** reason)
-{
-    if (messageResult == 2) { if (reason) *reason = "battle message closes manager"; return false; }
-    if (g_restoreBusy || g_restoreRequest.pending || !CombatStorageWindow_(mgr)) {
-        if (reason) *reason = "not at player input boundary";
-        return false;
-    }
-    return true;
-}
 
-// 一次物理按下只允许触发一次保存：game-message 与 system-frame 两个输入源都会
-// 看到同一次按下边沿（19:05 日志 Op1→Op2 相隔 76ms 双触发），窗口打开后会存两档。
-// 首个到达的边沿置位，后续边沿吞掉；按键松开后由帧循环清零重新武装。
-static volatile LONG g_saveEdgeConsumed = 0;
 
 static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin)
 {
@@ -404,10 +387,10 @@ static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin
         LogTrace("[Input] duplicate edge suppressed origin=%s", origin);
         return;
     }
-    if (!CombatPlayerWindow_(mgr, messageResult, nullptr)) return;
+    if (!StorePlayerWindow_(mgr, messageResult, nullptr)) return;
     DiagBegin_("save", origin, mgr);
     LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
-        g_ui.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
+        g_store.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
     if (!TryCaptureCombat_()) UiMarkNotice_("保存失败：详见日志");
 }
 
@@ -441,14 +424,14 @@ static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
         const char letter = UiVirtualKeyToLetter_((int)wParam, true);
         const bool up = (lParam & 0x80000000) != 0;
         const bool repeat = (lParam & 0x40000000) != 0;
-        if (letter && (letter == g_ui.saveKey || g_ui.awaitingRebind))
+        if (letter && (letter == g_store.saveKey || g_ui.awaitingRebind))
             WriteLogLv(repeat && !up ? LOG_TRACE : LOG_DEBUG, "[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
-                up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_ui.saveKey,
+                up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_store.saveKey,
                 g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
                 (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
         if (letter && !up && !repeat) {
-            if (g_ui.awaitingRebind || letter != g_ui.saveKey
-                || CombatPlayerWindow_(H3CombatManager::Get(), 0, nullptr))
+            if (g_ui.awaitingRebind || letter != g_store.saveKey
+                || StorePlayerWindow_(H3CombatManager::Get(), 0, nullptr))
                 InterlockedExchange(&g_pendingSaveKey, letter);
             else
                 InterlockedExchange(&g_saveEdgeConsumed, 1);
@@ -534,7 +517,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
         g_ui.listGesture.CancelClick();
         InterlockedExchange(&g_pendingClickX, -1);
         InterlockedExchange(&g_pendingClickY, -1);
-        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_ui.entries.size());
+        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_store.entries.size());
         return true;
     }
     if (move) return hitList;
@@ -554,7 +537,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
         const auto release = g_ui.listGesture.Release(swallow, hitScroll);
         if (release == BattleUiRelease_::Pass) return false;
         if (release == BattleUiRelease_::Swallow) return true;
-        if (hitList && !CombatPlayerWindow_(combat, 0, nullptr)) return true;
+        if (hitList && !StorePlayerWindow_(combat, 0, nullptr)) return true;
         InterlockedExchange(&g_pendingClickX, gameX);
         InterlockedExchange(&g_pendingClickY, gameY);
         LogDetail_("点击已吞并：game=(%d,%d)", gameX, gameY);
@@ -615,11 +598,11 @@ static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
     }
     if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
         const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
-        if (pressed == g_ui.saveKey || g_ui.awaitingRebind)
+        if (pressed == g_store.saveKey || g_ui.awaitingRebind)
             WriteLogLv(inputLevel, "[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
                 msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
-                (int)msg->subtype, pressed ? pressed : '?', g_ui.saveKey,
-                (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
+                (int)msg->subtype, pressed ? pressed : '?', g_store.saveKey,
+                (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
                 g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
         return false;
     }
@@ -644,9 +627,9 @@ static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result, in
         InterlockedExchange(&g_pendingSaveKey, 0);
         return;
     }
-    if (pressed && pressed == g_ui.saveKey) {
+    if (pressed && pressed == g_store.saveKey) {
         static bool msgKeyWasDown = false;
-        const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
         if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
             if (!downNow) g_ui.rebindKey = 0;
             LogTrace("[Input] save suppressed source=game reason=rebind-latch");
@@ -700,7 +683,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                 const int edgeLevel = g_commandKeys.Level((int)keyboardInput.subtype,
                     keyboardInput.command == eMsgCommand::KEY_DOWN);
                 const char letter = UiVirtualKeyToLetter_(keyboardInput.subtype, false);
-                inputLevel = LogCommandLevel_(g_ui.awaitingRebind || (letter && letter == g_ui.saveKey)
+                inputLevel = LogCommandLevel_(g_ui.awaitingRebind || (letter && letter == g_store.saveKey)
                     || keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR, edgeLevel);
             }
             if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr)) {
@@ -849,15 +832,15 @@ static void BattleReset_()
     g_restoreFatal = false;
     // 消息登记不追栈帧链；下一代 Enter 清理旧代元数据，旧调用迟到的
     // Update/Leave 用 token 核验，不会误操作同地址的新登记。
-    g_ui.entries.clear();
+    g_store.entries.clear();
     g_ui.scroll = {};
     g_ui.listGesture = {};
     g_ui.listRightHeld = false;
-    g_ui.battleKey.clear();
+    g_store.battleKey.clear();
     g_ui.hoverRow = -1;
     g_ui.logLevelHover = -1;
-    if (g_listFailureLog.seen) LogWarn("[List] reset suppressed=%u", g_listFailureLog.suppressed);
-    g_listFailureLog = {};
+    if (g_storeListFailure.seen) LogWarn("[List] reset suppressed=%u", g_storeListFailure.suppressed);
+    g_storeListFailure = {};
     g_commandKeys = {};
     UiCancelRebind_("battle reset");
     g_ui.rebindKey = 0;
@@ -951,7 +934,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
                 g_ui.hoverRow = -1;
 
                 LogInfo("[List] 战斗开始自动加载完成，常驻列表条数=%u generation=%u",
-                    (unsigned)g_ui.entries.size(), g_battleGeneration);
+                    (unsigned)g_store.entries.size(), g_battleGeneration);
             }
         }
         if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(mgr)) return;
@@ -961,7 +944,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         if (now < g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         // 存档键松开后重新武装单次边沿（配合 TrySave_ 的 g_saveEdgeConsumed 闩锁）
-        if (!(GetAsyncKeyState(g_ui.saveKey) & 0x8000))
+        if (!(GetAsyncKeyState(g_store.saveKey) & 0x8000))
             InterlockedExchange(&g_saveEdgeConsumed, 0);
         static bool keyWasDown = false;
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
@@ -973,11 +956,11 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
         const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
         if (pressed) LogDebug("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
-            pressed, g_ui.saveKey, (GetAsyncKeyState(g_ui.saveKey) & 0x8000) ? 1 : 0,
+            pressed, g_store.saveKey, (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0,
             keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
             g_uiWaitSaveUntil ? 1 : 0);
-        if (pressed == g_ui.saveKey && !g_ui.awaitingRebind) {
-            const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+        if (pressed == g_store.saveKey && !g_ui.awaitingRebind) {
+            const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
             if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
                 if (!downNow) g_ui.rebindKey = 0;  // 改键那次按键松开后才解锁
             } else if (downNow && !keyWasDown && now >= g_ui.rebindGuardUntil) {
@@ -986,7 +969,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
             keyWasDown = downNow;
         } else {
             keyWasDown = !g_ui.awaitingRebind
-                && (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
+                && (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
         }
         UiDrawBar_(mgr);
     }
