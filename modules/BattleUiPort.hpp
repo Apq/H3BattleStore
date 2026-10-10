@@ -3,6 +3,10 @@
 // 钩子层（Entry）只经本接口驱动界面实现；界面实现不反调钩子层。
 // 约束：仅游戏主线程调用；不得在 __except 过滤器内调用；事件结构保持 POD；
 // 实现内禁止栈上大缓冲（路径缓冲守 kPathCap_ 堆规则）。
+// 包含顺序：接口使用未限定的 H3CombatManager/H3Msg，本头不能独立 include，
+// 必须先 `namespace h3 { struct H3CombatManager; struct H3Msg; }` 前向声明并
+// `using namespace h3;`（生产 TU 与 tests/UiPortTests.cpp 均照此顺序）；不得
+// 在本头内 using 命名空间，避免污染单 TU 其余部分。
 #pragma once
 
 #include <stdint.h>
