@@ -10,16 +10,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 Add-Type -AssemblyName System.Text.Encoding.CodePages -ErrorAction SilentlyContinue
 [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
 
-if (-not $Source) {
-    $Source = 'D:\Heroes3\Heroes3_2026.10.07\_HD3_Data\Packs\热血插件'
-}
+# 2026-10-10 用户裁定：打包不再读游戏部署目录；DLL 取项目 Release 构建产物，
+# 配置/说明/素材取仓库源文件。包内容保持既有清单，不扩为整个 Release 目录。
+# $Source 参数保留只为兼容旧调用，已不参与取材。
 if (-not $OutputDir) {
     $OutputDir = Join-Path $PSScriptRoot 'Release'
-}
-
-$sourcePath = (Resolve-Path -LiteralPath $Source).Path
-if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
-    throw "打包源目录不存在: $sourcePath"
 }
 
 function Get-PackVersion {
@@ -34,12 +29,9 @@ function Get-PackVersion {
     return 'v' + ($parts[0..1] -join '.')
 }
 
-# 部署目录（热血插件）与 H3Auto、H3RndNew 共用，混有其他插件的文件；
-# 不能整目录排除法打包，改为显式清单只取本插件需要的文件：
-# DLL 取已部署目录（发布时另行核对它与 Release 构建产物的哈希），
-# 配置、说明与素材取仓库源目录（部署目录中的说明文件可能被其他插件覆盖）。
+# 显式清单只取本插件需要的文件；包内顶层目录沿用原压缩包目录名（热血插件/）。
 $files = @(
-    @{ Local = Join-Path $sourcePath 'H3BattleStore.dll';           Entry = '热血插件/H3BattleStore.dll' },
+    @{ Local = Join-Path $PSScriptRoot 'Release\H3BattleStore.dll'; Entry = '热血插件/H3BattleStore.dll' },
     @{ Local = Join-Path $PSScriptRoot 'H3BattleStore.default.ini'; Entry = '热血插件/H3BattleStore.default.ini' },
     @{ Local = Join-Path $PSScriptRoot '使用说明.txt';              Entry = '热血插件/使用说明.txt' },
     @{ Local = Join-Path $PSScriptRoot 'img\HB_bg.pcx';             Entry = '热血插件/img/HB_bg.pcx' }
