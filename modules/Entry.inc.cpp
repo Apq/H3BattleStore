@@ -666,8 +666,8 @@ static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
     const H3Msg* translated, const char* phase, int result, int level)
 {
     if (!LogEnabled_(level) || !CombatIsReadable_(mgr)) return;
-    WriteLogLv(level, "[Command] phase=%s generation=%u depth=%d cmd=%d subtype=%d item=%d pos=%d,%d translated=%d/%d/%d result=%d action=%d/%d/%d/%d current=%d:%d activeSide=%d rebind=%d control=%d",
-        phase, g_battleGeneration, g_messageDepth, (int)input.command, (int)input.subtype,
+    WriteLogLv(level, "[Command] phase=%s generation=%u depth=%d bdepth=%d cmd=%d subtype=%d item=%d pos=%d,%d translated=%d/%d/%d result=%d action=%d/%d/%d/%d current=%d:%d activeSide=%d rebind=%d control=%d",
+        phase, g_battleGeneration, g_messageDepth, g_messageFrames.Depth(g_battleGeneration), (int)input.command, (int)input.subtype,
         input.itemId, input.position.x, input.position.y,
         translated ? (int)translated->command : -1, translated ? (int)translated->subtype : -1,
         translated ? translated->itemId : -1, result, (int)mgr->action,
@@ -678,6 +678,9 @@ static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
 
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
 {
+    BattleMessageFrame_ frame = {};
+    // 不在这里读游戏对象；身份捕获在下方自有逻辑的SEH内。
+    g_messageFrames.Enter(frame, g_battleGeneration, mgr, nullptr);
     ++g_messageDepth;
     int result = 0;
     H3Msg keyboardInput = {};
@@ -706,13 +709,19 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                     DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-before-down" : "space-before-up", 0);
                 consumed = CombatMessageBefore_(msg, inputLevel);
             }
+            // 帧身份补全：进入时未读游戏对象，首次确认可读时记录对话框；
+            // 若原函数期间对话框被替换，返回后的边界核验会拒绝消费（保守）。
+            if (frame.dialog == nullptr && CombatIsReadable_(mgr)) frame.dialog = mgr->dlg;
         }
         __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { failed = true; DiagHookFault_(); }
         result = consumed ? 1 : THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
+        frame.nativeReturned = true;
         if (!failed) {
             __try {
                 if (hasCommandInput) DiagCommand_(mgr, commandInput, msg, consumed ? "overlay-consumed" : "after", result, inputLevel);
-                if (!g_restoreBusy && !g_restoreFatal && g_messageDepth == 1) {
+                if (!g_restoreBusy && !g_restoreFatal
+                    && g_messageFrames.Boundary(g_battleGeneration, mgr,
+                        CombatIsReadable_(mgr) ? mgr->dlg : nullptr)) {
                     // The native dialog mutates msg into item commands in place.
                     if (hasKeyboardInput) CombatMessageAfter_(mgr, &keyboardInput, result, inputLevel);
                     if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
@@ -724,7 +733,10 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
             __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { DiagHookFault_(); }
         }
     }
-    __finally { --g_messageDepth; }
+    __finally {
+        --g_messageDepth;
+        g_messageFrames.Leave(frame);
+    }
     if (g_restoreFatal) {
         GuardLog_("[Restore] FATAL: unverified partial write; stopping instead of continuing battle");
         RaiseException(0xE0424842, EXCEPTION_NONCONTINUABLE, 0, nullptr);
@@ -792,6 +804,8 @@ static void BattleReset_()
     g_battleListDirty = true;
     g_restoreRequest.pending = false;
     g_restoreFatal = false;
+    // 消息帧栈不在换场清零：旧场祖先帧按场次归属自然失效，其 finally 出栈
+    // 即移除（见 Hook_CombatMessage_ / BattleMessageFrames_）。
     g_ui.entries.clear();
     g_ui.scroll = {};
     g_ui.listGesture = {};
@@ -882,6 +896,9 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         lastDialog = dialog;
         lastGeneration = g_battleGeneration;
     }
+    // 读档请求独立维护：超时/换场/结束在这里取消，不受消息深度与恢复安全点
+    // 门控（2026-10-10 玩家日志：消费入口被绝对深度阻断时请求挂起五分多秒）。
+    UiMaintainRestore_(mgr);
     if (readable && !mgr->finished && mgr->dlg) {
         if (g_battleInitialized && g_battleListDirty && BattleMainDialog_(mgr)) {
             if (UiReloadEntries_(mgr)) {

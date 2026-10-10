@@ -200,6 +200,55 @@ int wmain(int argc, wchar_t** argv)
         "raw mouse transitions are handled only by the system mouse hook");
     Check(BattleUiMayConsumeMessage_(4), "hover can update overlay state");
     std::puts("PASS: native commands and keyboard input never enter overlay click routing");
+    {
+        // 2026-10-10 玩家日志回归：绝对消息深度阻断读档消费与超时取消。
+        const BattleRestoreMaintainState_ base = {true, true, 21, 21, 0};
+        Check(BattleRestoreMaintainDecision_(base) == BattleRestoreMaintain_::Keep,
+            "fresh queued request in the same battle is kept");
+        Check(BattleRestoreMaintainDecision_({false, true, 21, 21, 60000})
+            == BattleRestoreMaintain_::Keep, "maintenance ignores already-consumed requests");
+        Check(BattleRestoreMaintainDecision_({true, false, 21, 21, 60000})
+            == BattleRestoreMaintain_::CancelBattleChanged, "finished/unreadable battle cancels first");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 25, 60000})
+            == BattleRestoreMaintain_::CancelBattleChanged, "generation change cancels before timeout");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 4999ul})
+            == BattleRestoreMaintain_::Keep, "under five seconds still waits for the boundary");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 5000ul})
+            == BattleRestoreMaintain_::Keep, "exactly five seconds keeps strict-greater timeout");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 5001ul})
+            == BattleRestoreMaintain_::CancelTimeout, "over five seconds cancels even without any boundary");
+        BattleMessageFrames_ frames = {};
+        BattleMessageFrame_ ancestor = {};
+        frames.Enter(ancestor, 19u, (const void*)0x11110000, (const void*)0xAAAA0000);
+        ancestor.nativeReturned = true;
+        Check(frames.Depth(19u) == 1 && frames.Depth(21u) == 0,
+            "old-generation ancestor never counts toward the current battle depth");
+        BattleMessageFrame_ outer = {};
+        frames.Enter(outer, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
+        Check(!frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
+            "outermost frame is not a boundary while the original function is still running");
+        outer.nativeReturned = true;
+        Check(frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000)
+            && frames.Depth(21u) == 1,
+            "outermost returned frame of the current battle is the restore boundary despite stale ancestors");
+        BattleMessageFrame_ nested = {};
+        frames.Enter(nested, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
+        nested.nativeReturned = true;
+        Check(!frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
+            "same-battle nested modal (options dialog) is not a boundary");
+        frames.Leave(nested);
+        Check(frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
+            "boundary returns after the nested modal unwinds");
+        Check(!frames.Boundary(21u, (const void*)0x33330000, (const void*)0xBBBB0000)
+            && !frames.Boundary(21u, (const void*)0x22220000, (const void*)0xCCCC0000)
+            && !frames.Boundary(21u, (const void*)0x22220000, nullptr),
+            "manager reuse, dialog replacement and missing dialog all reject the boundary");
+        frames.Leave(outer);
+        frames.Leave(ancestor);
+        Check(frames.top == nullptr && !frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
+            "empty stack has no boundary");
+        std::puts("PASS: restore maintenance timeout/generation and per-battle message boundary policy");
+    }
     Check(argc == 2, "fixture directory argument");
     const std::wstring root = argv[1];
     Check(CreateDirectoryW(root.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS,

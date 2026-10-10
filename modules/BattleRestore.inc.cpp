@@ -124,6 +124,10 @@ static bool g_restoreFatal = false;static bool g_battleInitialized = false;
 static unsigned g_battleGeneration = 0;
 static DWORD g_battleThread = 0;
 static int g_messageDepth = 0;
+// 战斗消息帧栈（BattleInputPolicy.hpp）：每个 Hook_CombatMessage_ 调用一个
+// 栈上帧，记录进入时的场次/管理器/对话框。换场不清零；旧场未退栈祖先帧
+// 因场次不同不参与当前场计数，其 finally 出栈即自然消失。
+static BattleMessageFrames_ g_messageFrames;
 static int g_executorDepth = 0;
 static int g_spellDepth = 0;
 static bool g_battleListDirty = true;
@@ -153,7 +157,13 @@ static bool CombatStorageWindow_(const H3CombatManager* mgr)
 
 static bool RestoreWindow_(const H3CombatManager* mgr)
 {
-    return GetCurrentThreadId() == g_battleThread && g_messageDepth == 1
+    // 消费边界 = 当前战斗最外层消息帧且原函数已返回（2026-10-10 玩家日志修复）：
+    // 旧绝对 g_messageDepth==1 会被战斗选项模态期间重打后未退栈的祖先帧永久
+    // 抬高（玩家实机 depth 3..6），读档请求排队后永远无人消费。帧栈按场次归属
+    // 计数：旧场祖先不计数；同场嵌套（>=2）仍拒绝；管理器/对话框身份在此重新
+    // 核验，mgr 地址被新战斗复用也不会误判为同一场。
+    return GetCurrentThreadId() == g_battleThread
+        && g_messageFrames.Boundary(g_battleGeneration, mgr, mgr ? mgr->dlg : nullptr)
         && CombatStorageWindow_(mgr);
 }
 

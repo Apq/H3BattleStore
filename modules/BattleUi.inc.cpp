@@ -922,7 +922,8 @@ static void UiConfirmAndRestore_(const UiSaveEntry& entry)
     g_restoreRequest.requested = GetTickCount();
     g_restoreRequest.pending = true;
     ClearBattleInputs_();
-    LogInfo("[Load] queued generation=%u path=%s", g_battleGeneration, DiagUtf8_(entry.path).c_str());
+    LogInfo("[Load] queued generation=%u depth=%d battle_depth=%d path=%s", g_battleGeneration,
+        g_messageDepth, g_messageFrames.Depth(g_battleGeneration), DiagUtf8_(entry.path).c_str());
 }
 
 // Player text never includes raw diagnostics, even for a future unknown error.
@@ -1261,6 +1262,36 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
     _snprintf(done, sizeof(done), "已读档：第 %d 回合", capture.turn);
     UiMarkNoticeHighlight_(done);
     // No rendering after the final RNG commit in this handler.
+}
+
+// 独立的读档请求维护（2026-10-10 修复）：每帧在绘制循环调用，不受恢复安全点
+// 与消息深度门控。只取消排队状态（超时/换场/战斗结束），绝不写战斗内存。
+// 之前超时检查埋在 UiProcessRestore_ 里，消费入口被绝对深度阻断时连取消
+// 都不运行，玩家侧表现为点击读档后红灯五分多钟。
+static void UiMaintainRestore_(H3CombatManager* mgr)
+{
+    if (!g_restoreRequest.pending || g_restoreBusy || g_restoreFatal) return;
+    const bool battleAvailable = CombatIsReadable_(mgr) && !mgr->finished;
+    const BattleRestoreMaintainState_ state = {true, battleAvailable,
+        g_restoreRequest.generation, g_battleGeneration,
+        (unsigned long)(GetTickCount() - g_restoreRequest.requested)};
+    switch (BattleRestoreMaintainDecision_(state)) {
+    case BattleRestoreMaintain_::Keep:
+        return;
+    case BattleRestoreMaintain_::CancelBattleChanged:
+        LogInfo("[Load] cancelled reason=battle-changed entry_generation=%u current_generation=%u age_ms=%lu",
+            g_restoreRequest.generation, g_battleGeneration, state.ageMs);
+        g_restoreRequest.pending = false;
+        return;
+    case BattleRestoreMaintain_::CancelTimeout:
+    default:
+        LogInfo("[Load] cancelled reason=timeout age_ms=%lu generation=%u depth=%d battle_depth=%d window=%d",
+            state.ageMs, g_battleGeneration, g_messageDepth,
+            g_messageFrames.Depth(g_battleGeneration), CombatStorageWindow_(mgr) ? 1 : 0);
+        g_restoreRequest.pending = false;
+        UiMarkNotice_("读档等待超时，已取消；请重试");
+        return;
+    }
 }
 
 static void UiProcessRestore_(H3CombatManager* mgr, int result)
