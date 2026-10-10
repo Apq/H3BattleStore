@@ -731,22 +731,12 @@ static void UiDrawBar_(H3CombatManager* mgr)
     }
 }
 
-// 收起切换后清上一帧呈现矩形（第二套折叠界面用）：与 UiDrawBar_ 的残影恢复
-// 同源，把旧区域从 screenPcx16 拷回 backbuffer 并刷新，随后失效跟踪。
-static void UiRestoreTail_()
+// 折叠版收起时失效残影跟踪（第二套折叠界面用）。战场内不需要像战场外那样
+// 手工把旧区域从 screenPcx16 拷回：战斗场景每帧自动重绘 backbuffer（悬浮框
+// 本身也是每帧重画），旧的大矩形在收起后自然被场景覆盖。这里只把跟踪置为
+// 无效，让下一次展开帧直接重画、不误判 rectChanged。
+static void UiInvalidateTail_()
 {
-    H3WindowManager* wnd = H3WindowManager::Get();
-    if (uiTailX < 0) return;
-    if (wnd && wnd->screenPcx16) {
-        if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
-                uiTailBlockH, uiTailX, uiTailY))
-            wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
-        if (uiTailH > uiTailBlockH
-            && UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY + uiTailBlockH,
-                uiTailListWidth, uiTailH - uiTailBlockH, uiTailX, uiTailY + uiTailBlockH))
-            wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth,
-                uiTailH - uiTailBlockH);
-    }
     uiTailX = -1;
     uiTailY = uiTailH = uiTailBlockH = uiTailListWidth = -1;
 }

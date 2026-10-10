@@ -100,9 +100,11 @@ public:
             g_foldPanelH = g_uiLayout.Height(UiListRows_());
             return;
         }
-        // 收起：先擦上一帧展开矩形，再只画状态灯。灯色跟随保存窗口门禁，
-        // 语义与旧界面同一判定（UiStorageAllowed_）。
-        UiRestoreTail_();
+        // 收起：只画状态灯，失效残影跟踪。战场内每帧自动重绘，上一帧展开的
+        // 大矩形会被战斗场景自然覆盖，不需要从 screenPcx16 拷回（与战场外
+        // 区域的差异，2026-10-11 用户纠正）。灯色跟随保存窗口门禁，语义与
+        // 旧界面同一判定（UiStorageAllowed_）。
+        UiInvalidateTail_();
         const bool storageAllowed = UiStorageAllowed_(mgr);
         const int lampW = 2 * hbs_ui::StatusLampRadius + 1;
         if (!g_foldLamp || !g_foldLamp->buffer
