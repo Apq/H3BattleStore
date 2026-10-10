@@ -37,6 +37,11 @@ static int g_uiBarAnchorX = 8;
 static int g_uiBarAnchorY = 8;
 // 折叠版把状态灯移动到面板右上角，面板从灯向左、向下展开。
 static bool g_uiFoldLayout = false;
+// 灯在合成图内的中心：X 距右缘留 1px（使 radius+1 的外框圈 463..479 不
+// 越出 480 宽合成图），Y 在首行带内。收起小图与展开面板共用同一几何，
+// 切换时灯严格不跳位；BattleFoldBar.inc.cpp 的灯心/锚点推导也用这两个值。
+static const int kFoldLampInBarX = kUiBarWidth - hbs_ui::StatusLampRadius - 2;
+static const int kFoldLampInBarY = hbs_ui::StatusLampRadius + 1;
 // HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
 static const int kUiLogPackX = 392;
 static const int kUiLogPackWidth = 84;
@@ -588,13 +593,12 @@ static void UiDrawBar_(H3CombatManager* mgr)
         font->TextDraw(c, label, 6, UiBandHeight_(), hbs_ui::StatusLabelWidth, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
         const bool storageAllowed = UiStorageAllowed_(mgr);
-        const int statusLampX = g_uiFoldLayout ? kUiBarWidth - hbs_ui::StatusLampRadius - 1
-            : hbs_ui::StatusLampX;
-        const int statusLampY = g_uiFoldLayout ? hbs_ui::StatusLampRadius + 1
+        const int statusLampX = g_uiFoldLayout ? kFoldLampInBarX : hbs_ui::StatusLampX;
+        const int statusLampY = g_uiFoldLayout ? kFoldLampInBarY
             : hbs_ui::StatusLampY(g_uiLayout);
         if (g_uiFoldLayout) {
             // 折叠版把灯移到面板右上角：先铺一块深色衬底，再画灯，
-            // 使底色描边完整落在面板内、不压住日志等级热区边界。
+            // 衬底左缘 463、右缘 479，整圈都在 480 宽合成图内。
             c->FillRectangle(statusLampX - hbs_ui::StatusLampRadius - 1,
                 statusLampY - hbs_ui::StatusLampRadius - 1,
                 2 * hbs_ui::StatusLampRadius + 3, 2 * hbs_ui::StatusLampRadius + 3,

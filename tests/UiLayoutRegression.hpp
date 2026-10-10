@@ -119,6 +119,20 @@ static_assert(6 + hbs_ui::StatusLabelWidth < hbs_ui::StatusLampX - hbs_ui::Statu
 static_assert(hbs_ui::StatusLampY(normal) - hbs_ui::StatusLampRadius - 1 > normal.bandHeight);
 static_assert(hbs_ui::StatusLampY(tall) + hbs_ui::StatusLampRadius + 1 < tall.ListTop());
 static_assert(hbs_ui::LampHalfWidth(0, 7) == 7 && hbs_ui::LampHalfWidth(7, 7) == 0);
+// 灯环越界回归（2026-10-11 02:4x 闪退/彩条实证）：UiDrawStatusLamp_ 的外框圈
+// 半径用 radius+1，故"灯心 + 外框圈"整体跨度是 2(r+1)+1。灯心落在距右缘
+// (r+2) 处时（折叠版 kFoldLampInBarX 的推导式，先用 HotkeyX 反推条宽），
+// 外框圈右缘必须仍在条内——旧代码按 2r+1 分配小图、灯心取 kUiBarWidth-r-1，
+// 单边越界 1px 踩相邻堆内存，表现为收起后战场偶发彩色条纹。
+constexpr int kLampRingRadius = hbs_ui::StatusLampRadius + 1;
+constexpr int kLampSpanFromBarWidth = hbs_ui::HotkeyX + 58;     // HotkeyX = 条宽-58
+constexpr int kFoldLampInBarXTest = kLampSpanFromBarWidth - hbs_ui::StatusLampRadius - 2;
+static_assert(hbs_ui::LampHalfWidth(kLampRingRadius, kLampRingRadius) == 0);
+static_assert(kFoldLampInBarXTest - kLampRingRadius >= 0);
+static_assert(kFoldLampInBarXTest + kLampRingRadius < kLampSpanFromBarWidth);
+// 小图整体跨度 = 2*(r+1)+1；左缘取灯心-(r+1)，右缘（开区间）必须不越条宽。
+static_assert(kFoldLampInBarXTest - kLampRingRadius + 2 * kLampRingRadius + 1
+    <= kLampSpanFromBarWidth);
 static_assert(hbs_ui::StatusLampColor(true).g > hbs_ui::StatusLampColor(true).r);
 static_assert(hbs_ui::StatusLampColor(false).r > hbs_ui::StatusLampColor(false).g);
 // 折叠界面热区语义（BattleFoldBar）：展开态必须光标留在面板内；收起态只有灯
