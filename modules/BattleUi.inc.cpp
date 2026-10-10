@@ -870,6 +870,8 @@ static void UiPackLogs_()
     if (packing || (lastPack && now - lastPack < 1000)) return;
     lastPack = now;
     packing = true;
+    GuardFlushFaults_("log-feedback", true);
+    LogRecentContext_("log-feedback");
     char reason[192] = {};
     if (PackRecentLogs_(nullptr, 0, reason, sizeof(reason))) {
         UiMarkNoticeHighlight_("日志已打包并复制，可粘贴发送");

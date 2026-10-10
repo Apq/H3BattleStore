@@ -948,7 +948,7 @@ static bool RestoreSameBattle_(H3CombatManager* mgr, const CodecCapture& capture
             if (error) *error = "回滚后刷新战场发生异常，已停止战斗";
             return false;
         }
-        if (!DiagVerifyRestore_(mgr, before)) g_restoreFatal = true;
+        if (!DiagVerifyRestore_(mgr, before, "after-rollback")) g_restoreFatal = true;
         if (error) *error = g_restoreFatal ? "rollback verification failed" : "restore mismatch; rolled back";
         if (!g_restoreFatal) {
             objects->Release(error);

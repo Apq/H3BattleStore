@@ -6,10 +6,77 @@
 
 namespace H3AutoGuard {
 
-// 异常聚合限流参数：同一钩子首次异常记完整详情，之后每 kFaultLogEvery
-// 次记一行计数汇总。钩子永远保持可用（异常每次都被吞掉并走安全默认，
-// 下次调用继续尝试——熔断会让功能静默失效，不做）。
-enum { kRingCap = 8, kFaultLogEvery = 100 };
+// 异常聚合限流参数：同一钩子首次异常立即记详情，之后由正常周期最多
+// 每 5 秒记一次新增/累计汇总。钩子永远保持可用（异常每次都被吞掉并走
+// 安全默认，下次调用继续尝试——熔断会让功能静默失效，不做）。
+enum { kRingCap = 8, kFaultReportIntervalMs = 5000 };
+
+// 纯策略用的异常签名；运行时写入由 CrashGuard.hpp 的 try-lock 保护。
+struct GuardFaultSignature {
+    unsigned long       code;
+    unsigned long long  fault_addr;
+    unsigned long long  av_addr;
+    unsigned long       av_operation;
+    bool                has_av;
+
+    GuardFaultSignature()
+        : code(0), fault_addr(0), av_addr(0), av_operation(0), has_av(false) {}
+
+    GuardFaultSignature(unsigned long c, unsigned long long fault,
+        unsigned long long av, unsigned long operation, bool avDetails = true)
+        : code(c), fault_addr(fault), av_addr(av), av_operation(operation),
+          has_av(c == 0xC0000005 && avDetails) {}
+};
+
+// 每个钩子独立的时间窗口。DWORD 差值用无符号回绕算法，故 tick 从
+// 0xFFFFFFFF 回到 0 仍能正确判断五秒边界。force 收账只清 pending，
+// 不改下一周期的 last_report_tick。
+struct GuardFaultWindow {
+    unsigned long total;
+    unsigned long reported;
+    unsigned long last_report_tick;
+    bool          has_report_tick;
+    bool          has_first;
+    GuardFaultSignature first;
+    GuardFaultSignature recent;
+
+    GuardFaultWindow()
+        : total(0), reported(0), last_report_tick(0), has_report_tick(false),
+          has_first(false), first(), recent() {}
+
+    bool Observe(const GuardFaultSignature& signature)
+    {
+        ++total;
+        if (!has_first) {
+            has_first = true;
+            first = signature;
+            recent = signature;
+            return true;
+        }
+        recent = signature;
+        return false;
+    }
+
+    bool Pending() const { return total != reported; }
+
+    bool Due(unsigned long now, bool force) const
+    {
+        if (!Pending()) return false;
+        return force || !has_report_tick
+            || (unsigned long)(now - last_report_tick) >= kFaultReportIntervalMs;
+    }
+
+    unsigned long NewCount() const { return total - reported; }
+
+    void Commit(unsigned long now, bool force)
+    {
+        reported = total;
+        if (!force) {
+            last_report_tick = now;
+            has_report_tick = true;
+        }
+    }
+};
 
 // ---- 异常码分类与命名 ----
 

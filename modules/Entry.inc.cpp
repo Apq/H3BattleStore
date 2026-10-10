@@ -401,7 +401,7 @@ static volatile LONG g_saveEdgeConsumed = 0;
 static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin)
 {
     if (InterlockedExchange(&g_saveEdgeConsumed, 1)) {
-        LogDebug("[Input] duplicate edge suppressed origin=%s", origin);
+        LogTrace("[Input] duplicate edge suppressed origin=%s", origin);
         return;
     }
     if (!CombatPlayerWindow_(mgr, messageResult, nullptr)) return;
@@ -534,7 +534,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
         g_ui.listGesture.CancelClick();
         InterlockedExchange(&g_pendingClickX, -1);
         InterlockedExchange(&g_pendingClickY, -1);
-        LogDebug("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_ui.entries.size());
+        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_ui.entries.size());
         return true;
     }
     if (move) return hitList;
@@ -557,7 +557,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
         if (hitList && !CombatPlayerWindow_(combat, 0, nullptr)) return true;
         InterlockedExchange(&g_pendingClickX, gameX);
         InterlockedExchange(&g_pendingClickY, gameY);
-        LogDebug("点击已吞并：game=(%d,%d)", gameX, gameY);
+        LogDetail_("点击已吞并：game=(%d,%d)", gameX, gameY);
         return true;
     }
     if (rightDown) { g_ui.listRightHeld = swallow; return swallow; }
@@ -649,12 +649,12 @@ static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result, in
         const bool downNow = (GetAsyncKeyState(g_ui.saveKey) & 0x8000) != 0;
         if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
             if (!downNow) g_ui.rebindKey = 0;
-            WriteLogLv(inputLevel, "[Input] save suppressed source=game reason=rebind-latch");
+            LogTrace("[Input] save suppressed source=game reason=rebind-latch");
         } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
             && now >= g_ui.rebindGuardUntil) {
             TrySave_(mgr, result, "game-message");
         } else {
-            WriteLogLv(inputLevel, "[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
+            LogTrace("[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
                 downNow ? 1 : 0, msgKeyWasDown ? 1 : 0, g_uiWaitSaveUntil ? 1 : 0,
                 now < g_ui.rebindGuardUntil ? 1 : 0);
         }
@@ -665,8 +665,9 @@ static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result, in
 static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
     const H3Msg* translated, const char* phase, int result, int level)
 {
-    if (!LogEnabled_(level) || !CombatIsReadable_(mgr)) return;
-    WriteLogLv(level, "[Command] phase=%s generation=%u depth=%d bdepth=%d cmd=%d subtype=%d item=%d pos=%d,%d translated=%d/%d/%d result=%d action=%d/%d/%d/%d current=%d:%d activeSide=%d rebind=%d control=%d",
+    if (!LogEnabled_(LOG_DEBUG) || !CombatIsReadable_(mgr)) return;
+    char text[512];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "[Command] phase=%s generation=%u depth=%d bdepth=%d cmd=%d subtype=%d item=%d pos=%d,%d translated=%d/%d/%d result=%d action=%d/%d/%d/%d current=%d:%d activeSide=%d rebind=%d control=%d",
         phase, g_battleGeneration, g_messageDepth, g_messageFrames.Depth(g_battleGeneration), (int)input.command, (int)input.subtype,
         input.itemId, input.position.x, input.position.y,
         translated ? (int)translated->command : -1, translated ? (int)translated->subtype : -1,
@@ -674,6 +675,8 @@ static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
         mgr->actionParameter, mgr->actionTarget, mgr->actionParameter2,
         mgr->currentMonSide, mgr->currentMonIndex, mgr->currentActiveSide,
         g_ui.awaitingRebind ? 1 : 0, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)));
+    LogDetail_("%s", text);
+    if (level == LOG_DEBUG) LogDebug("%s", text);
 }
 
 static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3Msg* msg)
@@ -687,21 +690,26 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
     bool hasKeyboardInput = false;
     H3Msg commandInput = {};
     bool hasCommandInput = false;
-    int inputLevel = LOG_DEBUG;
+    int inputLevel = LOG_TRACE;
     __try {
         bool failed = false, consumed = false;
         __try {
             if (msg && BattleIsKeyboardMessage_((int)msg->command)) {
                 keyboardInput = *msg;
                 hasKeyboardInput = true;
-                inputLevel = g_commandKeys.Level((int)keyboardInput.subtype,
+                const int edgeLevel = g_commandKeys.Level((int)keyboardInput.subtype,
                     keyboardInput.command == eMsgCommand::KEY_DOWN);
+                const char letter = UiVirtualKeyToLetter_(keyboardInput.subtype, false);
+                inputLevel = LogCommandLevel_(g_ui.awaitingRebind || (letter && letter == g_ui.saveKey)
+                    || keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR, edgeLevel);
             }
             if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr)) {
                 if (LogEnabled_(LOG_DEBUG) && msg
                     && (hasKeyboardInput || ((int)msg->command == 0x200
                         && ((int)msg->subtype == 0xC || (int)msg->subtype == 0xD)))) {
                     commandInput = *msg;
+                    if (!hasKeyboardInput && (msg->itemId == 0x7D8 || msg->itemId == 0x7D9 || msg->itemId == 0x7DA))
+                        inputLevel = LOG_DEBUG;
                     hasCommandInput = true;
                     DiagCommand_(mgr, commandInput, nullptr, "before", 0, inputLevel);
                 }
@@ -750,6 +758,22 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
 }
 
 
+static LogActivityWindow_ g_executeLog, g_spellLog;
+static void DiagActivityFlush_(const char* reason, bool force)
+{
+    const DWORD now = GetTickCount();
+    if (g_executeLog.Due(now, force)) {
+        LogDebug("[Activity] kind=execute generation=%u reason=%s count=%u max_depth=%d last_action=%d last_result=%d",
+            g_battleGeneration, reason, g_executeLog.count, g_executeLog.maxDepth, g_executeLog.lastId, g_executeLog.lastResult);
+        g_executeLog.Reported(now, force);
+    }
+    if (g_spellLog.Due(now, force)) {
+        LogDebug("[Activity] kind=spell generation=%u reason=%s count=%u max_depth=%d last_spell=%d",
+            g_battleGeneration, reason, g_spellLog.count, g_spellLog.maxDepth, g_spellLog.lastId);
+        g_spellLog.Reported(now, force);
+    }
+}
+
 static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int parameter)
 {
     ++g_executorDepth;
@@ -760,7 +784,12 @@ static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int
         __try {
             if (LogEnabled_(LOG_DEBUG) && CombatIsReadable_(mgr)) {
                 actionBefore = (int)mgr->action;
-                LogDebug("[Execute] begin generation=%u depth=%d action=%d/%d/%d/%d turn=%d current=%d:%d active=%p",
+                g_executeLog.Observe(GetTickCount(), actionBefore, g_executorDepth);
+                LogDetail_("[Execute] begin generation=%u depth=%d action=%d/%d/%d/%d turn=%d current=%d:%d active=%p",
+                    g_battleGeneration, g_executorDepth, actionBefore, mgr->actionParameter,
+                    mgr->actionTarget, mgr->actionParameter2, mgr->turn,
+                    mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack);
+                if (g_battleInitialized) LogDebug("[Action] generation=%u depth=%d action=%d/%d/%d/%d turn=%d current=%d:%d active=%p",
                     g_battleGeneration, g_executorDepth, actionBefore, mgr->actionParameter,
                     mgr->actionTarget, mgr->actionParameter2, mgr->turn,
                     mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack);
@@ -769,10 +798,14 @@ static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int
         __except (GuardCrashFilter_(GUARD_EXECUTE, GetExceptionInformation())) {}
         result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter);
         __try {
-            if (actionBefore >= 0 && CombatIsReadable_(mgr))
-                LogDebug("[Execute] end generation=%u depth=%d action_before=%d action_after=%d result=%d turn=%d current=%d:%d active=%p",
+            if (actionBefore >= 0 && CombatIsReadable_(mgr)) {
+                g_executeLog.lastResult = result;
+                LogDetail_("[Execute] end generation=%u depth=%d action_before=%d action_after=%d result=%d turn=%d current=%d:%d active=%p",
                     g_battleGeneration, g_executorDepth, actionBefore, (int)mgr->action,
                     result, mgr->turn, mgr->currentMonSide, mgr->currentMonIndex, mgr->activeStack);
+                if (result == 2) LogDebug("[Execute] close generation=%u depth=%d action=%d current=%d:%d",
+                    g_battleGeneration, g_executorDepth, actionBefore, mgr->currentMonSide, mgr->currentMonIndex);
+            }
         }
         __except (GuardCrashFilter_(GUARD_EXECUTE, GetExceptionInformation())) {}
     }
@@ -787,13 +820,16 @@ static void __stdcall Hook_BattleCastSpell_(HiHook* hook, H3CombatManager* mgr,
     // Finally repairs tracking only; native exceptions must propagate unchanged.
     __try {
         __try {
-            LogDebug("[Spell] begin generation=%u depth=%d spell=%d hex=%d cast_type=%d",
+            if (LogEnabled_(LOG_DEBUG)) g_spellLog.Observe(GetTickCount(), spell, g_spellDepth);
+            LogDetail_("[Spell] begin generation=%u depth=%d spell=%d hex=%d cast_type=%d",
+                g_battleGeneration, g_spellDepth, spell, hex, castType);
+            if (g_battleInitialized) LogDebug("[Cast] generation=%u depth=%d spell=%d hex=%d cast_type=%d",
                 g_battleGeneration, g_spellDepth, spell, hex, castType);
         }
         __except (GuardCrashFilter_(GUARD_SPELL, GetExceptionInformation())) {}
         THISCALL_7(void, hook->GetDefaultFunc(), mgr, spell, hex, castType, secondHex, expertise, power);
         __try {
-            LogDebug("[Spell] end generation=%u depth=%d spell=%d", g_battleGeneration, g_spellDepth, spell);
+            LogDetail_("[Spell] end generation=%u depth=%d spell=%d", g_battleGeneration, g_spellDepth, spell);
         }
         __except (GuardCrashFilter_(GUARD_SPELL, GetExceptionInformation())) {}
     }
@@ -802,6 +838,8 @@ static void __stdcall Hook_BattleCastSpell_(HiHook* hook, H3CombatManager* mgr,
 
 static void BattleReset_()
 {
+    GuardFlushFaults_("battle-reset", true);
+    DiagActivityFlush_("battle-reset", true);
     ++g_battleGeneration;
     g_battleInitialized = false;
     g_preBattleKey_.clear();
@@ -883,6 +921,8 @@ static void UiPollLogLevelHover_()
 
 static void CombatCycleAfter_(H3CombatManager* mgr, int result)
 {
+    GuardFlushFaults_("cycle", false);
+    DiagActivityFlush_("cycle", false);
     static DWORD lastFrame = 0;
     static H3CombatManager* lastManager = nullptr;
     static H3CombatDlg* lastDialog = nullptr;
@@ -1016,6 +1056,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         __except (GuardCrashFilter_(GUARD_INIT, GetExceptionInformation())) {}
     }
     if (reason == DLL_PROCESS_DETACH) {
+        __try { DiagActivityFlush_("detach", true); LogRecentContext_("detach"); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (g_combatKeyboardHook) UnhookWindowsHookEx(g_combatKeyboardHook);
         if (g_combatMouseHook) UnhookWindowsHookEx(g_combatMouseHook);
         GuardShutdown();

@@ -1,5 +1,5 @@
 // 单游戏线程操作上下文。仅在请求/阶段变化时落盘，不逐帧刷战场状态。
-static const char* kDiagnosticBuild_ = "battle-diag-message-registry";
+static const char* kDiagnosticBuild_ = "battle-diag-log-budget";
 static LONG g_diagSequence = 0;
 static struct {
     LONG id;
@@ -28,6 +28,7 @@ static void DiagState_(const H3CombatManager* mgr, const char* event)
         LogWarn("[State op=%ld] event=%s mgr=%p unreadable", g_diag.id, event, mgr);
         return;
     }
+    if (!LogEnabled_(LOG_DEBUG)) return;
     int moving = 0, firstMoving = -1;
     for (int i = 0; i < 187; ++i) if (*((const uint8_t*)mgr + 0x14031 + i)) {
         if (firstMoving < 0) firstMoving = i;
@@ -88,6 +89,7 @@ static void DiagCursor_(int side, int slot)
 
 static void DiagEnd_(const char* outcome, const char* reason)
 {
+    if (LogOutcomeLevel_(outcome, g_diag.writing) >= LOG_WARN) LogRecentContext_(outcome);
     WriteLogLv(LogOutcomeLevel_(outcome, g_diag.writing),
         "[Op %ld] end kind=%s outcome=%s stage=%s side=%d slot=%d elapsed_ms=%lu writing=%d reason=%s",
         g_diag.id, g_diag.kind ? g_diag.kind : "none", outcome,
@@ -100,7 +102,10 @@ static void DiagEnd_(const char* outcome, const char* reason)
 static void DiagSummary_(const CodecCapture& capture, const char* event)
 {
     unsigned occupied = 0, alive = 0, spells = 0, relations = 0;
+    const int detailLevel = !strcmp(event, "readback") ? LOG_TRACE : LOG_DEBUG;
     for (int side = 0; side < 2; ++side) {
+        char compact[768] = {};
+        unsigned compactCount = 0;
         for (int slot = 0; slot < 21; ++slot) {
             const CodecStack& s = capture.stacks[side][slot];
             if (!s.occupied) continue;
@@ -108,19 +113,33 @@ static void DiagSummary_(const CodecCapture& capture, const char* event)
             if (s.numberAlive > 0) ++alive;
             spells += (unsigned)s.spellIds.size();
             for (int i = 0; i < 4; ++i) relations += (unsigned)s.relations[i].size();
-            LogDebug("[Stack op=%ld] event=%s slot=%d:%d type=%d pos=%d alive=%d dead=%d hpLost=%d start=%d morale=%d luck=%d spells=%u clone=%d animation=%d/%d shots=%d ammoCart=%d",
+            // 一行最多4槽，保留原部队诊断字段；机器装备另记Hero，缩减重复行数。
+            if (LogEnabled_(detailLevel)) {
+                const size_t used = strlen(compact);
+                _snprintf_s(compact + used, sizeof(compact) - used, _TRUNCATE,
+                    "%s%d:t%d/p%d/n%d/d%d/h%d/s%d/m%d/l%d/e%u/c%d/a%d/f%d.%d", used ? " " : "", slot,
+                    s.type, s.position, s.numberAlive, s.numberForeverDead, s.healthLost,
+                    s.numberAtStart, s.morale, s.luck, (unsigned)s.spellIds.size(), s.cloneId,
+                    s.infoCombat[6], s.animation, s.animationFrame);
+                if (++compactCount == 4) {
+                    WriteLogLv(detailLevel, "[Stacks op=%ld] event=%s side=%d %s", g_diag.id, event, side, compact);
+                    compact[0] = 0; compactCount = 0;
+                }
+            }
+            LogTrace("[Stack op=%ld] event=%s slot=%d:%d type=%d pos=%d alive=%d dead=%d hpLost=%d start=%d morale=%d luck=%d spells=%u clone=%d animation=%d/%d shots=%d ammoCart=%d",
                 g_diag.id, event, side, slot, s.type, s.position, s.numberAlive, s.numberForeverDead,
                 s.healthLost, s.numberAtStart, s.morale, s.luck, (unsigned)s.spellIds.size(),
                 s.cloneId, s.animation, s.animationFrame, s.infoCombat[6], capture.warMachines[side][1].id);
         }
-        LogDebug("[Hero op=%ld] event=%s side=%d present=%d machines=%d/%d,%d/%d,%d/%d,%d/%d",
+        if (compactCount) WriteLogLv(detailLevel, "[Stacks op=%ld] event=%s side=%d %s", g_diag.id, event, side, compact);
+        WriteLogLv(detailLevel, "[Hero op=%ld] event=%s side=%d present=%d machines=%d/%d,%d/%d,%d/%d,%d/%d",
             g_diag.id, event, side, capture.heroPresent[side] ? 1 : 0,
             capture.warMachines[side][0].id, capture.warMachines[side][0].subtype,
             capture.warMachines[side][1].id, capture.warMachines[side][1].subtype,
             capture.warMachines[side][2].id, capture.warMachines[side][2].subtype,
             capture.warMachines[side][3].id, capture.warMachines[side][3].subtype);
     }
-    LogInfo("[Snapshot op=%ld] event=%s version=%u turn=%d current=%d:%d occupied=%u alive=%u obstacles=%u logs=%u spells=%u relations=%u mana=%d/%d casted=%d/%d rngTls=%08X rngMirror=%08X",
+    WriteLogLv(LogSnapshotLevel_(event), "[Snapshot op=%ld] event=%s version=%u turn=%d current=%d:%d occupied=%u alive=%u obstacles=%u logs=%u spells=%u relations=%u mana=%d/%d casted=%d/%d rngTls=%08X rngMirror=%08X",
         g_diag.id, event, capture.version, capture.turn, capture.currentMonSide, capture.currentMonIndex,
         occupied, alive, (unsigned)capture.obstacles.size(), (unsigned)capture.logLines.size(),
         spells, relations, (int)capture.spellPoints[0], (int)capture.spellPoints[1],
@@ -129,17 +148,18 @@ static void DiagSummary_(const CodecCapture& capture, const char* event)
 
 static void DiagSections_(const std::vector<hbs::ArchiveSection>& sections, const char* event)
 {
-    if (!LogEnabled_(LOG_DEBUG)) return;
+    if (!LogEnabled_(LOG_TRACE)) return;
     for (size_t i = 0; i < sections.size(); ++i) {
         const hbs::ArchiveSection& s = sections[i];
-        LogDebug("[Section op=%ld] event=%s id=%u bytes=%u crc32=%08X", g_diag.id, event, s.id,
+        LogTrace("[Section op=%ld] event=%s id=%u bytes=%u crc32=%08X", g_diag.id, event, s.id,
             (unsigned)s.bytes.size(), hbs::detail::Crc32(s.bytes.data(), s.bytes.size()));
     }
 }
 
 static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::string* error);
 
-static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& expected)
+static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& expected,
+    const char* event = "after-restore")
 {
     DiagStage_("verify.recapture");
     std::unique_ptr<CodecCapture> actualStorage(new CodecCapture{});
@@ -149,7 +169,7 @@ static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& e
         LogError("[Verify op=%ld] recapture failed: %s", g_diag.id, error.c_str());
         return false;
     }
-    DiagSummary_(actual, "after-restore");
+    DiagSummary_(actual, event);
     // Only saved hover intent is invalidated. Actual caches must match exactly.
     std::unique_ptr<CodecCapture> normalized(new CodecCapture(expected));
     CodecInvalidateHover_(normalized.get());
@@ -163,7 +183,7 @@ static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& e
         const hbs::ArchiveSection* got = FindSection_(current, saved[i].id);
         size_t first = 0;
         const bool match = got && CodecSectionEqual_(saved[i], *got, &first);
-        WriteLogLv(match ? LOG_DEBUG : LOG_WARN,
+        if (LogEnabled_(match ? LOG_TRACE : LOG_WARN)) WriteLogLv(match ? LOG_TRACE : LOG_WARN,
             "[Verify op=%ld] section=%u equal=%d expected_bytes=%u actual_bytes=%u first_diff=%u expected_crc=%08X actual_crc=%08X",
             g_diag.id, saved[i].id, match ? 1 : 0, (unsigned)saved[i].bytes.size(),
             got ? (unsigned)got->bytes.size() : 0, (unsigned)first,
@@ -190,6 +210,7 @@ static bool DiagVerifyRestore_(const H3CombatManager* mgr, const CodecCapture& e
         equal = equal && match;
     }
     WriteLogLv(equal ? LOG_INFO : LOG_WARN, "[Verify op=%ld] sections=%u serialized_equal=%d", g_diag.id, (unsigned)saved.size(), equal ? 1 : 0);
-    DiagState_(mgr, "after-restore");
+    if (!equal) LogRecentContext_("verify-mismatch");
+    DiagState_(mgr, event);
     return equal;
 }

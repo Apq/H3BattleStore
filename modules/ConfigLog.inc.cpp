@@ -228,23 +228,25 @@ static void ReadConfig()
     LogInfo("配置加载：MinLevel=%s", LogLevelName_(g_log_level));
 }
 
-static void AppendUtf8LogLine(const char* text)
+static bool AppendUtf8LogLine(const char* text)
 {
-    if (g_disable_log) return;
-    if (!g_log_path_w[0]) return;
+    if (g_disable_log || !g_log_path_w[0]) return false;
     HANDLE h = CreateFileW(g_log_path_w, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
     LARGE_INTEGER pos;
     pos.QuadPart = 0;
     if (SetFilePointerEx(h, pos, &pos, FILE_END) && pos.QuadPart == 0) {
         DWORD written = 0;
         const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
-        WriteFile(h, bom, 3, &written, nullptr);
+        ok = WriteFile(h, bom, 3, &written, nullptr) && written == 3;
     }
     DWORD written = 0;
-    WriteFile(h, text, (DWORD)strlen(text), &written, nullptr);
-    WriteFile(h, "\r\n", 2, &written, nullptr);
+    const DWORD length = (DWORD)strlen(text);
+    ok = WriteFile(h, text, length, &written, nullptr) && written == length && ok;
+    ok = WriteFile(h, "\r\n", 2, &written, nullptr) && written == 2 && ok;
     CloseHandle(h);
+    return ok;
 }
 
 static void WriteLogLv(int level, const char* fmt, ...)

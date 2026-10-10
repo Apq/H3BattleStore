@@ -6,7 +6,7 @@
 //      （异常码中文名 / AV 读写/DEP / 出错模块+偏移 / 历史 / 栈回溯 /
 //      各钩子累计异常），链回前一过滤器，不改默认崩溃行为。
 //   L2 钩子铠甲：钩子入口 __try/__except 吞异常并落盘，走安全默认。
-//   L3 异常聚合：同一钩子首异常记详情、之后每 100 次记一行计数；
+//   L3 异常聚合：同一钩子首异常记详情、之后最多每 5 秒一行汇总；
 //      钩子永远保持可用（不做熔断——那会让功能静默失效）。
 //   L4 版本门卫：挂钩前校验 SoD 数据指纹（力场表 0x63CF18/0x63CF2C，
 //      字节级取证见 H3Note\BattleCrashFix逆向笔记.md），不吻合不挂钩。
@@ -39,8 +39,13 @@
 #pragma once
 
 #include "CrashGuardCore.hpp"
+#ifndef H3_GUARD_CONTEXT_
+#define H3_GUARD_CONTEXT_(reason) true
+#endif
 
 #include <stdio.h>
+#include <stdint.h>
+#include <string.h>
 #include <stdarg.h>
 #include <wchar.h>
 #include <windows.h>
@@ -52,8 +57,14 @@ enum { kMaxGuardHooks = 16 };
 
 struct GuardHookInfo_ {
     const char*    name;
-    volatile LONG  faults;
+    volatile LONG  faults;       // 无论 try-lock 成败，独立累计均保留。
+    volatile LONG  report_lock;  // 单次 CAS，递归/竞争立即放弃，不自旋。
+    volatile LONG  signature_misses;
+    unsigned long signature_total;
+    bool          first_reported;
+    GuardFaultWindow window;
 };
+static volatile LONG s_guard_fault_log_busy = 0; // 跨钩子汇总输出互斥，亦不等待。
 static GuardHookInfo_ s_guard_hooks[kMaxGuardHooks];
 static int            s_guard_hook_count = 0;
 
@@ -99,13 +110,13 @@ static void GuardSetLogPathW(const wchar_t* path)
         lstrcpynW(s_guard_log_path, path, (int)(sizeof(s_guard_log_path) / 2));
 }
 
-static void GuardWriteLine_(const char* utf8_line)
+static bool GuardWriteLine_(const char* utf8_line)
 {
-    if (!s_guard_log_path[0]) return;
+    if (!s_guard_log_path[0]) return false;
     HANDLE f = CreateFileW(s_guard_log_path, FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
+    if (f == INVALID_HANDLE_VALUE) return false;
     SYSTEMTIME st;
     GetLocalTime(&st);
     char head[48];
@@ -115,21 +126,22 @@ static void GuardWriteLine_(const char* utf8_line)
         (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
         (unsigned)st.wMilliseconds);
     DWORD wr = 0;
-    if (hl > 0) WriteFile(f, head, (DWORD)hl, &wr, nullptr);
+    bool ok = hl > 0 && WriteFile(f, head, (DWORD)hl, &wr, nullptr) && wr == (DWORD)hl;
     const DWORD ll = (DWORD)strlen(utf8_line);
-    if (ll) WriteFile(f, utf8_line, ll, &wr, nullptr);
-    WriteFile(f, "\r\n", 2, &wr, nullptr);
+    if (ll) ok = WriteFile(f, utf8_line, ll, &wr, nullptr) && wr == ll && ok;
+    ok = WriteFile(f, "\r\n", 2, &wr, nullptr) && wr == 2 && ok;
     CloseHandle(f);
+    return ok;
 }
 
-static void GuardLog_(const char* fmt, ...)
+static bool GuardLog_(const char* fmt, ...)
 {
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
     va_end(ap);
-    GuardWriteLine_(buf);
+    return GuardWriteLine_(buf);
 }
 
 // ---- 模块解析（崩溃安全：仅 kernel32 查询 + 静态缓冲）----
@@ -162,7 +174,7 @@ static bool GuardResolveModule_(unsigned long long addr, char* name_utf8,
 }
 
 // 把"code+addr(+AV 细节)+模块"落盘成一行。崩溃上下文可直接调用。
-static void GuardLogOne_(const char* tag, unsigned long code,
+static bool GuardLogOne_(const char* tag, unsigned long code,
     unsigned long long addr, const EXCEPTION_RECORD* er)
 {
     char mod[96];
@@ -171,36 +183,141 @@ static void GuardLogOne_(const char* tag, unsigned long code,
         &base, &off);
     const char* name = ExceptionCodeName(code);
     if (code == 0xC0000005 && er && er->NumberParameters >= 2) {
-        GuardLog_("%s 异常 0x%08lX(%s: %s 0x%08llX) addr=0x%08llX%s%s+0x%llX",
+        return GuardLog_("%s 异常 0x%08lX(%s: %s 0x%08llX) addr=0x%08llX%s%s+0x%llX",
             tag, code, name ? name : "未分类",
             AVOperationName(static_cast<unsigned long>(er->ExceptionInformation[0])),
             static_cast<unsigned long long>(er->ExceptionInformation[1]),
             addr, has_mod ? " " : "", has_mod ? mod : "模块未知",
             has_mod ? off : 0ull);
     } else {
-        GuardLog_("%s 异常 0x%08lX(%s) addr=0x%08llX%s%s+0x%llX",
+        return GuardLog_("%s 异常 0x%08lX(%s) addr=0x%08llX%s%s+0x%llX",
             tag, code, name ? name : "未分类", addr,
             has_mod ? " " : "", has_mod ? mod : "模块未知",
             has_mod ? off : 0ull);
     }
 }
 
+// 调用方持有本钩子的 report_lock；跨钩子输出也只尝试一次 CAS。
+// 先报告留存的首次详情，之后摘要仅收账，不声称游戏恢复安全。
+static bool s_guard_context_pending = false;
+static DWORD s_guard_context_attempt = 0;
+static void GuardContext_(const char* reason)
+{
+    s_guard_context_attempt = GetTickCount();
+    __try { s_guard_context_pending = !H3_GUARD_CONTEXT_(reason); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { s_guard_context_pending = true; }
+}
+
+static void GuardTryReportFaultLocked_(int id, DWORD now, const char* reason, bool force, bool allowContext = true)
+{
+    GuardHookInfo_& hook = s_guard_hooks[id];
+    GuardFaultWindow& window = hook.window;
+    window.total = static_cast<unsigned long>(InterlockedCompareExchange(&hook.faults, 0, 0));
+    if (!window.Pending() || !s_guard_log_path[0]) return;
+    if ((hook.first_reported || !window.has_first) && !window.Due(now, force)) return;
+    if (InterlockedCompareExchange(&s_guard_fault_log_busy, 1, 0) != 0) return;
+    __try {
+        if (!window.has_first) {
+            if (GuardLog_("钩子 %s 异常汇总 reason=%s 新增=%lu 累计=%lu 最近签名未留存 签名未留存累计=%ld（钩子保持可用）",
+                    GuardHookName_(id), reason ? reason : "cycle", window.NewCount(),
+                    window.total, InterlockedCompareExchange(&hook.signature_misses, 0, 0)))
+                window.Commit(now, force);
+            return;
+        }
+        if (!hook.first_reported) {
+            // 重建小型 POD 记录，完整首签名仍由原有详情 writer 输出。
+            EXCEPTION_RECORD first = {};
+            first.ExceptionCode = window.first.code;
+            first.NumberParameters = window.first.has_av ? 2 : 0;
+            first.ExceptionInformation[0] = static_cast<ULONG_PTR>(window.first.av_operation);
+            first.ExceptionInformation[1] = static_cast<ULONG_PTR>(window.first.av_addr);
+            if (!GuardLogOne_(GuardHookName_(id), window.first.code,
+                    window.first.fault_addr, &first)) return;
+            if (allowContext && window.first.code != 0xC00000FD) GuardContext_("guard-first");
+            hook.first_reported = true;
+            // 首详情只结清一条；竞争期间的其余异常仍等待周期或 force。
+            if (window.reported < hook.signature_total) ++window.reported;
+            // force 收账不推进周期门控；正常首详情才开始五秒计时。
+            if (!force) {
+                window.last_report_tick = now;
+                window.has_report_tick = true;
+            }
+        }
+        if (window.Due(now, force)) {
+            const GuardFaultSignature& signature = window.recent;
+            const LONG missed = InterlockedCompareExchange(&hook.signature_misses, 0, 0);
+            if (!GuardLog_("钩子 %s 异常汇总 reason=%s 新增=%lu 累计=%lu 最近留存 code=0x%08lX fault_addr=0x%08llX av_addr=0x%08llX av_op=%lu(%s) 签名对应累计=%lu 签名未留存累计=%ld（钩子保持可用）",
+                GuardHookName_(id), reason ? reason : "cycle", window.NewCount(),
+                window.total, signature.code, signature.fault_addr, signature.av_addr,
+                signature.av_operation, signature.has_av
+                    ? AVOperationName(signature.av_operation)
+                    : signature.code == 0xC0000005 ? "AV参数缺失" : "非AV",
+                hook.signature_total, missed)) return;
+            if (allowContext && signature.code != 0xC00000FD) GuardContext_("guard-summary");
+            window.Commit(now, force);
+        }
+    } __finally {
+        InterlockedExchange(&s_guard_fault_log_busy, 0);
+    }
+}
+
+// 正常 cycle：false，距上次周期报告 >=5秒且有余量才输出（也可静默补账）。
+// 换场/退出：true，补账但不重置下一周期门控；没有新增则不输出空汇总。
+static void GuardFlushFaults_(const char* reason, bool force)
+{
+    const DWORD now = GetTickCount();
+    if (s_guard_context_pending && (force || (DWORD)(now - s_guard_context_attempt) >= 5000)
+        && InterlockedCompareExchange(&s_guard_fault_log_busy, 1, 0) == 0) {
+        __try { GuardContext_("guard-context-retry"); }
+        __finally { InterlockedExchange(&s_guard_fault_log_busy, 0); }
+    }
+    for (int id = 0; id < s_guard_hook_count; ++id) {
+        GuardHookInfo_& hook = s_guard_hooks[id];
+        if (InterlockedCompareExchange(&hook.report_lock, 1, 0) != 0) continue;
+        __try {
+            __try {
+                GuardTryReportFaultLocked_(id, now, reason, force);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        } __finally {
+            InterlockedExchange(&hook.report_lock, 0);
+        }
+    }
+}
+
 // ---- 钩子铠甲过滤器（__except 里调用；返回 EXECUTE_HANDLER 吞掉）----
-// 首异常记详情、之后每 100 次记计数；钩子保持可用。
+// 首异常即详情，后最多每5秒一行。保持原吞异常行为，不熔断。
 static int GuardCrashFilter_(int hook_id, EXCEPTION_POINTERS* ep)
 {
     __try {
-        if (!ep || !ep->ExceptionRecord) return EXCEPTION_EXECUTE_HANDLER;
-        const unsigned long code = ep->ExceptionRecord->ExceptionCode;
-        const LONG n = InterlockedIncrement(&s_guard_hooks[hook_id].faults);
-        if (n == 1) {
-            GuardLogOne_(GuardHookName_(hook_id), code,
-                reinterpret_cast<unsigned long long>(
-                    ep->ExceptionRecord->ExceptionAddress),
-                ep->ExceptionRecord);
-        } else if (n % kFaultLogEvery == 0) {
-            GuardLog_("钩子 %s 累计异常 %ld 次（每次已吞掉并走安全默认，钩子保持可用）",
-                GuardHookName_(hook_id), n);
+        if (hook_id < 0 || hook_id >= s_guard_hook_count) return EXCEPTION_EXECUTE_HANDLER;
+        GuardHookInfo_& hook = s_guard_hooks[hook_id];
+        // 独立计数先于签名和日志锁，递归/竞争不会漏累计。
+        const unsigned long n = static_cast<unsigned long>(InterlockedIncrement(&hook.faults));
+        if (InterlockedCompareExchange(&hook.report_lock, 1, 0) != 0) {
+            InterlockedIncrement(&hook.signature_misses);
+            return EXCEPTION_EXECUTE_HANDLER;
+        }
+        __try {
+            if (ep && ep->ExceptionRecord) {
+                const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+                const bool av = er->ExceptionCode == 0xC0000005 && er->NumberParameters >= 2;
+                const GuardFaultSignature signature(er->ExceptionCode,
+                    reinterpret_cast<unsigned long long>(er->ExceptionAddress),
+                    av ? static_cast<unsigned long long>(er->ExceptionInformation[1]) : 0ull,
+                    av ? static_cast<unsigned long>(er->ExceptionInformation[0]) : 0ul, av);
+                // 并发线程的计数序号可能先取得、后拿锁；旧序号不能盖新签名。
+                if (!hook.window.has_first || n > hook.signature_total) {
+                    hook.window.Observe(signature);
+                    hook.signature_total = n;
+                }
+            } else {
+                InterlockedIncrement(&hook.signature_misses);
+            }
+            GuardTryReportFaultLocked_(hook_id, GetTickCount(), "fault", false,
+                ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode != 0xC00000FD);
+        } __finally {
+            InterlockedExchange(&hook.report_lock, 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -255,6 +372,10 @@ static void GuardWriteFatalReport_(PEXCEPTION_POINTERS ep)
     }
     const EXCEPTION_RECORD* er = ep->ExceptionRecord;
     const unsigned long code = er->ExceptionCode;
+    if (code != 0xC00000FD) {
+        GuardFlushFaults_("fatal", true);
+        GuardContext_("fatal");
+    }
     GuardLogOne_("致命", code,
         reinterpret_cast<unsigned long long>(er->ExceptionAddress), er);
     GuardLog_("线程 %lu | 本次之前首次机会异常 %ld 条（缓存最近 %d 条）",
@@ -362,10 +483,10 @@ static void InstallCrashGuard()
     s_prev_uef = SetUnhandledExceptionFilter(GuardUef_);
 }
 
-// DLL_PROCESS_DETACH 调用：写收尾行（判读日志生死标记——末尾有此行
-// = 正常退出；没有 = 异常终止），并卸 VEH。
+// DLL_PROCESS_DETACH 补记尚未报告的异常，不重置下一周期门控；随后卸 VEH。
 static void GuardShutdown()
 {
+    GuardFlushFaults_("shutdown", true);
     if (s_veh_handle) {
         RemoveVectoredExceptionHandler(s_veh_handle);
         s_veh_handle = nullptr;

@@ -9,6 +9,9 @@
 #include <string>
 #include "../modules/IniUtf8.inc.cpp"
 #include "../modules/ConfigLog.inc.cpp"
+#include "../modules/LogContext.inc.cpp"
+#define H3_GUARD_CONTEXT_(reason) LogRecentContext_(reason)
+#include "GuardLogRegression.hpp"
 #include "../modules/BattleInputPolicy.hpp"
 #include "UiLayoutRegression.hpp"
 
@@ -165,6 +168,21 @@ static void TestLogPolicies_(const std::wstring& root)
         "repeat keydowns trace, release and next press debug");
     Check(keys.Level(58, true) == LOG_DEBUG && keys.Level(57, true) == LOG_TRACE
         && keys.Level(-1, true) == LOG_TRACE, "independent key latches and invalid key");
+    Check(LogCommandLevel_(false, LOG_DEBUG) == LOG_TRACE
+        && LogCommandLevel_(true, LOG_DEBUG) == LOG_DEBUG
+        && LogCommandLevel_(true, LOG_TRACE) == LOG_TRACE, "ordinary commands trace, relevant key edges debug");
+    Check(LogSnapshotLevel_("readback") == LOG_TRACE
+        && LogSnapshotLevel_("captured") == LOG_INFO, "readback summary is trace, original snapshot remains visible");
+    LogActivityWindow_ activity;
+    activity.Observe(0xFFFFFFF0u, 2, 1);
+    activity.Observe(0x10u, 7, 3);
+    Check(activity.count == 2 && activity.maxDepth == 3 && !activity.Due(0x1377u, false)
+        && activity.Due(0x1378u, false), "activity summary interval and tick wrap");
+    activity.Reported(0x20u, true);
+    activity.Observe(0x30u, 1, 2);
+    Check(!activity.Due(0x1377u, false) && activity.Due(0x1378u, false), "forced activity report preserves cadence");
+    Check(hbs_guard_test::PolicyRegression(), "Guard time window and storm counters");
+    Check(hbs_guard_test::WriterRegression(root), "Guard actual writer/filter time window");
     const std::wstring path = root + L"\\severity-test.txt";
     Check(path.size() < kPathCap_ / 2, "test log path capacity");
     wcscpy_s(g_log_path_w, kPathCap_ / 2, path.c_str());
@@ -182,8 +200,91 @@ static void TestLogPolicies_(const std::wstring& root)
         && text.find("FILTER_ERROR_VISIBLE") != std::string::npos
         && text.find("FILTER_DEBUG_VISIBLE") != std::string::npos
         && text.find("HIDDEN") == std::string::npos, "real writer filters info/debug/trace/DisableLog");
+    const std::wstring contextPath = root + L"\\context-test.txt";
+    wcscpy_s(g_log_path_w, kPathCap_ / 2, contextPath.c_str());
+    g_disable_log = false; g_log_level = LOG_DEBUG;
+    g_logContextSequence = g_logContextReported = 0;
+    for (unsigned i = 0; i < 120; ++i) LogDetail_("DETAIL_%03u action=7 current=1:3", i);
+    Check(GetFileAttributesW(contextPath.c_str()) == INVALID_FILE_ATTRIBUTES,
+        "normal debug details use memory only");
+    LogRecentContext_("synthetic-fault");
+    std::string context = ReadFixtureText_(contextPath);
+    Check(context.find("overwritten=24") != std::string::npos
+        && context.find("DETAIL_000") == std::string::npos
+        && context.find("DETAIL_024") != std::string::npos
+        && context.find("DETAIL_119") != std::string::npos,
+        "fault dumps recent bounded details chronologically and states overwritten count");
+    LogRecentContext_("no-new-details");
+    Check(ReadFixtureText_(contextPath) == context, "no duplicate context dump without new details");
+    g_log_level = LOG_INFO; LogDetail_("INFO_HIDDEN_CONTEXT");
+    g_log_level = LOG_TRACE; LogDetail_("TRACE_DETAIL_VISIBLE");
+    g_disable_log = true; LogDetail_("DISABLED_HIDDEN_CONTEXT");
+    g_disable_log = false;
+    context = ReadFixtureText_(contextPath);
+    Check(context.find("TRACE_DETAIL_VISIBLE") != std::string::npos
+        && context.find("INFO_HIDDEN_CONTEXT") == std::string::npos
+        && context.find("DISABLED_HIDDEN_CONTEXT") == std::string::npos,
+        "detail writer respects trace, info and DisableLog");
+    g_log_level = LOG_DEBUG;
+    LogDetail_("WRITE_RETRY_DETAIL");
+    const auto unreported = g_logContextReported;
+    wcscpy_s(g_log_path_w, kPathCap_ / 2, (contextPath + L"\\unwritable").c_str());
+    Check(!LogRecentContext_("write-failure") && g_logContextReported == unreported,
+        "failed context write never marks records reported");
+    wcscpy_s(g_log_path_w, kPathCap_ / 2, contextPath.c_str());
+    Check(LogRecentContext_("write-retry"), "context write retry succeeds");
+    GuardSetLogPathW(contextPath.c_str());
+    s_guard_context_pending = false;
+    const int hook = GuardRegisterHook_("ContextRegression");
+    EXCEPTION_RECORD er = {};
+    er.ExceptionCode = 0xC0000005; er.ExceptionAddress = (void*)0x11223344;
+    er.NumberParameters = 2; er.ExceptionInformation[1] = 0x1881;
+    EXCEPTION_POINTERS ep = {&er, nullptr};
+    s_guard_regression_tick_ = 20000;
+    LogDetail_("FIRST_FILTER_CONTEXT original=1/32 translated=512/13/2010");
+    GuardCrashFilter_(hook, &ep);
+    context = ReadFixtureText_(contextPath);
+    Check(context.find("FIRST_FILTER_CONTEXT") != std::string::npos
+        && context.find("reason=guard-first") != std::string::npos, "actual first Guard filter dumps command context");
+    LogDetail_("PERIOD_FILTER_CONTEXT action=7 current=1:3");
+    s_guard_regression_tick_ = 24999; GuardCrashFilter_(hook, &ep);
+    Check(ReadFixtureText_(contextPath).find("PERIOD_FILTER_CONTEXT") == std::string::npos,
+        "context follows Guard time window without per-fault flood");
+    s_guard_regression_tick_ = 25000; GuardFlushFaults_("period", false);
+    Check(ReadFixtureText_(contextPath).find("PERIOD_FILTER_CONTEXT") != std::string::npos,
+        "actual periodic Guard report dumps pending context");
+    LogDetail_("LOCK_RETRY_CONTEXT");
+    InterlockedExchange(&g_logContextLock, 1);
+    s_guard_regression_tick_ = 30000; GuardCrashFilter_(hook, &ep);
+    InterlockedExchange(&g_logContextLock, 0);
+    Check(s_guard_context_pending, "busy context lock marks retry without blocking Guard");
+    s_guard_regression_tick_ = 35000; GuardFlushFaults_("retry", false);
+    Check(!s_guard_context_pending && ReadFixtureText_(contextPath).find("LOCK_RETRY_CONTEXT") != std::string::npos,
+        "quiet cycle retries deferred context even without new fault");
+    LogDetail_("FATAL_FILTER_CONTEXT native_begin=1");
+    s_guard_regression_tick_ = 35001; GuardCrashFilter_(hook, &ep);
+    GuardWriteFatalReport_(&ep);
+    Check(ReadFixtureText_(contextPath).find("FATAL_FILTER_CONTEXT") != std::string::npos
+        && s_guard_hooks[hook].window.reported == s_guard_hooks[hook].window.total,
+        "fatal callback records recent context and last pending signature");
+    LogDetail_("STACK_OVERFLOW_CONTEXT_SKIPPED");
+    er.ExceptionCode = 0xC00000FD;
+    GuardWriteFatalReport_(&ep);
+    Check(ReadFixtureText_(contextPath).find("STACK_OVERFLOW_CONTEXT_SKIPPED") == std::string::npos,
+        "stack overflow skips extra context stack usage");
+    const int delayedHook = GuardRegisterHook_("ContextRegression.DelayedFirst");
+    er.ExceptionCode = 0xC0000005;
+    InterlockedExchange(&s_guard_fault_log_busy, 1);
+    GuardCrashFilter_(delayedHook, &ep);
+    InterlockedExchange(&s_guard_fault_log_busy, 0);
+    er.ExceptionCode = 0xC00000FD;
+    GuardCrashFilter_(delayedHook, &ep);
+    Check(ReadFixtureText_(contextPath).find("STACK_OVERFLOW_CONTEXT_SKIPPED") == std::string::npos,
+        "current stack overflow filter never dumps delayed earlier AV context");
+    GuardSetLogPathW(nullptr);
     g_log_path_w[0] = 0;
     g_log_level = LOG_INFO;
+    std::puts("PASS: Guard time windows and debug recent-context diagnostics");
     std::puts("PASS: severity policy, repeat aggregation, tick wrap, actual log level filtering");
 }
 
