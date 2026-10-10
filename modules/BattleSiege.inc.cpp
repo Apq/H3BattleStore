@@ -85,23 +85,98 @@ static bool SiegePcxReady_(const H3LoadedPcx* pcx, const char* name)
     return needed <= (uint64_t)pcx->bufSize && Readable_(pcx->buffer, (size_t)needed);
 }
 
-static bool SiegeCaptureReady_(const CodecCapture& capture)
+static bool SiegeCaptureReadyDiag_(const CodecCapture& capture, int* aux, int* index)
 {
+    *aux = 0; *index = -1;
     for (int i = 0; i < 3; ++i)
         if (!SiegeNameValid_(capture.towers[i].defName)
-            || !SiegeNameValid_(capture.towers[i].missileName)) return false;
+            || !SiegeNameValid_(capture.towers[i].missileName)) { *aux = 1; *index = i; return false; }
     for (int i = 0; i < 90; ++i)
-        if (!SiegeNameValid_(capture.wallPcxNames[i])) return false;
+        if (!SiegeNameValid_(capture.wallPcxNames[i])) { *aux = 1; *index = 6 + i; return false; }
     if (capture.siegeKind2 > 0) {
-        if (!capture.wallPcxNames[20][0]) return false; // Renderer unconditionally draws wall[4][0].
+        if (!capture.wallPcxNames[20][0]) { *aux = 2; *index = 20; return false; } // Renderer unconditionally draws wall[4][0].
         for (int i = 0; i < 18; ++i)
-            if (capture.fortWallsAlive[i] < 0 || capture.fortWallsAlive[i] > 4) return false;
+            if (capture.fortWallsAlive[i] < 0 || capture.fortWallsAlive[i] > 4) { *aux = 3; *index = i; return false; }
         const int32_t door = capture.siegeKind; // H3API +0x53A4, native door status.
-        if (door < 0 || door > 3 || (door != 3 && !capture.wallPcxNames[door][0])) return false;
+        if (door < 0 || door > 3) { *aux = 4; *index = -1; return false; }
+        if (door != 3 && !capture.wallPcxNames[door][0]) { *aux = 4; *index = door; return false; }
         // Other walls have a native null check, including wall[14].
     }
     return true;
 }
+
+// 2026-10-10 攻城读档细分诊断（玩家日志：攻城战读档全部拒绝于 preflight，
+// 总原因无法区分 ready/塔/资源/引用哪个子条件）。POD 摘要在 SEH 内填写，
+// 字符串与日志统一在 SEH 外构造。
+struct SiegePreflightDiag_ {
+    int reason = 0;   // 1 protect 2 state 3 kind2 4 before-ready 5 saved-ready 6 tower 7 resource 8 references
+    int index = -1;   // ready: 槽号; tower: 0..2; resource: 0..95
+    int aux = 0;      // ready 子项: 1 name-slot 2 wall20 3 fortwalls 4 door
+    char name[13] = {};
+};
+
+static const char* SiegeDiagReason_(int reason)
+{
+    switch (reason) {
+    case 1: return "protect";
+    case 2: return "state";
+    case 3: return "kind2";
+    case 4: return "before-ready";
+    case 5: return "saved-ready";
+    case 6: return "tower-match";
+    case 7: return "resource-match";
+    case 8: return "references";
+    default: return "unknown";
+    }
+}
+
+struct SiegeDiagSlotData_ {
+    int readable; int refs; unsigned field10; int nameCmp;
+    int w, h, scanline, bufSize, needed;
+    int groups, defW, defH;
+};
+static void SiegeDiagSlotSeh_(const H3ResourceItem* item, const char* name, SiegeDiagSlotData_* d)
+{
+    memset(d, 0, sizeof(*d));
+    d->nameCmp = -1;
+    __try {
+        if (!Readable_(item, sizeof(*item))) return;
+        d->readable = 1;
+        d->refs = *(const int32_t*)((const uint8_t*)item + 0x18);
+        d->field10 = *(const uint32_t*)((const uint8_t*)item + 0x10);
+        if (name[0]) d->nameCmp = _strnicmp((const char*)((const uint8_t*)item + 4), name, 13);
+        // PCX 与 DEF 字段重叠读取，日志侧按槽号解释。
+        const H3LoadedPcx* pcx = (const H3LoadedPcx*)item;
+        d->w = pcx->width; d->h = pcx->height; d->scanline = pcx->scanlineSize; d->bufSize = pcx->bufSize;
+        d->needed = (int)((uint64_t)(unsigned)pcx->scanlineSize * (uint64_t)(unsigned)pcx->height);
+        const H3LoadedDef* def = (const H3LoadedDef*)item;
+        d->groups = def->groupsCount; d->defW = def->widthDEF; d->defH = def->heightDEF;
+    }
+    __except (GuardCrashFilter_(kObjectGuard_, GetExceptionInformation())) { }
+}
+
+static void SiegeDiagTowerSeh_(const H3CombatManager::TownTowerLoaded* live, int out[7])
+{
+    __try {
+        out[0] = live->crType2Shot; out[1] = live->creatureX; out[2] = live->creatureY;
+        out[3] = live->orientation; out[4] = live->defGroup;
+        memcpy(&out[5], (const uint8_t*)live + 0x1C, sizeof(int32_t));
+        out[6] = live->stackNumber;
+    }
+    __except (GuardCrashFilter_(kObjectGuard_, GetExceptionInformation())) { }
+}
+
+static void CopySlotName_(const CodecCapture& capture, int index, char out[13])
+{
+    const char* name = index < 6
+        ? (index % 2 ? capture.towers[index / 2].missileName : capture.towers[index / 2].defName)
+        : capture.wallPcxNames[index - 6];
+    memcpy(out, name, 12);
+    out[12] = 0;
+}
+
+static void SiegePreflightDiagnose_(H3CombatManager* mgr, const CodecCapture* before,
+    const CodecCapture* saved, const SiegePreflightDiag_& d);
 
 struct RestoreSiege_
 {
@@ -179,18 +254,24 @@ struct RestoreSiege_
         return true;
     }
     bool PreflightSeh(H3CombatManager* mgr, const CodecCapture* before,
-        const CodecCapture* saved, bool* fault) {
+        const CodecCapture* saved, bool* fault, SiegePreflightDiag_* diag) {
         *fault = false;
         __try {
             if (!Readable_(mgr, sizeof(*mgr)) || IsBadWritePtr(mgr->towers, sizeof(mgr->towers))
-                || IsBadWritePtr(mgr->townSiegePcx, sizeof(mgr->townSiegePcx))
-                || mgr->finished || !g_battleInitialized || mgr->siegeKind2 != before->siegeKind2
-                || !SiegeCaptureReady_(*before) || !SiegeCaptureReady_(*saved)) return false;
+                || IsBadWritePtr(mgr->townSiegePcx, sizeof(mgr->townSiegePcx))) { diag->reason = 1; return false; }
+            if (mgr->finished || !g_battleInitialized) { diag->reason = 2; return false; }
+            if (mgr->siegeKind2 != before->siegeKind2) { diag->reason = 3; return false; }
+            if (!SiegeCaptureReadyDiag_(*before, &diag->aux, &diag->index)) { diag->reason = 4; return false; }
+            if (!SiegeCaptureReadyDiag_(*saved, &diag->aux, &diag->index)) { diag->reason = 5; return false; }
             for (int i = 0; i < 3; ++i)
-                if (!TowerMatches(mgr->towers[i], before->towers[i])) return false;
+                if (!TowerMatches(mgr->towers[i], before->towers[i])) { diag->reason = 6; diag->index = i; return false; }
             for (int i = 0; i < 96; ++i)
-                if (!ResourceMatches(LiveOwned(mgr, i), *before, i)) return false;
-            if (!ReferencesCoverSlots(mgr)) return false;
+                if (!ResourceMatches(LiveOwned(mgr, i), *before, i)) {
+                    diag->reason = 7; diag->index = i;
+                    CopySlotName_(*before, i, diag->name);
+                    return false;
+                }
+            if (!ReferencesCoverSlots(mgr)) { diag->reason = 8; return false; }
             memcpy(expectedTowers, mgr->towers, sizeof(expectedTowers));
             memcpy(expectedWalls, mgr->townSiegePcx, sizeof(expectedWalls));
         }
@@ -214,10 +295,13 @@ struct RestoreSiege_
         if (g_restoreFatal) return Reject("攻城资源事务已进入异常停止状态", error);
         if (manager || ready) return Reject("攻城资源事务不能重复准备", error);
         bool fault = false;
+        SiegePreflightDiag_ diag = {};
         DiagStage_("restore.siege-preflight");
-        if (!PreflightSeh(mgr, &before, &saved, &fault))
+        if (!PreflightSeh(mgr, &before, &saved, &fault, &diag)) {
+            SiegePreflightDiagnose_(mgr, &before, &saved, diag);
             return fault ? Fault("攻城资源预检发生异常，已停止战斗", error)
                 : Reject("当前攻城资源、引用、名称或塔状态已漂移，或保存的渲染资源不足", error);
+        }
         manager = mgr;
         for (int i = 0; i < 3; ++i) {
             const CodecTower_& source = saved.towers[i];
@@ -315,3 +399,86 @@ struct RestoreSiege_
         return true;
     }
 };
+
+// 引用覆盖诊断采集：SEH 内只写 POD（static 缓冲由调用方提供，单游戏线程、一次性诊断）。
+static int SiegeDiagReferencesSeh_(H3CombatManager* mgr, int* issueSlot, int* issueRefs, int* issueAlias)
+{
+    int issues = 0;
+    __try {
+        for (int i = 0; i < 96 && issues < 96; ++i) {
+            const H3ResourceItem* item = RestoreSiege_::LiveOwned(mgr, i);
+            if (!item || !Readable_(item, sizeof(*item))) continue;
+            int aliases = 0;
+            for (int j = 0; j < 96; ++j)
+                if (RestoreSiege_::LiveOwned(mgr, j) == item) ++aliases;
+            const int32_t refs = *(const int32_t*)((const uint8_t*)item + 0x18);
+            if (refs < aliases || refs <= 0 || refs >= 0x7FFFFFFF) {
+                issueSlot[issues] = i; issueRefs[issues] = refs; issueAlias[issues] = aliases;
+                ++issues;
+            }
+        }
+    }
+    __except (GuardCrashFilter_(kObjectGuard_, GetExceptionInformation())) { }
+    return issues;
+}
+
+// SEH 外统一落盘：攻城预检拒绝时输出能区分子条件的字段，一次复现即可定位
+// （2026-10-10 玩家日志：保存成功后立即读档也在 preflight 被确定性拒绝）。
+static void SiegePreflightDiagnose_(H3CombatManager* mgr, const CodecCapture* before,
+    const CodecCapture* saved, const SiegePreflightDiag_& d)
+{
+    if (d.reason == 4 || d.reason == 5) {
+        const CodecCapture& c = d.reason == 4 ? *before : *saved;
+        std::string emptyWalls;
+        for (int i = 0; i < 90; ++i)
+            if (!c.wallPcxNames[i][0]) {
+                if (!emptyWalls.empty()) emptyWalls += ',';
+                emptyWalls += std::to_string(i);
+            }
+        LogInfo("[Restore] siege-diag reason=%s aux=%d index=%d kind2=%d kind(door)=%d wall20=%s emptyWallSlots=%s",
+            SiegeDiagReason_(d.reason), d.aux, d.index, c.siegeKind2, c.siegeKind,
+            c.wallPcxNames[20][0] ? c.wallPcxNames[20] : "(empty)",
+            emptyWalls.empty() ? "(none)" : emptyWalls.c_str());
+        return;
+    }
+    if (d.reason == 6) {
+        const int i = d.index >= 0 && d.index < 3 ? d.index : 0;
+        int live[7] = {};
+        SiegeDiagTowerSeh_(&mgr->towers[i], live);
+        const CodecTower_& b = before->towers[i];
+        LogInfo("[Restore] siege-diag reason=tower-match index=%d live=%d,%d,%d,%d,%d,%d,%d before=%d,%d,%d,%d,%d,%d,%d",
+            i, live[0], live[1], live[2], live[3], live[4], live[5], live[6],
+            b.scalars[0], b.scalars[1], b.scalars[2], b.scalars[3], b.scalars[4], b.scalars[5], b.scalars[6]);
+        return;
+    }
+    if (d.reason == 7) {
+        const int i = d.index >= 0 && d.index < 96 ? d.index : 0;
+        const H3ResourceItem* item = RestoreSiege_::LiveOwned(mgr, i);
+        char name[13] = {};
+        CopySlotName_(*before, i, name);
+        SiegeDiagSlotData_ s = {};
+        SiegeDiagSlotSeh_(item, name, &s);
+        LogInfo("[Restore] siege-diag reason=resource-match index=%d name=%s item=%p readable=%d refs=%d field10=%x nameCmp=%d pcx(w=%d h=%d scanline=%d buf=%d needed=%d) def(groups=%d w=%d h=%d)",
+            i, name, (const void*)item, s.readable, s.refs, s.field10, s.nameCmp,
+            s.w, s.h, s.scanline, s.bufSize, s.needed, s.groups, s.defW, s.defH);
+        return;
+    }
+    if (d.reason == 8) {
+        // 引用覆盖失败：列出 refs<aliases 或 refs 非法的槽。static POD 缓冲，
+        // SEH 内只写 POD；单游戏线程且诊断一次性，无重入。
+        static int issueSlot[96];
+        static int issueRefs[96];
+        static int issueAlias[96];
+        const int issues = SiegeDiagReferencesSeh_(mgr, issueSlot, issueRefs, issueAlias);
+        std::string detail;
+        for (int k = 0; k < issues; ++k) {
+            if (!detail.empty()) detail += ' ';
+            detail += "slot" + std::to_string(issueSlot[k]) + ":refs" + std::to_string(issueRefs[k])
+                + "/alias" + std::to_string(issueAlias[k]);
+        }
+        LogInfo("[Restore] siege-diag reason=references issues=%d detail=%s",
+            issues, detail.empty() ? "(none)" : detail.c_str());
+        return;
+    }
+    LogInfo("[Restore] siege-diag reason=%s index=%d", SiegeDiagReason_(d.reason), d.index);
+}
