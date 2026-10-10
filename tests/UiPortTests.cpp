@@ -11,10 +11,12 @@
 //      fail closed，本测试断言它“不确认、不执行恢复”，而不是断言恢复结果。
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
+#include <initializer_list>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,17 +63,20 @@ struct FakeState
     bool maintainResult = false;
 
     // ---- StoreConsumeRestore_ ----
+    // 出参只能在使用期内读取：NullUi 的三个出参都是 ProcessRestore 的栈上局部，
+    // 返回后即销毁，因此这里只记录“是否非空”与写回后的值拷贝。
     int consumeCalls = 0;
     H3CombatManager* consumeMgr = nullptr;
     int consumeResult = 0;
-    StoreEntry* consumeEntry = nullptr;
-    unsigned* consumeGeneration = nullptr;
-    std::string* consumeExpectedKey = nullptr;
+    bool consumeSawEntry = false;
+    bool consumeSawGeneration = false;
+    bool consumeSawKey = false;
     std::string consumedExpectedKey;
-    bool consumeReturn = false;
-    bool consumeQueuePending = false;   // Fake 侧模拟“服务里仍有排队请求”
+    std::string returnedExpectedKey;
     uint64_t consumedStamp = 0;
     unsigned consumedGeneration = 0;
+    bool consumeReturn = false;
+    bool consumeQueuePending = false;   // Fake 侧模拟“服务里仍有排队请求”
 
     std::vector<std::string> serviceCalls;
     std::vector<LogRecord> logs;
@@ -134,9 +139,9 @@ static bool StoreConsumeRestore_(H3CombatManager* mgr, int result, StoreEntry* e
     ++g_fake.consumeCalls;
     g_fake.consumeMgr = mgr;
     g_fake.consumeResult = result;
-    g_fake.consumeEntry = entry;
-    g_fake.consumeGeneration = generation;
-    g_fake.consumeExpectedKey = expectedKey;
+    g_fake.consumeSawEntry = entry != nullptr;
+    g_fake.consumeSawGeneration = generation != nullptr;
+    g_fake.consumeSawKey = expectedKey != nullptr;
     g_fake.consumedExpectedKey = expectedKey ? *expectedKey : "<null>";
     g_fake.serviceCalls.push_back("consume");
     if (g_fake.consumeReturn) {
@@ -145,6 +150,7 @@ static bool StoreConsumeRestore_(H3CombatManager* mgr, int result, StoreEntry* e
         if (expectedKey) *expectedKey = "fake-output-key";
         g_fake.consumedStamp = entry ? entry->timestampUtcMs : 0;
         g_fake.consumedGeneration = generation ? *generation : 0;
+        g_fake.returnedExpectedKey = expectedKey ? *expectedKey : std::string();
         g_fake.consumeQueuePending = false;   // 服务出队
     }
     return g_fake.consumeReturn;
@@ -170,11 +176,13 @@ static bool LogIs_(size_t index, char level, const char* text)
         && g_fake.logs[index].text == text;
 }
 
-static bool ServiceSequenceIs_(const char* const* expected, size_t count)
+// 服务副作用序列：按调用顺序比对服务名（防止“只看最终布尔值/只看 count”的镜像断言）。
+static bool ServiceSequenceIs_(std::initializer_list<const char*> expected)
 {
-    if (g_fake.serviceCalls.size() != count) return false;
-    for (size_t i = 0; i < count; ++i)
-        if (g_fake.serviceCalls[i] != expected[i]) return false;
+    if (g_fake.serviceCalls.size() != expected.size()) return false;
+    size_t index = 0;
+    for (const char* name : expected)
+        if (g_fake.serviceCalls[index++] != name) return false;
     return true;
 }
 
@@ -278,15 +286,14 @@ static void TestReloadAndRestore_()
     Expect_(!ui->ReloadEntries(nullptr), "ReloadEntries propagates service failure");
     Expect_(g_fake.reloadCalls == 2 && g_fake.reloadMgr == nullptr,
         "ReloadEntries preserves a null manager argument");
-    Expect_(ServiceSequenceIs_(kSeq{"reload", "reload"}, 2),
+    Expect_(ServiceSequenceIs_({"reload", "reload"}),
         "only the reload service runs during list refresh");
 
     ResetFake_();
-    g_fake.consumeQueuePending = false;
     g_fake.maintainResult = false;
     ui->MaintainRestore(&mgr);
     Expect_(g_fake.maintainCalls == 1 && g_fake.maintainMgr == &mgr
-        && ServiceSequenceIs_(kSeq{"maintain"}, 1) && g_fake.logs.empty(),
+        && ServiceSequenceIs_({"maintain"}) && g_fake.logs.empty(),
         "non-expired restore maintenance makes no timeout warning");
 
     g_fake.maintainResult = true;
@@ -298,11 +305,11 @@ static void TestReloadAndRestore_()
     // 没有 pending 请求：服务返回 false，界面静默（没有提示、没有后续动作）。
     ResetFake_();
     g_fake.consumeReturn = false;
-    g_fake.consumeQueuePending = false;
+    g_fake.consumeQueuePending = true;
     ui->ProcessRestore(&mgr, 41);
     Expect_(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
         && g_fake.consumeResult == 41 && g_fake.logs.empty()
-        && !g_fake.consumeQueuePending,
+        && g_fake.consumeQueuePending,
         "a missing restore request is a silent no-op without prompting");
 
     // 请求已就绪：服务出队并交出快照，NullUi 只丢弃并告警，不确认、不执行恢复。
@@ -311,18 +318,16 @@ static void TestReloadAndRestore_()
     g_fake.consumeQueuePending = true;
     ui->ProcessRestore(&mgr, -7);
     Expect_(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
-        && g_fake.consumeResult == -7 && g_fake.consumeEntry != nullptr
-        && g_fake.consumeGeneration != nullptr && g_fake.consumeExpectedKey != nullptr
+        && g_fake.consumeResult == -7 && g_fake.consumeSawEntry
+        && g_fake.consumeSawGeneration && g_fake.consumeSawKey
         && !g_fake.consumeQueuePending && g_fake.logs.size() == 1
         && LogIs_(0, 'W', "[NullUi] restore request cannot be confirmed without UI; request discarded"),
         "a ready restore request is discarded with one fail-closed warning");
     Expect_(g_fake.consumedStamp == 0x1234 && g_fake.consumedGeneration == 77
-        && g_fake.consumeEntry != nullptr && g_fake.consumeEntry->timestampUtcMs == 0x1234
-        && g_fake.consumeGeneration != nullptr && *g_fake.consumeGeneration == 77
-        && g_fake.consumeExpectedKey != nullptr
-        && *g_fake.consumeExpectedKey == "fake-output-key",
-        "the snapshot handed over by the service is never executed or mutated");
-    Expect_(ServiceSequenceIs_(kSeq{"consume"}, 1),
+        && g_fake.returnedExpectedKey == "fake-output-key"
+        && g_fake.consumedExpectedKey.empty(),
+        "the snapshot handed over by the service is not executed or mutated");
+    Expect_(ServiceSequenceIs_({"consume"}),
         "restore processing only consumes the request; no confirm or execute service runs");
 }
 
