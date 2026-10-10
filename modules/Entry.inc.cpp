@@ -680,7 +680,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
 {
     BattleMessageFrame_ frame = {};
     // 不在这里读游戏对象；身份捕获在下方自有逻辑的SEH内。
-    g_messageFrames.Enter(frame, g_battleGeneration, mgr, nullptr);
+    const unsigned long long frameToken = g_messageFrames.Enter(frame, g_battleGeneration, mgr, nullptr);
     ++g_messageDepth;
     int result = 0;
     H3Msg keyboardInput = {};
@@ -711,13 +711,18 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
             }
             // 帧身份补全：进入时未读游戏对象，首次确认可读时记录对话框；
             // 若原函数期间对话框被替换，返回后的边界核验会拒绝消费（保守）。
-            if (frame.dialog == nullptr && CombatIsReadable_(mgr)) frame.dialog = mgr->dlg;
+            // 登记制帧表：就地修改后必须 Update 同步（2026-10-10 崩溃修复）。
+            if (frame.dialog == nullptr && CombatIsReadable_(mgr)) {
+                frame.dialog = mgr->dlg;
+                g_messageFrames.Update(frame, frameToken);
+            }
         }
         __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { failed = true; DiagHookFault_(); }
         result = consumed ? 1 : THISCALL_2(int, hook->GetDefaultFunc(), mgr, msg);
-        frame.nativeReturned = true;
         if (!failed) {
             __try {
+                frame.nativeReturned = true;
+                g_messageFrames.Update(frame, frameToken);
                 if (hasCommandInput) DiagCommand_(mgr, commandInput, msg, consumed ? "overlay-consumed" : "after", result, inputLevel);
                 if (!g_restoreBusy && !g_restoreFatal
                     && g_messageFrames.Boundary(g_battleGeneration, mgr,
@@ -735,7 +740,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
     }
     __finally {
         --g_messageDepth;
-        g_messageFrames.Leave(frame);
+        g_messageFrames.Leave(frame, frameToken);
     }
     if (g_restoreFatal) {
         GuardLog_("[Restore] FATAL: unverified partial write; stopping instead of continuing battle");
@@ -804,8 +809,8 @@ static void BattleReset_()
     g_battleListDirty = true;
     g_restoreRequest.pending = false;
     g_restoreFatal = false;
-    // 消息帧栈不在换场清零：旧场祖先帧按场次归属自然失效，其 finally 出栈
-    // 即移除（见 Hook_CombatMessage_ / BattleMessageFrames_）。
+    // 消息登记不追栈帧链；下一代 Enter 清理旧代元数据，旧调用迟到的
+    // Update/Leave 用 token 核验，不会误操作同地址的新登记。
     g_ui.entries.clear();
     g_ui.scroll = {};
     g_ui.listGesture = {};

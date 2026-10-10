@@ -219,34 +219,109 @@ int wmain(int argc, wchar_t** argv)
             == BattleRestoreMaintain_::CancelTimeout, "over twenty seconds cancels even without any boundary");
         BattleMessageFrames_ frames = {};
         BattleMessageFrame_ ancestor = {};
-        frames.Enter(ancestor, 19u, (const void*)0x11110000, (const void*)0xAAAA0000);
+        const auto ancestorToken = frames.Enter(ancestor, 19u, (const void*)0x11110000, (const void*)0xAAAA0000);
         ancestor.nativeReturned = true;
+        frames.Update(ancestor, ancestorToken);
         Check(frames.Depth(19u) == 1 && frames.Depth(21u) == 0,
             "old-generation ancestor never counts toward the current battle depth");
         BattleMessageFrame_ outer = {};
-        frames.Enter(outer, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
+        const auto outerToken = frames.Enter(outer, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
         Check(!frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
             "outermost frame is not a boundary while the original function is still running");
         outer.nativeReturned = true;
+        frames.Update(outer, outerToken);
         Check(frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000)
             && frames.Depth(21u) == 1,
             "outermost returned frame of the current battle is the restore boundary despite stale ancestors");
         BattleMessageFrame_ nested = {};
-        frames.Enter(nested, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
+        const auto nestedToken = frames.Enter(nested, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
         nested.nativeReturned = true;
+        frames.Update(nested, nestedToken);
         Check(!frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
             "same-battle nested modal (options dialog) is not a boundary");
-        frames.Leave(nested);
+        frames.Leave(nested, nestedToken);
         Check(frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
             "boundary returns after the nested modal unwinds");
         Check(!frames.Boundary(21u, (const void*)0x33330000, (const void*)0xBBBB0000)
             && !frames.Boundary(21u, (const void*)0x22220000, (const void*)0xCCCC0000)
             && !frames.Boundary(21u, (const void*)0x22220000, nullptr),
             "manager reuse, dialog replacement and missing dialog all reject the boundary");
-        frames.Leave(outer);
-        frames.Leave(ancestor);
-        Check(frames.top == nullptr && !frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
-            "empty stack has no boundary");
+        frames.Leave(outer, outerToken);
+        frames.Leave(ancestor, ancestorToken);
+        Check(frames.Depth(21u) == 0 && !frames.Boundary(21u, (const void*)0x22220000, (const void*)0xBBBB0000),
+            "empty registry has no boundary");
+        // 玩家日志证明链指针无效；最初破坏链的机制仍待证。
+        // 下列夹具模拟残留登记、栈数据覆写和地址复用，不冒充原生退栈实测。
+        {
+            BattleMessageFrames_ reuse = {};
+            BattleMessageFrame_ frame = {};
+            const auto oldToken = reuse.Enter(frame, 21u, (const void*)0x22220000, (const void*)0xBBBB0000);
+            memset(&frame, 0x81, sizeof(frame));
+            Check(reuse.Depth(21u) == 1, "depth uses the owned copy after stack bytes are overwritten");
+            const auto newToken = reuse.Enter(frame, 23u, (const void*)0x44440000, (const void*)0xDDDD0000);
+            Check(reuse.Depth(21u) == 0 && reuse.Depth(23u) == 1,
+                "generation transition retires stale registrations without dereferencing stack memory");
+            frame.nativeReturned = true;
+            reuse.Update(frame, newToken);
+            Check(reuse.Boundary(23u, (const void*)0x44440000, (const void*)0xDDDD0000),
+                "reborn frame is a valid boundary");
+            reuse.Leave(frame, oldToken);
+            frame.nativeReturned = false;
+            frame.dialog = nullptr;
+            reuse.Update(frame, oldToken);
+            Check(reuse.Boundary(23u, (const void*)0x44440000, (const void*)0xDDDD0000),
+                "stale token cannot remove or update a same-address new registration");
+            reuse.Leave(frame, newToken);
+            Check(!reuse.Boundary(23u, (const void*)0x44440000, (const void*)0xDDDD0000),
+                "matching token leaves the current registration");
+        }
+        {
+            BattleMessageFrames_ same = {};
+            BattleMessageFrame_ frame = {};
+            const auto oldToken = same.Enter(frame, 25u, (const void*)0x22220000, (const void*)0xBBBB0000);
+            const auto newToken = same.Enter(frame, 25u, (const void*)0x22220000, (const void*)0xBBBB0000);
+            frame.nativeReturned = true;
+            same.Update(frame, newToken);
+            same.Leave(frame, oldToken);
+            frame.nativeReturned = false;
+            same.Update(frame, oldToken);
+            Check(same.Depth(25u) == 1 && same.Boundary(25u, (const void*)0x22220000, (const void*)0xBBBB0000),
+                "same-generation address reuse requires the current invocation token");
+            same.Leave(frame, newToken);
+            Check(same.Depth(25u) == 0, "current token removes the reused address");
+            BattleMessageFrame_ oldFrame = {}, newFrame = {};
+            const auto oldGenerationToken = same.Enter(oldFrame, 25u, (const void*)0x22220000, (const void*)0xBBBB0000);
+            const auto nextGenerationToken = same.Enter(newFrame, 26u, (const void*)0x22220000, (const void*)0xBBBB0000);
+            newFrame.nativeReturned = true;
+            same.Update(newFrame, nextGenerationToken);
+            oldFrame.nativeReturned = true;
+            same.Update(oldFrame, oldGenerationToken);
+            same.Leave(oldFrame, oldGenerationToken);
+            Check(same.Depth(25u) == 0 && same.Boundary(26u, (const void*)0x22220000, (const void*)0xBBBB0000),
+                "late old-generation callbacks at a different address never resurrect stale registrations");
+            same.Leave(newFrame, nextGenerationToken);
+        }
+        {
+            BattleMessageFrames_ full = {};
+            BattleMessageFrame_ frames65[BattleMessageFrames_::kMaxFrames_ + 1] = {};
+            unsigned long long tokens[BattleMessageFrames_::kMaxFrames_ + 1] = {};
+            for (int i = 0; i <= BattleMessageFrames_::kMaxFrames_; ++i)
+                tokens[i] = full.Enter(frames65[i], 30u, (const void*)0x50000000, (const void*)0x60000000);
+            Check(tokens[BattleMessageFrames_::kMaxFrames_] == 0,
+                "overflow entry returns an invalid token");
+            for (int i = 1; i < BattleMessageFrames_::kMaxFrames_; ++i)
+                full.Leave(frames65[i], tokens[i]);
+            frames65[0].nativeReturned = true;
+            full.Update(frames65[0], tokens[0]);
+            Check(full.Depth(30u) == 1 && !full.Boundary(30u, (const void*)0x50000000, (const void*)0x60000000),
+                "saturation rejects a boundary even after depth falls to one");
+            BattleMessageFrame_ nextBattle = {};
+            const auto token = full.Enter(nextBattle, 31u, (const void*)0x50000000, (const void*)0x60000000);
+            nextBattle.nativeReturned = true;
+            full.Update(nextBattle, token);
+            Check(full.Boundary(31u, (const void*)0x50000000, (const void*)0x60000000),
+                "next generation clears stale entries and recovers from saturation");
+        }
         std::puts("PASS: restore maintenance timeout/generation and per-battle message boundary policy");
     }
     Check(argc == 2, "fixture directory argument");

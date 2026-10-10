@@ -46,32 +46,87 @@ static constexpr BattleRestoreMaintain_ BattleRestoreMaintainDecision_(const Bat
     return BattleRestoreMaintain_::Keep;
 }
 
-// 栈上POD帧；只由钩子finally出栈，不分配、不在换场时清零。
-// 按场次区分旧场祖先，管理器/对话框身份在返回后重新核验。
+// 登记制消息帧表（2026-10-10 18:18 玩家日志实证修复）：原实现把栈上 POD 帧
+// 挂 parent 链（parent 落在帧内 +0x0D）。玩家在战斗结束→同管理器立刻重开后，
+// Boundary() 沿该链读到无效地址 0x1881，触发 AV（H3BattleStore.dll+0x157A4）；
+// 日志证明链上指针无效、触发集中在换场首帧，但不能单独证明最初破坏链的机制
+// （例如原生非局部退栈未执行 finally 仍属待证）。改为固定数组登记、按帧地址
+// 索引，永不追踪栈指针；换代清理旧代登记；地址复用覆盖同地址旧登记；同代
+// 满表时整代 fail-closed，避免少算深度后误认 Boundary。帧字段就地修改后须
+// Update 同步。
 struct BattleMessageFrame_ {
     unsigned generation;
     const void* manager;
     const void* dialog;
     bool nativeReturned;
-    BattleMessageFrame_* parent;
 };
 struct BattleMessageFrames_ {
-    BattleMessageFrame_* top;
-    void Enter(BattleMessageFrame_& frame, unsigned generation,
-        const void* manager, const void* dialog) {
-        frame = {generation, manager, dialog, false, top};
-        top = &frame;
+    static constexpr int kMaxFrames_ = 64;
+    struct Entry_ { const void* key; unsigned long long seq; BattleMessageFrame_ frame; };
+    Entry_ slots[kMaxFrames_] = {};
+    unsigned long long nextSeq = 0;
+    unsigned saturatedGeneration = 0;
+    bool saturated = false;
+    int newest = -1;
+    int Find_(const void* key) const {
+        for (int i = 0; i < kMaxFrames_; ++i)
+            if (slots[i].key == key) return i;
+        return -1;
     }
-    void Leave(const BattleMessageFrame_& frame) { top = frame.parent; }
+    void ResetGeneration_(unsigned generation) {
+        for (int i = 0; i < kMaxFrames_; ++i)
+            if (slots[i].key && slots[i].frame.generation != generation)
+                slots[i].key = nullptr;
+        if (saturated && saturatedGeneration != generation) saturated = false;
+        newest = -1;
+        unsigned long long best = 0;
+        for (int i = 0; i < kMaxFrames_; ++i)
+            if (slots[i].key && slots[i].seq > best) { best = slots[i].seq; newest = i; }
+    }
+    unsigned long long Enter(BattleMessageFrame_& frame, unsigned generation,
+        const void* manager, const void* dialog) {
+        ResetGeneration_(generation);
+        frame = {generation, manager, dialog, false};
+        const void* key = &frame;
+        // 地址复用优先覆盖；其次取空位；满表时该代 fail-closed。
+        int slot = Find_(key);
+        if (slot < 0) slot = Find_(nullptr);
+        if (slot < 0) {
+            saturated = true;
+            saturatedGeneration = generation;
+            newest = -1;
+            return 0;
+        }
+        slots[slot].key = key;
+        slots[slot].seq = ++nextSeq;
+        slots[slot].frame = frame;
+        newest = slot;
+        return slots[slot].seq;
+    }
+    void Update(const BattleMessageFrame_& frame, unsigned long long token) {
+        const int slot = Find_(&frame);
+        if (slot >= 0 && token && slots[slot].seq == token) slots[slot].frame = frame;
+    }
+    void Leave(const BattleMessageFrame_& frame, unsigned long long token) {
+        const int slot = Find_(&frame);
+        if (slot >= 0 && token && slots[slot].seq == token) slots[slot].key = nullptr;
+        newest = -1;
+        unsigned long long best = 0;
+        for (int i = 0; i < kMaxFrames_; ++i)
+            if (slots[i].key && slots[i].seq > best) { best = slots[i].seq; newest = i; }
+    }
     int Depth(unsigned generation) const {
         int depth = 0;
-        for (const BattleMessageFrame_* f = top; f; f = f->parent)
-            if (f->generation == generation) ++depth;
+        for (int i = 0; i < kMaxFrames_; ++i)
+            if (slots[i].key && slots[i].frame.generation == generation) ++depth;
         return depth;
     }
     bool Boundary(unsigned generation, const void* manager, const void* dialog) const {
-        return top && top->nativeReturned && top->generation == generation
-            && top->manager == manager && top->dialog == dialog
+        if (saturated && saturatedGeneration == generation) return false;
+        if (newest < 0 || !slots[newest].key) return false;
+        const BattleMessageFrame_& top = slots[newest].frame;
+        return top.nativeReturned && top.generation == generation
+            && top.manager == manager && top.dialog == dialog
             && dialog && Depth(generation) == 1;
     }
 };

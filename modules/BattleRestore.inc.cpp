@@ -124,9 +124,9 @@ static bool g_restoreFatal = false;static bool g_battleInitialized = false;
 static unsigned g_battleGeneration = 0;
 static DWORD g_battleThread = 0;
 static int g_messageDepth = 0;
-// 战斗消息帧栈（BattleInputPolicy.hpp）：每个 Hook_CombatMessage_ 调用一个
-// 栈上帧，记录进入时的场次/管理器/对话框。换场不清零；旧场未退栈祖先帧
-// 因场次不同不参与当前场计数，其 finally 出栈即自然消失。
+// 战斗消息帧登记表（BattleInputPolicy.hpp）：每个 Hook_CombatMessage_ 调用
+// 登记一份自有元数据副本，栈地址只作标识，不沿栈帧指针遍历；新代 Enter 清理
+// 旧代登记，Update/Leave 用独立 token 防止地址复用后旧调用影响新登记。
 static BattleMessageFrames_ g_messageFrames;
 static int g_executorDepth = 0;
 static int g_spellDepth = 0;
