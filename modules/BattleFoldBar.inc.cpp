@@ -35,6 +35,34 @@ static int FoldLampCenterY_()
     return g_uiLayout.OriginY(g_uiBarAnchorY) + hbs_ui::StatusLampRadius + 1;
 }
 
+// 锚定战场矩形（2026-10-11 02:3x 用户实证纠正）：目标区域是战斗对话框
+// （mgr->dlg）的内右上角，不是 800x600 逻辑屏的右上角——HD 分辨率下战场
+// 对话框居中且尺寸随分辨率变化，按逻辑屏算的 (785,16) 会落到战场外顶部
+// 中间。每帧从 dlg 刷新锚点（换场/分辨率变化自动跟随）；无战斗或矩形
+// 放不下面板时保持上次值。Initialize 的 800x600 值只是首次进战斗前的占位。
+static void FoldSyncAnchor_(H3CombatManager* mgr)
+{
+    const H3CombatDlg* dlg = mgr ? mgr->dlg : nullptr;
+    if (!dlg) return;
+    const int dx = dlg->GetX();
+    const int dy = dlg->GetY();
+    const int dw = dlg->GetWidth();
+    const int dh = dlg->GetHeight();
+    if (dw < kUiBarWidth + 2 * kFoldMargin || dh < 4 * kFoldMargin) return;
+    const int lampX = dx + dw - kFoldMargin - hbs_ui::StatusLampRadius;
+    const int lampY = dy + kFoldMargin + hbs_ui::StatusLampRadius;
+    const int anchorX = lampX - (kUiBarWidth - hbs_ui::StatusLampRadius - 1);
+    const int originY = lampY - (hbs_ui::StatusLampRadius + 1);
+    int anchorY = originY + (g_uiLayout.bandHeight - 24) / 2;
+    if (anchorY < 0) anchorY = 0;
+    if (anchorX != g_uiBarAnchorX || anchorY != g_uiBarAnchorY) {
+        g_uiBarAnchorX = anchorX;
+        g_uiBarAnchorY = anchorY;
+        LogDebug("[Ui] fold anchor dlg=%d,%d %dx%d anchor=%d,%d lamp=%d,%d",
+            dx, dy, dw, dh, anchorX, anchorY, FoldLampCenterX_(), FoldLampCenterY_());
+    }
+}
+
 static void FoldHotZone_(int cursorX, int cursorY, bool* inLamp, bool* inPanel)
 {
     const int lampW = 2 * hbs_ui::StatusLampRadius + 1 + 2 * kFoldLampPad;
@@ -72,14 +100,14 @@ class FoldableBarUi final : public IBattleStoreUi {
 public:
     void Initialize() override
     {
-        // 锚点一次性算准：灯中心 = 战场右缘-边距（X）、边距+半径（Y）。
-        // 由灯位反推面板左上角，展开/收起切换时灯严格不动。
-        // 忽略 BarX/BarY（键名与旧行为不变）。
+        // 初值占位（800x600 逻辑屏右上）：真正的锚点由 FoldSyncAnchor_ 每帧
+        // 从战斗对话框矩形刷新（Initialize 时还没有战斗）。忽略 BarX/BarY
+        // （键名与旧行为不变）。
         g_uiFoldLayout = true;
         g_uiBarAnchorX = kFoldGameWidth - kFoldMargin
             - kUiBarWidth + hbs_ui::StatusLampRadius + 1;
         g_uiBarAnchorY = kFoldMargin;
-        LogInfo("[Ui] fold bar anchor=%d,%d lamp=%d,%d expanded_input=灯热区",
+        LogInfo("[Ui] fold bar placeholder anchor=%d,%d lamp=%d,%d",
             g_uiBarAnchorX, g_uiBarAnchorY, FoldLampCenterX_(), FoldLampCenterY_());
     }
 
@@ -90,6 +118,7 @@ public:
         // 旧 UiDrawBar_ 的 redrawing 闸同理，只护展开路径，这里护收起路径。
         static bool foldDrawing = false;
         if (foldDrawing) return;
+        FoldSyncAnchor_(mgr);
         FoldUpdateFromCursor_();
         if (g_foldExpanded) {
             foldDrawing = true;
