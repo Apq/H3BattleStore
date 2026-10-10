@@ -5,7 +5,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $vcvars = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars32.bat'
 Push-Location $root
 try {
-    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests')) {
+    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests')) {
         $sources = '"tests\' + $name + '.cpp"'
         $defines = '/D_CRT_SECURE_NO_WARNINGS'
         if ($name -eq 'LogControlsTests') {
@@ -19,8 +19,8 @@ try {
             ' /Fo"' + $out + '\\" /Fe"' + $exe + '" user32.lib > "' + $log + '" 2>&1'
         cmd /d /c ('call "' + $vcvars + '" >nul && ' + $compile)
         if ($LASTEXITCODE -ne 0) { throw "$name compile failed; see $log" }
-        if ($name -eq 'LogControlsTests') {
-            $fixture = Join-Path $out ('fixture-' + [guid]::NewGuid().ToString('N'))
+        if ($name -eq 'UiPortTests' -or $name -eq 'LogControlsTests') {
+            $fixture = Join-Path $out ([guid]::NewGuid().ToString('N'))
             & $exe $fixture
         } else { & $exe }
         if ($LASTEXITCODE -ne 0) { throw "$name failed: $LASTEXITCODE" }

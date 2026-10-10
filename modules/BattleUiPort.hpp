@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <type_traits>
 
 namespace h3 { struct H3CombatManager; struct H3Msg; }
 
@@ -28,9 +29,15 @@ struct UiMouseEvent_
     int wheelDelta;
 };
 
+static_assert(std::is_trivial<UiKeyEvent_>::value && std::is_standard_layout<UiKeyEvent_>::value,
+    "UI key event must remain POD for SEH hooks");
+static_assert(std::is_trivial<UiMouseEvent_>::value && std::is_standard_layout<UiMouseEvent_>::value,
+    "UI mouse event must remain POD for SEH hooks");
+
 class IBattleStoreUi {
 public:
     virtual ~IBattleStoreUi() {}
+    virtual void Initialize() = 0;                                    // 启动时应用本界面布局；热键由服务加载
     // ---- 第2步面板：绘制、列表、恢复与通知 ----
     virtual void Draw(H3CombatManager* mgr) = 0;                       // 绘制帧（cycle/AfterBlt）
     virtual void PollHover() = 0;                                      // 帧内按光标重算悬停
@@ -39,8 +46,8 @@ public:
     virtual bool ReloadEntries(const H3CombatManager* mgr) = 0;        // 刷新存档列表（mgr 只读）
     virtual bool HitBar(H3Msg* msg, bool fullBlock) = 0;               // 消息钩子吞并判定
     virtual void HandleMouse(H3Msg* msg) = 0;                          // 消息钩子鼠标手势
-    virtual void MaintainRestore(H3CombatManager* mgr) = 0;            // 读档请求维护（第4步移服务）
-    virtual void ProcessRestore(H3CombatManager* mgr, int result) = 0; // 读档执行/收尾（第4步移服务）
+    virtual void MaintainRestore(H3CombatManager* mgr) = 0;            // 调服务维护请求并呈现超时通知
+    virtual void ProcessRestore(H3CombatManager* mgr, int result) = 0; // 调服务消费请求，界面确认后委托执行
     virtual void CancelRebind(const char* reason) = 0;                 // 取消改键等待
     virtual void MarkSaved(uint64_t timestampUtcMs) = 0;               // 保存成功状态提示
     virtual void MarkNotice(const char* utf8Text) = 0;                 // 保存失败等提示

@@ -92,10 +92,17 @@ SaveKey=G
 build.bat /t:Rebuild
 ```
 
+默认界面为 HdNativeUi（HD 原生悬浮条）。界面实现为编译期单选，Null 变体（只记日志、不绘制、不吞输入）用：
+
+```bat
+build.bat /t:Rebuild /p:H3BS_UI_NULL=1
+```
+
 输出文件：
 
 ```text
-Release\H3BattleStore.dll
+Release\H3BattleStore.dll                默认 HdNativeUi（部署目标）
+Release\null\H3BattleStore.dll           NullUi 变体（验证/实验用，不部署）
 ```
 
 ## 测试
@@ -109,6 +116,7 @@ Release\H3BattleStore.dll
 - Archive：文件格式、CRC、提交写入、元数据扫描与未知坏档不误删。
 - Codec：构造快照的编解码、数据范围与恢复策略校验。
 - LogControls：默认 debug（中文“调试”）、五级持久化重读、写入失败保留等级、实际日志写入过滤、阶段/结果分级、重复限频与计数（含计时回绕）、原生消息路由、最近五份完整日志的 LZMA 打包、Unicode CF_HDROP 载荷与剪贴板失败处理。
+- UiPort：NullUi 契约——输入事件全透传、无绘制/服务副作用、读档 fail-closed（无界面确认框只告警丢弃）、通知与生命周期日志顺序、事件结构 POD 断言生效。测试用最小类型 stub，不链接 H3API。
 
 以上单元测试已通过。真实钩子 ABI 测试、布局探针及读取真实游戏档的测试入口已按用户要求删除。游戏内显示、点击、残影和战斗恢复效果以用户实测为准。
 

@@ -58,6 +58,50 @@ static void StoreSaveHotkey_()
         LogError("[Config] SaveKey persistence failed runtime_key=%c", g_store.saveKey);
 }
 
+// 等待静止帧存档的截止时刻（0=无等待），属于保存流程门禁，与界面选择无关。
+// 现有版本没有非零置位路径；保留原取消日志/诊断语义。
+static DWORD g_storeWaitSaveUntil = 0;
+static void StoreCancelSaveWait_(const char* reason)
+{
+    if (!g_storeWaitSaveUntil) return;
+    g_storeWaitSaveUntil = 0;
+    LogInfo("[Wait op=%ld] cancelled input_lock=0 reason=%s", g_diag.id, reason);
+    DiagEnd_("cancelled", reason);
+}
+
+// 键码→存档键字母（原 UiVirtualKeyToLetter_，第5步随输入翻译下沉服务层）。
+static char StoreKeyLetter_(int virtualKey, bool windowsVk)
+{
+    if (windowsVk) {
+        switch (virtualKey) {
+        case 'B': return 'B';
+        case 'F': return 'F';
+        case 'G': return 'G';
+        case 'K': return 'K';
+        case 'M': return 'M';
+        case 'N': return 'N';
+        case 'U': return 'U';
+        case 'V': return 'V';
+        case 'X': return 'X';
+        case 'Y': return 'Y';
+        default: return 0;
+        }
+    }
+    switch (virtualKey) {
+    case h3::NH3VKey::H3VK_B: return 'B';
+    case h3::NH3VKey::H3VK_F: return 'F';
+    case h3::NH3VKey::H3VK_G: return 'G';
+    case h3::NH3VKey::H3VK_K: return 'K';
+    case h3::NH3VKey::H3VK_M: return 'M';
+    case h3::NH3VKey::H3VK_N: return 'N';
+    case h3::NH3VKey::H3VK_U: return 'U';
+    case h3::NH3VKey::H3VK_V: return 'V';
+    case h3::NH3VKey::H3VK_X: return 'X';
+    case h3::NH3VKey::H3VK_Y: return 'Y';
+    default: return 0;
+    }
+}
+
 static void StoreFormatStamp_(const StoreEntry& entry, char* out, size_t cap)
 {
     if (!hbs::detail::FormatNumberedArchiveStamp(entry.timestampUtcMs, entry.filenameAttempt, out, cap, nullptr)

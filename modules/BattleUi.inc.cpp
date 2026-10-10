@@ -21,38 +21,6 @@ static void UiToGbk_(const char* utf8, char* out, int outCap)
     out[outCap - 1] = 0;
 }
 
-static char UiVirtualKeyToLetter_(int virtualKey, bool windowsVk)
-{
-    if (windowsVk) {
-        switch (virtualKey) {
-        case 'B': return 'B';
-        case 'F': return 'F';
-        case 'G': return 'G';
-        case 'K': return 'K';
-        case 'M': return 'M';
-        case 'N': return 'N';
-        case 'U': return 'U';
-        case 'V': return 'V';
-        case 'X': return 'X';
-        case 'Y': return 'Y';
-        default: return 0;
-        }
-    }
-    switch (virtualKey) {
-    case h3::NH3VKey::H3VK_B: return 'B';
-    case h3::NH3VKey::H3VK_F: return 'F';
-    case h3::NH3VKey::H3VK_G: return 'G';
-    case h3::NH3VKey::H3VK_K: return 'K';
-    case h3::NH3VKey::H3VK_M: return 'M';
-    case h3::NH3VKey::H3VK_N: return 'N';
-    case h3::NH3VKey::H3VK_U: return 'U';
-    case h3::NH3VKey::H3VK_V: return 'V';
-    case h3::NH3VKey::H3VK_X: return 'X';
-    case h3::NH3VKey::H3VK_Y: return 'Y';
-    default: return 0;
-    }
-}
-
 static hbs_ui::Layout g_uiLayout = hbs_ui::ForFont(0);
 static int UiBandHeight_() { return g_uiLayout.bandHeight; }
 static const int kUiBarWidth = 480;
@@ -180,12 +148,11 @@ static void UiSaveBarPosition_()
     IniWriteKeyUtf8(g_user_ini_path, "Ui", "BarY", yText);
 }
 
-// BarX/BarY 是界面布局状态（裁定见 docs/09 第7节）；热键读取在服务层。
+// 界面实现必须自己解码 [Ui] BarX/BarY；服务层只负责 [Hotkeys] SaveKey。
 static void UiLoadBarPosition_()
 {
     g_ui.x = IniReadIntUtf8(g_user_ini_path, "Ui", "BarX", kUiDefaultX);
     g_ui.y = IniReadIntUtf8(g_user_ini_path, "Ui", "BarY", kUiDefaultY);
-    g_store.saveKey = StoreLoadHotkey_();
 }
 
 
@@ -447,18 +414,6 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
 }
 
 static H3LoadedPcx16* g_barComposite = nullptr;
-
-// 等待静止帧存档的截止时刻（Entry 置位/消费；0=无等待）。绘制层用它显示提示。
-static DWORD g_uiWaitSaveUntil = 0;
-
-static void CancelSaveWait_(const char* reason)
-{
-    if (!g_uiWaitSaveUntil) return;
-    g_uiWaitSaveUntil = 0;
-    LogInfo("[Wait op=%ld] cancelled input_lock=0 reason=%s", g_diag.id, reason);
-    DiagEnd_("cancelled", reason);
-}
-
 
 static void UiDrawBar_(H3CombatManager* mgr)
 {
@@ -1021,7 +976,7 @@ static void UiHandleFrameClick_(int gameX, int gameY)
     if (UiPointInBar_(gameX, gameY)) {
         if (gameX >= g_ui.x + hbs_ui::HotkeyX) {
             g_ui.awaitingRebind = true;
-            CancelSaveWait_("rebind entered");
+            StoreCancelSaveWait_("rebind entered");
             LogInfo("点击快捷键区域：(%d,%d)", gameX, gameY);
         } else {
             UiReloadEntries_(H3CombatManager::Get());
@@ -1058,7 +1013,7 @@ static void UiResetForBattle_()
 // 系统键盘钩子：letter 翻译、改键/存档键日志与 pending 投递（闩锁占用）。
 static bool UiOnSystemKey_(const UiKeyEvent_& e)
 {
-    const char letter = UiVirtualKeyToLetter_(e.vk, e.source == 0);
+    const char letter = StoreKeyLetter_(e.vk, e.source == 0);
     if (letter && (letter == g_store.saveKey || g_ui.awaitingRebind))
         WriteLogLv(e.repeat && !e.up ? LOG_TRACE : LOG_DEBUG, "[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
             e.up ? "up" : "down", e.repeat ? 1 : 0, e.vk, letter, g_store.saveKey,
@@ -1142,7 +1097,7 @@ static bool UiOnSystemMouse_(const UiMouseEvent_& e, bool combatOpen)
 // 游戏键盘消息（原生前）：改键/存档键日志。
 static void UiOnGameKeyBefore_(const H3Msg* msg, int level)
 {
-    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
+    const char pressed = StoreKeyLetter_(msg->subtype, false);
     if (pressed == g_store.saveKey || g_ui.awaitingRebind)
         WriteLogLv(level, "[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
             msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
@@ -1167,7 +1122,7 @@ static bool UiOnGameMouse_(H3Msg* msg)
 // 游戏键盘消息（原生后）：改键捕获与存档边沿触发。
 static void UiOnGameKeyAfter_(H3CombatManager* mgr, const H3Msg* msg, int result, DWORD now, bool waitBlocked)
 {
-    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
+    const char pressed = StoreKeyLetter_(msg->subtype, false);
     if (g_ui.awaitingRebind) {
         UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
         InterlockedExchange(&g_pendingSaveKey, 0);
@@ -1236,6 +1191,7 @@ static void UiOnFaultCleanup_()
 
 class HdNativeUi final : public IBattleStoreUi {
 public:
+    void Initialize() override { UiLoadBarPosition_(); }  // BarX/BarY 归界面层（第5步）
     void Draw(H3CombatManager* mgr) override { UiDrawBar_(mgr); }
     void PollHover() override
     {

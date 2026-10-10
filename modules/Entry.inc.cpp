@@ -409,7 +409,7 @@ static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION) {
         if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(H3CombatManager::Get())) return false;
-        if (g_uiWaitSaveUntil) { ++g_waitKeyEvents; return true; }
+        if (g_storeWaitSaveUntil) { ++g_waitKeyEvents; return true; }
         UiKeyEvent_ e = {};
         e.vk = (int)wParam;
         e.up = (lParam & 0x80000000) != 0;
@@ -424,7 +424,7 @@ static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
 static void DiagHookFault_()
 {
     __try {
-        if (g_diag.id || g_uiWaitSaveUntil) GuardLog_(
+        if (g_diag.id || g_storeWaitSaveUntil) GuardLog_(
             "[Op %ld] outcome=%s stage=%s side=%d slot=%d writing=%d input_lock=0 no rollback",
             g_diag.id, g_diag.writing ? "partial-write" : "exception",
             g_diag.stage ? g_diag.stage : "none", g_diag.side, g_diag.slot, g_diag.writing ? 1 : 0);
@@ -434,7 +434,7 @@ static void DiagHookFault_()
     g_restoreRequest.pending = false;
     g_diag.id = 0;
     g_diag.writing = false;
-    g_uiWaitSaveUntil = 0;
+    g_storeWaitSaveUntil = 0;
     g_uiPort->OnFaultCleanup();
 }
 
@@ -455,7 +455,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
     const bool rightUp = wParam == WM_RBUTTONUP;
     const bool move = wParam == WM_MOUSEMOVE;
     const bool wheel = wParam == WM_MOUSEWHEEL;
-    if (g_uiWaitSaveUntil) { ++g_waitMouseEvents; return true; }
+    if (g_storeWaitSaveUntil) { ++g_waitMouseEvents; return true; }
     if (!leftDown && !leftUp && !rightDown && !rightUp && !move && !wheel) return false;
     H3CombatManager* combat = H3CombatManager::Get();
     const bool combatOpen = !(g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal);
@@ -511,7 +511,7 @@ static void EnsureCombatKeyboardHook_()
 
 static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
 {
-    if (g_uiWaitSaveUntil && msg) {
+    if (g_storeWaitSaveUntil && msg) {
         const int cmd = (int)msg->command;
         if (cmd == (int)eMsgCommand::KEY_DOWN || cmd == (int)eMsgCommand::KEY_UP
             || cmd == (int)eMsgCommand::MOUSE_BUTTON || cmd == (int)eMsgCommand::MOUSE_OVER) {
@@ -564,7 +564,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                 hasKeyboardInput = true;
                 const int edgeLevel = g_commandKeys.Level((int)keyboardInput.subtype,
                     keyboardInput.command == eMsgCommand::KEY_DOWN);
-                const char letter = UiVirtualKeyToLetter_(keyboardInput.subtype, false);
+                const char letter = StoreKeyLetter_(keyboardInput.subtype, false);
                 inputLevel = LogCommandLevel_(g_uiPort->IsRebindWaiting() || (letter && letter == g_store.saveKey)
                     || keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR, edgeLevel);
             }
@@ -601,7 +601,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                     && g_messageFrames.Boundary(g_battleGeneration, mgr,
                         CombatIsReadable_(mgr) ? mgr->dlg : nullptr)) {
                     // The native dialog mutates msg into item commands in place.
-                    if (hasKeyboardInput) g_uiPort->OnGameKeyAfter(mgr, &keyboardInput, result, GetTickCount(), g_uiWaitSaveUntil != 0);
+                    if (hasKeyboardInput) g_uiPort->OnGameKeyAfter(mgr, &keyboardInput, result, GetTickCount(), g_storeWaitSaveUntil != 0);
                     if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
                         && BattleMainDialog_(mgr))
                         DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
@@ -810,12 +810,12 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         g_uiPort->PollRebindKey();
         g_uiPort->PollHover();
         // 键轮询（改键保护窗、闩锁重 arm、存档键边沿触发）整体在界面事件内。
-        g_uiPort->OnFrameKeyPoll(mgr, now, g_uiWaitSaveUntil != 0);
+        g_uiPort->OnFrameKeyPoll(mgr, now, g_storeWaitSaveUntil != 0);
         g_uiPort->FrameClick();   // 消费系统钩子投递的挂起点击（列表/改键/日志等级）
         g_uiPort->Draw(mgr);
     }
     else {
-        CancelSaveWait_("combat unavailable or finished");
+        StoreCancelSaveWait_("combat unavailable or finished");
     }
 }
 
@@ -833,7 +833,8 @@ static void StartPlugin()
         LogError("SoD 版本门卫失败：已停用全部钩子");
         return;
     }
-    UiLoadBarPosition_();
+    g_store.saveKey = StoreLoadHotkey_();
+    g_uiPort->Initialize();
     _PI->WriteHiHook(0x462600, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStart_);
     _PI->WriteHiHook(0x462E40, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStop_);
     _PI->WriteHiHook(0x4786B0, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleExecute_);
