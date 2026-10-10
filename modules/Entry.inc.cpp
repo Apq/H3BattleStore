@@ -811,6 +811,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         g_uiPort->PollHover();
         // 键轮询（改键保护窗、闩锁重 arm、存档键边沿触发）整体在界面事件内。
         g_uiPort->OnFrameKeyPoll(mgr, now, g_uiWaitSaveUntil != 0);
+        g_uiPort->FrameClick();   // 消费系统钩子投递的挂起点击（列表/改键/日志等级）
         g_uiPort->Draw(mgr);
     }
     else {
