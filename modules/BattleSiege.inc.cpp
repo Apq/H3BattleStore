@@ -32,10 +32,13 @@ static bool SiegeResourceReady_(const H3ResourceItem* item, const char* name)
     const uint8_t* raw = (const uint8_t*)item;
     const int32_t refs = *(const int32_t*)(raw + 0x18);
     void* const* vtable = *(void* const* const*)raw;
-    // The protected H3API name is 12 bytes followed by a zero DWORD.
+    // 2026-10-10 玩家日志实锤（battle-diag-siege-preflight-v10）：原版攻城墙名如
+    // SgFrDrw3.pcx 恰 12 字符占满 name[12]，终止 NUL 落在 +0x10 最低字节，
+    // nameEnd 高 3 字节为堆残留（实测 0x9a625c00 / 0x00641000），H3API 注释
+    // "always 0" 不成立——不得把 +0x10==0 当作有效性条件。名字合法性由
+    // SiegeNameValid_（13 字节内找 NUL）与 _strnicmp 全名比较共同保证。
     return refs > 0 && refs < 0x7FFFFFFF
         && !IsBadWritePtr((void*)(raw + 0x18), sizeof(int32_t))
-        && *(const uint32_t*)(raw + 0x10) == 0
         && Readable_(vtable, 2 * sizeof(void*)) && Readable_(vtable[1], 1)
         && SiegeNameValid_(name) && name[0]
         && _strnicmp((const char*)raw + 4, name, 13) == 0;
