@@ -72,7 +72,6 @@ static const int kUiLogLevelRows = 5;
 static const int kUiBgHeight = 48; // Source asset size, not the runtime two-band height.
 
 
-
 static struct
 {
     int x = kUiDefaultX;
@@ -188,7 +187,6 @@ static void UiLoadBarPosition_()
     g_ui.y = IniReadIntUtf8(g_user_ini_path, "Ui", "BarY", kUiDefaultY);
     g_store.saveKey = StoreLoadHotkey_();
 }
-
 
 
 static void UiMarkSaved_(uint64_t timestampUtcMs)
@@ -867,41 +865,30 @@ static void UiCancelRebind_(const char* reason)
 
 static void UiConfirmAndRestore_(const StoreEntry& entry)
 {
+    // 守卫在服务 StoreRequestRestore_ 内同样核验；这里先行复现以保持
+    // "守卫失败不取消改键"的原语义。
     if (g_restoreBusy || g_restoreRequest.pending
         || !CombatStorageWindow_(H3CombatManager::Get())) return;
     UiCancelRebind_("读档请求");
-    // Copy before any dialog or redraw can invalidate the entries vector.
-    g_restoreRequest.entry = entry;
-    g_restoreRequest.battleKey = g_store.battleKey;
-    g_restoreRequest.generation = g_battleGeneration;
-    g_restoreRequest.requested = GetTickCount();
-    g_restoreRequest.pending = true;
+    if (!StoreRequestRestore_(entry)) return;
     ClearBattleInputs_();
-    LogInfo("[Load] queued generation=%u depth=%d battle_depth=%d path=%s", g_battleGeneration,
-        g_messageDepth, g_messageFrames.Depth(g_battleGeneration), DiagUtf8_(entry.path).c_str());
 }
 
-
-static void UiRestoreFailure_(const char* outcome, const std::string& raw)
+// 失败呈现（模态弹窗；日志与诊断收尾已在服务 StoreRestoreFail_ 完成）。
+static void UiShowRestoreFailure_(const std::string& raw)
 {
     const std::string reason = StorePlayerTextZh_(raw);
-    WriteLogLv(g_restoreFatal ? LOG_ERROR : LOG_WARN, "[Load op=%ld] raw=%s reason_zh=%s fatal=%d", g_diag.id, raw.c_str(), reason.c_str(), g_restoreFatal ? 1 : 0);
-    // Keep the fatal diagnostic write context; never show a dialog in that state.
-    if (g_restoreFatal) return;
-    DiagEnd_(outcome, reason.c_str());
     const std::string message = std::string("读档未完成：") + reason;
     char notice[512] = {};
     UiToGbk_(message.c_str(), notice, sizeof(notice));
     H3Messagebox::Show(notice);
 }
 
-static void UiExecuteRestore_(H3CombatManager* mgr)
+// 确认流程与结果呈现：模态交互属界面；校验与写入在服务 StoreExecuteRestore_。
+static void UiRunRestoreFlow_(H3CombatManager* mgr, const StoreEntry& entry,
+    unsigned generation, const std::string& expectedKey)
 {
     if (g_restoreFatal) { g_restoreRequest.pending = false; return; }
-    const StoreEntry entry = g_restoreRequest.entry;
-    const unsigned generation = g_restoreRequest.generation;
-    const std::string expectedKey = g_restoreRequest.battleKey;
-    g_restoreRequest.pending = false;
     g_restoreBusy = true;
     struct BusyReset { ~BusyReset() { ClearBattleInputs_(); g_restoreBusy = false; } } busyReset;
     DiagBegin_("load", "outer-message", mgr);
@@ -914,140 +901,43 @@ static void UiExecuteRestore_(H3CombatManager* mgr)
     const bool confirmed = H3Messagebox::Choice(text);
     if (g_restoreFatal) return;
     if (!confirmed) { DiagEnd_("cancelled", "玩家取消读档确认"); return; }
-    std::string key, error;
-    if (generation != g_battleGeneration || !RestoreWindow_(mgr)) {
-        DiagEnd_("cancelled", "restore timing no longer available");
+    std::string rawReason;
+    int turn = 0;
+    const StoreRestoreResult_ outcome =
+        StoreExecuteRestore_(mgr, entry, generation, expectedKey, &rawReason, &turn);
+    if (outcome == StoreRestoreResult_::Failed) {
+        UiShowRestoreFailure_(rawReason);
         return;
     }
-    if (!BattleFingerprint_(mgr, &key, &error)) {
-        UiRestoreFailure_("rejected", error.empty() ? "battle fingerprint failed" : error); return;
+    if (outcome == StoreRestoreResult_::Fatal) return;
+    if (outcome == StoreRestoreResult_::Success) {
+        UiCancelRebind_("读档完成");
+        // Success notice (2026-10-07 用户裁定)：本插件悬浮框醒目色显示几秒，
+        // 到时自动回常规状态行；模态弹窗只留给失败。
+        char done[96] = {};
+        _snprintf(done, sizeof(done), "已读档：第 %d 回合", turn);
+        UiMarkNoticeHighlight_(done);
     }
-    if (key != expectedKey) {
-        LogWarn("[Load op=%ld] expected_battle=%s current_battle=%s", g_diag.id, expectedKey.c_str(), key.c_str());
-        UiRestoreFailure_("rejected", "battle fingerprint changed"); return;
-    }
-    hbs::ArchiveStore store(ArchiveRoot_());
-    std::vector<hbs::ArchiveRecord> records;
-    std::wstring storeError;
-    SetLastError(ERROR_SUCCESS);
-    if (!store.List(key, "", records, storeError)) {
-        const DWORD code = GetLastError();
-        UiRestoreFailure_("failed", StoreArchiveReason_(storeError, code)); return;
-    }
-    if (!storeError.empty())
-        LogWarn("[Load op=%ld] scan warning raw=%s reason_zh=%s", g_diag.id,
-            DiagUtf8_(storeError).c_str(), StorePlayerTextZh_(DiagUtf8_(storeError)).c_str());
-    const hbs::ArchiveRecord* found = nullptr;
-    for (size_t i = 0; i < records.size(); ++i)
-        if (records[i].path == entry.path && records[i].timestampUtcMs == entry.timestampUtcMs
-            && records[i].sequence == entry.sequence) { found = &records[i]; break; }
-    if (!found) {
-        // Scan skips corrupt files; preserve the selected file's reason, not another file's warning.
-        const std::wstring marker = hbs::detail::FileNameOf(entry.path) + L": ";
-        const size_t warning = storeError.find(marker);
-        if (warning != std::wstring::npos) {
-            const size_t start = warning + marker.size();
-            const size_t end = storeError.find(L"; ", start);
-            const std::wstring selectedError = storeError.substr(start, end == std::wstring::npos ? end : end - start);
-            // Reopen only for generic I/O diagnostics, since Scan lost the original OS code.
-            DWORD code = ERROR_SUCCESS;
-            if (selectedError == L"CreateFileW failed" || selectedError == L"cannot open archive") {
-                HANDLE file = CreateFileW(entry.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-                if (file == INVALID_HANDLE_VALUE) code = GetLastError();
-                else CloseHandle(file);
-            }
-            UiRestoreFailure_("failed", StoreArchiveReason_(selectedError, code)); return;
-        }
-        const DWORD attributes = GetFileAttributesW(entry.path.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
-            const DWORD code = GetLastError();
-            UiRestoreFailure_("failed", StoreArchiveReason_(L"cannot open archive", code)); return;
-        }
-        UiRestoreFailure_("rejected", "record metadata does not match archive"); return;
-    }
-    hbs::ArchiveDocument document;
-    storeError.clear();
-    SetLastError(ERROR_SUCCESS);
-    if (!store.Load(*found, document, storeError)) {
-        const DWORD code = GetLastError();
-        UiRestoreFailure_("failed", StoreArchiveReason_(storeError, code)); return;
-    }
-    if (document.battleKey != key) {
-        LogWarn("[Load op=%ld] archive_battle=%s current_battle=%s", g_diag.id, document.battleKey.c_str(), key.c_str());
-        UiRestoreFailure_("rejected", "archive battle key mismatch"); return;
-    }
-    std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
-    CodecCapture& capture = *captureStorage;
-    if (!CodecDecode(document.sections, &capture, &error)) {
-        UiRestoreFailure_("rejected", error);
-        return;
-    }
-    // 修复前存量档可能带悬挂瞬态链接（保存于换阵重打的新战斗），解码后同样规范
-    // 化，避免 RestorePolicy_ 用"存档中的电脑行动目标无效"误拒整档（2026-10-07
-    // 玩家日志 Op17-20）。丢弃量进 debug 日志留证。
-    const CodecLinkDropReport_ droppedLinks = CodecNormalizeStaleLinks_(capture);
-    if (droppedLinks.aiTargets || droppedLinks.relationEntries)
-        LogDebug("[Load op=%ld] stale links dropped from archive ai_targets=%u relation_entries=%u",
-            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries);
-    if (!RestoreSameBattle_(mgr, capture, key, &error)) {
-        UiRestoreFailure_("rejected", error);
-        return;
-    }
-    UiCancelRebind_("读档完成");
-    DiagEnd_("serialized-equal", "快照已恢复并通过白名单数据校验；实机轨迹验收仍待验证");
-    // Success notice (2026-10-07 用户裁定)：本插件悬浮框醒目色显示几秒，
-    // 到时自动回常规状态行；模态弹窗只留给失败。
-    char done[96] = {};
-    _snprintf(done, sizeof(done), "已读档：第 %d 回合", capture.turn);
-    UiMarkNoticeHighlight_(done);
     // No rendering after the final RNG commit in this handler.
 }
 
-// 独立的读档请求维护（2026-10-10 修复）：每帧在绘制循环调用，不受恢复安全点
-// 与消息深度门控。只取消排队状态（超时/换场/战斗结束），绝不写战斗内存。
-// 之前超时检查埋在 UiProcessRestore_ 里，消费入口被绝对深度阻断时连取消
-// 都不运行，玩家侧表现为点击读档后红灯五分多钟。
+// 独立的读档请求维护包装（2026-10-10 修复语义保持）：决策在服务；超时提示归界面。
 static void UiMaintainRestore_(H3CombatManager* mgr)
 {
-    if (!g_restoreRequest.pending || g_restoreBusy || g_restoreFatal) return;
-    const bool battleAvailable = CombatIsReadable_(mgr) && !mgr->finished;
-    const BattleRestoreMaintainState_ state = {true, battleAvailable,
-        g_restoreRequest.generation, g_battleGeneration,
-        (unsigned long)(GetTickCount() - g_restoreRequest.requested)};
-    switch (BattleRestoreMaintainDecision_(state)) {
-    case BattleRestoreMaintain_::Keep:
-        return;
-    case BattleRestoreMaintain_::CancelBattleChanged:
-        LogInfo("[Load] cancelled reason=battle-changed entry_generation=%u current_generation=%u age_ms=%lu",
-            g_restoreRequest.generation, g_battleGeneration, state.ageMs);
-        g_restoreRequest.pending = false;
-        return;
-    case BattleRestoreMaintain_::CancelTimeout:
-    default:
-        LogInfo("[Load] cancelled reason=timeout age_ms=%lu generation=%u depth=%d battle_depth=%d window=%d",
-            state.ageMs, g_battleGeneration, g_messageDepth,
-            g_messageFrames.Depth(g_battleGeneration), CombatStorageWindow_(mgr) ? 1 : 0);
-        g_restoreRequest.pending = false;
+    if (StoreMaintainRestore_(mgr))
         UiMarkNotice_("读档等待超时，已取消；请重试");
-        return;
-    }
 }
 
 static void UiProcessRestore_(H3CombatManager* mgr, int result)
 {
-    if (!g_restoreRequest.pending || g_restoreBusy) return;
-    if (result == 2 || g_restoreRequest.generation != g_battleGeneration
-        || GetTickCount() - g_restoreRequest.requested > kRestoreQueueTimeoutMs_) {
-        g_restoreRequest.pending = false;
-        return;
-    }
-    if (!RestoreWindow_(mgr)) {
-        g_restoreRequest.pending = false;
-        return;
-    }
-    UiExecuteRestore_(mgr);
+    StoreEntry entry;
+    unsigned generation = 0;
+    std::string expectedKey;
+    if (!StoreConsumeRestore_(mgr, result, &entry, &generation, &expectedKey)) return;
+    UiRunRestoreFlow_(mgr, entry, generation, expectedKey);
 }
+
+
 static void UiHandleMouse_(H3Msg* msg)
 {
     if (!msg) return;

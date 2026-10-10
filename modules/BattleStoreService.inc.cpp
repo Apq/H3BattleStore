@@ -351,3 +351,180 @@ static bool StoreRequestSave_(H3CombatManager* mgr, int messageResult, const cha
         g_store.saveKey, rebindWaiting ? 1 : 0, rebindLatch ? rebindLatch : '-', messageResult);
     return TryCaptureCombat_();
 }
+
+// ========== 恢复调度（原 BattleUi 第4步迁入）：排队/维护/消费/执行链 ==========
+// 模态交互（确认框、失败弹窗、结果通知）留在界面；决策与写入在此。
+// 仅游戏主线程调用；执行链在消息钩子的 SEH 保护体内运行。
+
+enum class StoreRestoreResult_ { Fatal, Cancelled, Failed, Success };
+
+// 失败收尾：reason_zh 日志与诊断结束在此；fatal 时保留诊断上下文并要求界面静默。
+static StoreRestoreResult_ StoreRestoreFail_(const char* outcome, std::string* rawReason)
+{
+    const std::string reason = StorePlayerTextZh_(*rawReason);
+    WriteLogLv(g_restoreFatal ? LOG_ERROR : LOG_WARN, "[Load op=%ld] raw=%s reason_zh=%s fatal=%d",
+        g_diag.id, rawReason->c_str(), reason.c_str(), g_restoreFatal ? 1 : 0);
+    if (g_restoreFatal) return StoreRestoreResult_::Fatal;
+    DiagEnd_(outcome, reason.c_str());
+    return StoreRestoreResult_::Failed;
+}
+
+// 入队读档请求（点击列表行）：校验飞行状态与存储窗口后填请求记录。
+static bool StoreRequestRestore_(const StoreEntry& entry)
+{
+    if (g_restoreBusy || g_restoreRequest.pending || !CombatStorageWindow_(H3CombatManager::Get())) return false;
+    g_restoreRequest.entry = entry;
+    g_restoreRequest.battleKey = g_store.battleKey;
+    g_restoreRequest.generation = g_battleGeneration;
+    g_restoreRequest.requested = GetTickCount();
+    g_restoreRequest.pending = true;
+    LogInfo("[Load] queued generation=%u depth=%d battle_depth=%d path=%s", g_battleGeneration,
+        g_messageDepth, g_messageFrames.Depth(g_battleGeneration), DiagUtf8_(entry.path).c_str());
+    return true;
+}
+
+// 每帧维护（超时/换代取消；2026-10-10 修复：不受消息深度与安全点门控）。
+// 返回 true = 超时取消（调用方负责玩家提示）。
+static bool StoreMaintainRestore_(H3CombatManager* mgr)
+{
+    if (!g_restoreRequest.pending || g_restoreBusy || g_restoreFatal) return false;
+    const bool battleAvailable = CombatIsReadable_(mgr) && !mgr->finished;
+    const BattleRestoreMaintainState_ state = {true, battleAvailable,
+        g_restoreRequest.generation, g_battleGeneration,
+        (unsigned long)(GetTickCount() - g_restoreRequest.requested)};
+    switch (BattleRestoreMaintainDecision_(state)) {
+    case BattleRestoreMaintain_::Keep:
+        return false;
+    case BattleRestoreMaintain_::CancelBattleChanged:
+        LogInfo("[Load] cancelled reason=battle-changed entry_generation=%u current_generation=%u age_ms=%lu",
+            g_restoreRequest.generation, g_battleGeneration, state.ageMs);
+        g_restoreRequest.pending = false;
+        return false;
+    case BattleRestoreMaintain_::CancelTimeout:
+    default:
+        LogInfo("[Load] cancelled reason=timeout age_ms=%lu generation=%u depth=%d battle_depth=%d window=%d",
+            state.ageMs, g_battleGeneration, g_messageDepth,
+            g_messageFrames.Depth(g_battleGeneration), CombatStorageWindow_(mgr) ? 1 : 0);
+        g_restoreRequest.pending = false;
+        return true;
+    }
+}
+
+// 消费时机判定（消息边界处）：就绪则出队并给出请求快照供确认流程使用。
+static bool StoreConsumeRestore_(H3CombatManager* mgr, int result, StoreEntry* entry,
+    unsigned* generation, std::string* expectedKey)
+{
+    if (!g_restoreRequest.pending || g_restoreBusy) return false;
+    if (result == 2 || g_restoreRequest.generation != g_battleGeneration
+        || GetTickCount() - g_restoreRequest.requested > kRestoreQueueTimeoutMs_) {
+        g_restoreRequest.pending = false;
+        return false;
+    }
+    if (!RestoreWindow_(mgr)) {
+        g_restoreRequest.pending = false;
+        return false;
+    }
+    *entry = g_restoreRequest.entry;
+    *generation = g_restoreRequest.generation;
+    *expectedKey = g_restoreRequest.battleKey;
+    g_restoreRequest.pending = false;
+    return true;
+}
+
+// 确认后的执行链：指纹校验、档案定位与加载、解码规范化、恢复写入。
+// 失败路径的日志与诊断收尾在此；玩家弹窗由界面按返回值呈现。
+static StoreRestoreResult_ StoreExecuteRestore_(H3CombatManager* mgr, const StoreEntry& entry,
+    unsigned generation, const std::string& expectedKey, std::string* rawReason, int* turn)
+{
+    std::string key, error;
+    if (generation != g_battleGeneration || !RestoreWindow_(mgr)) {
+        DiagEnd_("cancelled", "restore timing no longer available");
+        return StoreRestoreResult_::Cancelled;
+    }
+    if (!BattleFingerprint_(mgr, &key, &error)) {
+        *rawReason = error.empty() ? "battle fingerprint failed" : error;
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    if (key != expectedKey) {
+        LogWarn("[Load op=%ld] expected_battle=%s current_battle=%s", g_diag.id, expectedKey.c_str(), key.c_str());
+        *rawReason = "battle fingerprint changed";
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    hbs::ArchiveStore store(ArchiveRoot_());
+    std::vector<hbs::ArchiveRecord> records;
+    std::wstring storeError;
+    SetLastError(ERROR_SUCCESS);
+    if (!store.List(key, "", records, storeError)) {
+        const DWORD code = GetLastError();
+        *rawReason = StoreArchiveReason_(storeError, code);
+        return StoreRestoreFail_("failed", rawReason);
+    }
+    if (!storeError.empty())
+        LogWarn("[Load op=%ld] scan warning raw=%s reason_zh=%s", g_diag.id,
+            DiagUtf8_(storeError).c_str(), StorePlayerTextZh_(DiagUtf8_(storeError)).c_str());
+    const hbs::ArchiveRecord* found = nullptr;
+    for (size_t i = 0; i < records.size(); ++i)
+        if (records[i].path == entry.path && records[i].timestampUtcMs == entry.timestampUtcMs
+            && records[i].sequence == entry.sequence) { found = &records[i]; break; }
+    if (!found) {
+        // Scan skips corrupt files; preserve the selected file's reason, not another file's warning.
+        const std::wstring marker = hbs::detail::FileNameOf(entry.path) + L": ";
+        const size_t warning = storeError.find(marker);
+        if (warning != std::wstring::npos) {
+            const size_t start = warning + marker.size();
+            const size_t end = storeError.find(L"; ", start);
+            const std::wstring selectedError = storeError.substr(start, end == std::wstring::npos ? end : end - start);
+            // Reopen only for generic I/O diagnostics, since Scan lost the original OS code.
+            DWORD code = ERROR_SUCCESS;
+            if (selectedError == L"CreateFileW failed" || selectedError == L"cannot open archive") {
+                HANDLE file = CreateFileW(entry.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file == INVALID_HANDLE_VALUE) code = GetLastError();
+                else CloseHandle(file);
+            }
+            *rawReason = StoreArchiveReason_(selectedError, code);
+            return StoreRestoreFail_("failed", rawReason);
+        }
+        const DWORD attributes = GetFileAttributesW(entry.path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD code = GetLastError();
+            *rawReason = StoreArchiveReason_(L"cannot open archive", code);
+            return StoreRestoreFail_("failed", rawReason);
+        }
+        *rawReason = "record metadata does not match archive";
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    hbs::ArchiveDocument document;
+    storeError.clear();
+    SetLastError(ERROR_SUCCESS);
+    if (!store.Load(*found, document, storeError)) {
+        const DWORD code = GetLastError();
+        *rawReason = StoreArchiveReason_(storeError, code);
+        return StoreRestoreFail_("failed", rawReason);
+    }
+    if (document.battleKey != key) {
+        LogWarn("[Load op=%ld] archive_battle=%s current_battle=%s", g_diag.id, document.battleKey.c_str(), key.c_str());
+        *rawReason = "archive battle key mismatch";
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
+    CodecCapture& capture = *captureStorage;
+    if (!CodecDecode(document.sections, &capture, &error)) {
+        *rawReason = error;
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    // 修复前存量档可能带悬挂瞬态链接（保存于换阵重打的新战斗），解码后同样规范
+    // 化，避免 RestorePolicy_ 用"存档中的电脑行动目标无效"误拒整档（2026-10-07
+    // 玩家日志 Op17-20）。丢弃量进 debug 日志留证。
+    const CodecLinkDropReport_ droppedLinks = CodecNormalizeStaleLinks_(capture);
+    if (droppedLinks.aiTargets || droppedLinks.relationEntries)
+        LogDebug("[Load op=%ld] stale links dropped from archive ai_targets=%u relation_entries=%u",
+            g_diag.id, droppedLinks.aiTargets, droppedLinks.relationEntries);
+    if (!RestoreSameBattle_(mgr, capture, key, &error)) {
+        *rawReason = error;
+        return StoreRestoreFail_("rejected", rawReason);
+    }
+    DiagEnd_("serialized-equal", "快照已恢复并通过白名单数据校验；实机轨迹验收仍待验证");
+    *turn = capture.turn;
+    return StoreRestoreResult_::Success;
+}
