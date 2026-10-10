@@ -141,12 +141,18 @@ static_assert(kPanelRightTest + 2 <= kLampCenterXTest - kLampRingRadius); // 面
 static_assert(kPanelLeftTest >= 0);                                       // 面板不出左缘
 static_assert(hbs_ui::StatusLampColor(true).g > hbs_ui::StatusLampColor(true).r);
 static_assert(hbs_ui::StatusLampColor(false).r > hbs_ui::StatusLampColor(false).g);
-// 折叠界面热区语义（BattleFoldBar）：展开态必须光标留在面板内；收起态只有灯
-// 是热区；边界按左闭右开。
-static_assert(FoldBarWantsExpanded_(false, true, true));
-static_assert(FoldBarWantsExpanded_(false, false, true) == false);
-static_assert(FoldBarWantsExpanded_(true, false, true));
-static_assert(FoldBarWantsExpanded_(true, true, false) == false);
+// 折叠界面热区语义（BattleFoldBar）：收起态只有灯是热区，光标移入灯内展开
+// 一次；展开态光标留在灯或面板内都保持，两者都离开才收起。灯在面板之外，
+// 故"展开态 + 光标在灯上（inPanel=false）"必须仍然展开（03:3x 实证：否则
+// 悬停灯上会每帧收起→展开反复重画）。
+static_assert(FoldBarWantsExpanded_(false, true, true));           // 移入灯 → 展开
+static_assert(FoldBarWantsExpanded_(false, false, true) == false); // 收起态光面板不算
+static_assert(FoldBarWantsExpanded_(false, true, false));          // 移入灯 → 展开
+static_assert(FoldBarWantsExpanded_(false, false, false) == false); // 都不在 → 保持收起
+static_assert(FoldBarWantsExpanded_(true, false, true));           // 展开态留在面板
+static_assert(FoldBarWantsExpanded_(true, true, false));           // 展开态停在灯上仍保持
+static_assert(FoldBarWantsExpanded_(true, true, true));            // 两者都在
+static_assert(FoldBarWantsExpanded_(true, false, false) == false); // 都离开 → 收起
 static_assert(FoldBarRectContains_(10, 20, 30, 40, 10, 20));
 static_assert(FoldBarRectContains_(10, 20, 30, 40, 39, 59));
 static_assert(!FoldBarRectContains_(10, 20, 30, 40, 40, 59));

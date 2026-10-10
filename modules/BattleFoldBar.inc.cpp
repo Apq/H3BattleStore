@@ -35,6 +35,12 @@ static int g_foldPanelH = 0;
 // AfterBlt→Draw，无闸时"画→H3Redraw→Draw"无限递归栈溢出（0xC00000FD）。
 // 收起路径与展开路径共用（UiDrawBar_ 自身另有 redrawing 闸）。
 static bool g_foldDrawing = false;
+// 展开态光标接管（2026-10-11 03:3x 用户要求）：展开区域内用游戏默认光标
+// （箭头），不再显示战场光标/图标；离开展开区域时恢复接管前的光标。
+// 只记"是否接管"与接管前的 type/frame，便于原样恢复。
+static bool g_foldCursorTaken = false;
+static int g_foldCursorType = 0;
+static int g_foldCursorFrame = 0;
 
 // 灯心：与收起态小图中心同一坐标，展开态也不变（灯独立于面板绘制）。
 static int FoldLampCenterX_() { return g_foldLampX; }
@@ -87,6 +93,28 @@ static void FoldHotZone_(int cursorX, int cursorY, bool* inLamp, bool* inPanel)
     *inLamp = FoldBarRectContains_(lampX, lampY, lampW, lampW, cursorX, cursorY);
     *inPanel = FoldBarRectContains_(g_foldPanelX, g_foldPanelY,
         g_foldPanelW, g_foldPanelH, cursorX, cursorY);
+}
+
+// 光标接管/恢复（仅在游戏主线程、AfterBlt 同侧调用；与绘制同帧）。
+static void FoldTakeDefaultCursor_()
+{
+    H3MouseManager* mm = H3MouseManager::Get();
+    if (!mm) return;
+    if (!g_foldCursorTaken) {
+        g_foldCursorType = mm->GetType();
+        g_foldCursorFrame = mm->GetFrame();
+        g_foldCursorTaken = true;
+    }
+    // type 0 即 eCursor::DEFAULT（游戏默认光标）；frame 0 为默认帧。
+    mm->SetCursor(0, 0);
+}
+
+static void FoldRestoreCursor_()
+{
+    if (!g_foldCursorTaken) return;
+    H3MouseManager* mm = H3MouseManager::Get();
+    if (mm) mm->SetCursor(g_foldCursorFrame, g_foldCursorType);
+    g_foldCursorTaken = false;
 }
 
 // 光标位置→展开状态（纯判定 FoldBarWantsExpanded_）。事件坐标优先，其次查询
@@ -174,6 +202,8 @@ public:
             g_foldDrawing = true;
             DrawFoldLamp_(mgr);
             g_foldDrawing = false;
+            // 展开区域内改用游戏默认光标（用户 03:3x 要求）。
+            FoldTakeDefaultCursor_();
             return;
         }
         // 收起：若上一帧还是展开态（tail 有效），先把展开矩形从 screenPcx16
@@ -193,6 +223,8 @@ public:
                 tailX, tailY, tailBlockH, tailListW, tailH,
                 dbgWnd ? (const void*)dbgWnd->screenPcx16 : nullptr);
         }
+        // 离开展开区域（吸收态）：恢复接管前的光标，再画灯。
+        FoldRestoreCursor_();
         DrawFoldLamp_(mgr);
     }
 
@@ -230,7 +262,13 @@ public:
     void CancelRebind(const char* reason) override { UiCancelRebind_(reason); }
     void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
     void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }
-    void OnBattleReset() override { UiResetForBattle_(); }
+    void OnBattleReset() override
+    {
+        // 换场：展开态与光标接管一起复位，避免上一场的光标类型带到下一场。
+        g_foldExpanded = false;
+        FoldRestoreCursor_();
+        UiResetForBattle_();
+    }
 
     bool OnSystemKey(const UiKeyEvent_& e) override { return UiOnSystemKey_(e); }
     bool OnSystemMouse(const UiMouseEvent_& e, bool combatOpen) override

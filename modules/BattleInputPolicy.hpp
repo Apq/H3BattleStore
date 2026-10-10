@@ -169,11 +169,14 @@ static constexpr bool BattleIsKeyboardMessage_(int command)
 }
 
 // 折叠式界面热区语义（第二套界面，默认实现；docs/09 第8节）：
-// 展开态要求光标留在整个面板矩形内，移出即收起；收起态只有状态灯是
-// 热区，光标进入才展开。判定纯函数化便于回归。
+// 收起态只有状态灯是热区，光标移入灯内才展开，且只展开一次（不重复触发）；
+// 展开态光标留在灯或面板内都算停留，只有两者都离开才收起。灯在面板之外
+// （面板右缘与灯左缘之间留间隙，2026-10-11 03:1x 起），所以"光标在灯上"
+// 时 inPanel 为假——展开态必须同时认 inLamp，否则悬停灯上会每帧
+// 收起→展开反复重画（03:3x 用户实证）。判定纯函数化便于回归。
 static constexpr bool FoldBarWantsExpanded_(bool expanded, bool inLamp, bool inPanel)
 {
-    return expanded ? inPanel : inLamp;
+    return expanded ? (inLamp || inPanel) : inLamp;
 }
 
 static constexpr bool FoldBarRectContains_(int x, int y, int w, int h, int px, int py)
