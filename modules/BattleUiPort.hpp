@@ -52,6 +52,10 @@ public:
     virtual void HandleMouse(H3Msg* msg) = 0;                          // 消息钩子鼠标手势
     virtual void MaintainRestore(H3CombatManager* mgr) = 0;            // 调服务维护请求并呈现超时通知
     virtual void ProcessRestore(H3CombatManager* mgr, int result) = 0; // 调服务消费请求，界面确认后委托执行
+    // 读档成功后的界面复位钩子（默认无操作，折叠界面用来强制收起）。
+    // 读档会重绘整个战场，悬浮展开区的 backbuffer 内容被整体换掉，界面若
+    // 保持展开，下次收起时会把自己残留的面板像素写回战场（彩条）。
+    virtual void OnRestoreApplied() {}
     virtual void CancelRebind(const char* reason) = 0;                 // 取消改键等待
     virtual void MarkSaved(uint64_t timestampUtcMs) = 0;               // 保存成功状态提示
     virtual void MarkNotice(const char* utf8Text) = 0;                 // 保存失败等提示

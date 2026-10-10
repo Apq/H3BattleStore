@@ -117,6 +117,18 @@ static void FoldRestoreCursor_()
     g_foldCursorTaken = false;
 }
 
+// 强制收起（读档成功后调用）。读档会 kRefreshField 重绘整个战场，面板
+// 遮挡区的 backbuffer 内容已换成读档后的场景，此时若继续展开，本插件自身
+// 仍留在 backbuffer 上的面板像素会被拍进新快照，之后收起写回 = 彩条
+// （2026-10-11 05:2x 玩家实测：读档后偶发一小块彩条）。收起后需重新
+// hover 才展开；状态灯不受影响，仍每帧重画。
+static void FoldForceCollapse_()
+{
+    if (!g_foldExpanded) return;
+    g_foldExpanded = false;
+    FoldRestoreCursor_();
+}
+
 // 光标位置→展开状态（纯判定 FoldBarWantsExpanded_）。事件坐标优先，其次查询
 // 系统光标；输入钩子与绘制帧都调用，保证即时一致。
 static void FoldUpdate_(int cursorX, int cursorY)
@@ -125,7 +137,6 @@ static void FoldUpdate_(int cursorX, int cursorY)
     FoldHotZone_(cursorX, cursorY, &inLamp, &inPanel);
     g_foldExpanded = FoldBarWantsExpanded_(g_foldExpanded, inLamp, inPanel);
 }
-
 static void FoldUpdateFromCursor_()
 {
     const H3POINT cursor = H3POINT::GetCursorPosition();
@@ -258,6 +269,9 @@ public:
     }
     void MaintainRestore(H3CombatManager* mgr) override { UiMaintainRestore_(mgr); }
     void ProcessRestore(H3CombatManager* mgr, int result) override { UiProcessRestore_(mgr, result); }
+    // 读档成功后强制收起：战场被 kRefreshField 整体重绘，展开态继续会把
+    // 界面自身的面板像素拍进 save-under 新快照，之后收起写回即彩条。
+    void OnRestoreApplied() override { FoldForceCollapse_(); }
     void CancelRebind(const char* reason) override { UiCancelRebind_(reason); }
     void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
     void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }

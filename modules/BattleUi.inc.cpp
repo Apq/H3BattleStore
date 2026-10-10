@@ -474,6 +474,9 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
 // 决定方案：画面板之前先 Lock backbuffer 把将要覆盖的矩形读回自持缓冲，
 // 收起/收缩时原样写回同一矩形。与 screenPcx16 语义完全无关，闭合回路。
 // 读/写严格同源同矩形，不涉及任何颜色转换（16bpp 按 16bpp 整体拷贝）。
+// 注意：save-under 只捕获内容切换帧（rectChanged）——capture 位于 blt
+// 之前，连续展开帧的 backbuffer 已被上一帧的面板像素填满，拍到的是面板
+// 自己，写回即一整块彩条（2026-10-11 05:2x 玩家实测）。
 static BYTE* g_underBuf = nullptr;
 static int g_underW = 0;
 static int g_underH = 0;
@@ -492,6 +495,17 @@ static void UiUnderRelease_()
 
 // 供 BattleFoldBar 收起分支查询是否存在可用快照（同 TU 后置定义可见）。
 static bool UiUnderBufValid_() { return g_underBuf && g_underW > 0 && g_underH > 0; }
+
+// 作废快照（不写回）。读档会 kRefreshField 重绘战场，backbuffer 已换成
+// 读档后的场景；旧快照是读档前的战场像素，写回新战场就是彩条
+// （2026-10-11 05:2x 玩家实测）。读档成功后调用，下一次展开重新捕获。
+// 同时作废 uiTail 残影跟踪：读档不改变面板位置，rectChanged 不会为真，
+// 不置 -1 的话下一帧仍用旧快照。
+static void UiUnderInvalidate_()
+{
+    UiUnderRelease_();
+    uiTailX = -1;
+}
 
 // 记录 backbuffer 中矩形 (x,y,w,h) 的像素；只存一份（旧快照先释放）。
 static bool UiUnderCapture_(int x, int y, int w, int h)
@@ -781,10 +795,17 @@ static void UiDrawBar_(H3CombatManager* mgr)
         // 收缩/换位/收起三条情况：先写回旧快照（覆盖将要被抹掉的全部旧像素），
         // 再按本次矩形重新捕获，供下一次收起使用。
         if (g_uiFoldLayout) {
-            if (rectChanged) UiUnderRestore_();
-            if (!UiUnderCapture_(x, y, kUiBarWidth, totalH))
-                LogWarn("[Draw] under-capture failed x=%d y=%d w=%d h=%d bpp=%d",
-                    x, y, kUiBarWidth, totalH, UiBackBufferBpp_(UiDDBackBuffer_()));
+            // save-under 只在"内容切换帧"捕获：矩形变化（含首次展开）
+            // 意味着上一帧此处不是本矩形内容，backbuffer 该区域仍是干净场景。
+            // 绝不能每帧捕获——capture 位于 blt 之前，连续展开时 backbuffer
+            // 已被上一帧的面板像素填充，拍到的是面板自己，写回就是一整块
+            // 彩条（2026-10-11 05:2x 玩家实测复现）。
+            if (rectChanged) {
+                UiUnderRestore_();
+                if (!UiUnderCapture_(x, y, kUiBarWidth, totalH))
+                    LogWarn("[Draw] under-capture failed x=%d y=%d w=%d h=%d bpp=%d",
+                        x, y, kUiBarWidth, totalH, UiBackBufferBpp_(UiDDBackBuffer_()));
+            }
         }
         else {
             if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
@@ -1039,6 +1060,12 @@ static void UiProcessRestore_(H3CombatManager* mgr, int result)
     std::string expectedKey;
     if (!StoreConsumeRestore_(mgr, result, &entry, &generation, &expectedKey)) return;
     UiRunRestoreFlow_(mgr, entry, generation, expectedKey);
+    // 读档成功：backbuffer 已被 kRefreshField 换成读档后的战场场景。
+    // save-under 快照必须作废——旧快照是读档前的战场像素，写回新战场就是
+    // 彩条（2026-10-11 05:2x 玩家实测：读档后偶发一小块彩条）。
+    // 界面层面的"强制收起"由 Entry 在 ProcessRestore 之后调契约方法
+    // OnRestoreApplied() 完成（见 IBattleStoreUi），此处只管快照。
+    UiUnderInvalidate_();
 }
 
 
