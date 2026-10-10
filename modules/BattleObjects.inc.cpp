@@ -283,9 +283,10 @@ struct RestoreObjects_
                 if (!PrepareDeque(prepared.bytes.get(), saved.spellIds, error)
                     || !PrepareRelations(prepared.bytes.get(), mgr, saved, error)) return false;
                 // 2026-10-10 用户裁定：DEF 检查精简为最小集（指针非空+对象头可读，
-                // 2026-10-06 43DEDA 空指针前案防线），组号/帧号信任游戏自洽，
-                // 145~149 机器/箭塔不再单独豁免。
-                if (slot < 20 && saved.occupied) {
+                // 2026-10-06 43DEDA 空指针直送渲染前案防线），组号/帧号信任游戏自洽。
+                // 145~149 机器/箭塔豁免恢复（2026-10-10 17:43 玩家日志实证：攻城战
+                // 箭塔槽 stack->def==0 是正常状态，其 DEF 挂在攻城塔记录上）。
+                if (slot < 20 && saved.occupied && CodecDefFrameGateApplies_(saved.type)) {
                     H3LoadedDef* def = prepared.replace ? stack->def : mgr->stacks[side][slot].def;
                     if (!RestoreCreatureDefReady_(def, saved)) {
                         // 2026-10-07: an ammo-cart slot was rejected with no slot
@@ -299,7 +300,7 @@ struct RestoreObjects_
                         return false;
                     }
                 }
-                if (slot < 20 && old.occupied
+                if (slot < 20 && old.occupied && CodecDefFrameGateApplies_(old.type)
                     && !RestoreCreatureDefReady_(mgr->stacks[side][slot].def, old)) {
                     LogDebug("[Objects op=%ld] rollback def gate side=%d slot=%d type=%d anim=%d/%d def=%p groups=%d",
                         g_diag.id, side, slot, old.type, old.animation,

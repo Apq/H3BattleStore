@@ -178,9 +178,15 @@ static void TestControlStatePolicy_()
         "loading pre-cast state re-enables spellbook gate");
     Expect(!CodecSpellControlEnabled_(false, true, 1, false, true),
         "loading already-cast state keeps spellbook gate closed");
-    // 2026-10-10 用户裁定：CodecDefFrameGateApplies_（145~149 机器/箭塔豁免）随
-    // DEF 帧结构检查精简为最小集而删除——所有类型统一“指针非空+对象头可读”。
-    printf("PASS control state policy: wait, defend and spellbook\n");
+    // 145~149 豁免恢复（2026-10-10 17:43 玩家日志实证：攻城战箭塔槽
+    // stack->def==0 正常，其 DEF 挂在攻城塔记录上，不走普通生物 DEF 检查）。
+    Expect(CodecDefFrameGateApplies_(0) && CodecDefFrameGateApplies_(132)
+        && CodecDefFrameGateApplies_(144), "creature DEF gate applies to regular creatures");
+    Expect(!CodecDefFrameGateApplies_(145) && !CodecDefFrameGateApplies_(146)
+        && !CodecDefFrameGateApplies_(147) && !CodecDefFrameGateApplies_(148)
+        && !CodecDefFrameGateApplies_(149),
+        "war machines and arrow tower skip the DEF gate (player-verified)");
+    printf("PASS control state policy: wait, defend, spellbook and DEF gate\n");
 }
 
 static void TestNormalizeStaleLinks_()

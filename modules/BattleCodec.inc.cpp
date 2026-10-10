@@ -484,9 +484,17 @@ static bool CodecSpellControlEnabled_(bool tacticsPhase, bool hasHero,
     return !tacticsPhase && hasHero && (!heroCasted || castOverride) && hasSpellbook;
 }
 
-// 2026-10-10 用户裁定：动画帧检查精简为“DEF 指针非空且对象头可读”（2026-10-06
-// 43DEDA 空指针直送渲染的实证前案防线）；组号/帧号信任游戏自洽（存档值来自
-// 正在正常渲染的战斗），145~149 机器/箭塔不再单独豁免——统一最小检查。
+// 145 catapult .. 148 ammo cart war machines plus the 149 arrow tower use
+// native machine DEFs that never satisfy the creature-frame gate;
+// same-battle restore renders them through the DEF the game already draws.
+// 2026-10-10 17:43 玩家日志实证回归：攻城战 mgr->stacks[1][8].def==0（箭塔
+// DEF 挂在攻城塔记录上，不在 stack->def），统一"指针非空"最小集误拒全部
+// 攻城/带机器读档——豁免是 2026-10-07 弹药车前案的实证结论，不是臆测，恢复。
+static bool CodecDefFrameGateApplies_(int32_t type)
+{
+    return type < 145;
+}
+
 static void CodecInvalidateHover_(CodecCapture* capture)
 {
     capture->creatureAtMousePos = -1;
