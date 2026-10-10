@@ -465,6 +465,113 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
     }
 }
 
+// ---- 面板下方战场像素的自存快照（save-under，仅折叠界面使用） ----
+// 2026-10-11 04:3x：收起/收缩时不能从 screenPcx16 拷回战场——screenPcx16
+// 是 H3WindowManager 的绘制缓冲，只在**战场外**区域是不含插件绘制的干净源
+// （照抄 H3BattleValueInfo 的战场外方案，用户在战内实测条纹复现）。战场内
+// 的呈现走 DD backbuffer，插件把自己画进 backbuffer 后 H3Redraw 只刷新该
+// 矩形；backbuffer 的旧像素不会被覆盖，这才是残留来源。
+// 决定方案：画面板之前先 Lock backbuffer 把将要覆盖的矩形读回自持缓冲，
+// 收起/收缩时原样写回同一矩形。与 screenPcx16 语义完全无关，闭合回路。
+// 读/写严格同源同矩形，不涉及任何颜色转换（16bpp 按 16bpp 整体拷贝）。
+static BYTE* g_underBuf = nullptr;
+static int g_underW = 0;
+static int g_underH = 0;
+static int g_underX = 0;
+static int g_underY = 0;
+static int g_underBpp = 0;      // 记录快照时的位深，位深变化（HD 切换）直接作废
+static int g_underPitch = 0;
+
+// 释放快照（换场 / 位深变化 / 已写回后）。
+static void UiUnderRelease_()
+{
+    if (g_underBuf) free(g_underBuf);
+    g_underBuf = nullptr;
+    g_underW = g_underH = g_underX = g_underY = g_underBpp = g_underPitch = 0;
+}
+
+// 供 BattleFoldBar 收起分支查询是否存在可用快照（同 TU 后置定义可见）。
+static bool UiUnderBufValid_() { return g_underBuf && g_underW > 0 && g_underH > 0; }
+
+// 记录 backbuffer 中矩形 (x,y,w,h) 的像素；只存一份（旧快照先释放）。
+static bool UiUnderCapture_(int x, int y, int w, int h)
+{
+    UiUnderRelease_();
+    if (w <= 0 || h <= 0) return false;
+    LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
+    if (!bb) return false;
+    bool captured = false;
+    __try {
+        DDSURFACEDESC desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.dwSize = sizeof(desc);
+        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))) return false;
+        __try {
+            if (!desc.lpSurface) return false;
+            const int bpp = UiBackBufferBpp_(bb);
+            const int px = bpp == 32 ? 4 : 2;
+            const int pitch = (int)desc.lPitch;
+            if (pitch <= 0) return false;
+            // 矩形必须完整落在 backbuffer 内，否则来源不完整、写回会缺边。
+            if (x < 0 || y < 0 || x + w > (int)desc.dwWidth || y + h > (int)desc.dwHeight) return false;
+            BYTE* buf = (BYTE*)malloc((size_t)w * h * px);
+            if (!buf) return false;
+            const BYTE* base = (const BYTE*)desc.lpSurface + (size_t)y * pitch + (size_t)x * px;
+            for (int row = 0; row < h; ++row)
+                memcpy(buf + (size_t)row * w * px, base + (size_t)row * pitch, (size_t)w * px);
+            g_underBuf = buf;
+            g_underW = w; g_underH = h; g_underX = x; g_underY = y;
+            g_underBpp = bpp; g_underPitch = pitch;
+            captured = true;
+        } __finally {
+            bb->Unlock(nullptr);
+        }
+    } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
+        captured = false;
+    }
+    if (!captured) UiUnderRelease_();
+    return captured;
+}
+
+// 把快照写回 backbuffer 的同一矩形并刷新。快照与当前 backbuffer 位深不一致
+// （切换 HD/窗口模式）时放弃，保留原状让下一帧清理。
+static bool UiUnderRestore_()
+{
+    if (!g_underBuf || g_underW <= 0 || g_underH <= 0) return false;
+    LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
+    if (!bb) return false;
+    bool restored = false;
+    __try {
+        DDSURFACEDESC desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.dwSize = sizeof(desc);
+        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))) return false;
+        __try {
+            if (!desc.lpSurface) return false;
+            const int bpp = UiBackBufferBpp_(bb);
+            const int px = bpp == 32 ? 4 : 2;
+            const int pitch = (int)desc.lPitch;
+            if (pitch <= 0 || bpp != g_underBpp) return false;
+            const int x = g_underX, y = g_underY, w = g_underW, h = g_underH;
+            if (x < 0 || y < 0 || x + w > (int)desc.dwWidth || y + h > (int)desc.dwHeight) return false;
+            BYTE* base = (BYTE*)desc.lpSurface + (size_t)y * pitch + (size_t)x * px;
+            for (int row = 0; row < h; ++row)
+                memcpy(base + (size_t)row * pitch, g_underBuf + (size_t)row * w * px, (size_t)w * px);
+            restored = true;
+        } __finally {
+            bb->Unlock(nullptr);
+        }
+    } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
+        restored = false;
+    }
+    if (restored) {
+        H3WindowManager* wnd = H3WindowManager::Get();
+        if (wnd) wnd->H3Redraw(g_underX, g_underY, g_underW, g_underH);
+        UiUnderRelease_();
+    }
+    return restored;
+}
+
 static H3LoadedPcx16* g_barComposite = nullptr;
 
 static void UiDrawBar_(H3CombatManager* mgr)
@@ -668,33 +775,46 @@ static void UiDrawBar_(H3CombatManager* mgr)
         }
         bool bltOk = false;
         redrawing = true;
-        if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
-            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
-                uiTailBlockH, uiTailX, uiTailY)) wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
-            if (uiTailH > uiTailBlockH && UiBltPcx16Region_(wnd->screenPcx16,
-                uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH,
-                uiTailX, uiTailY + uiTailBlockH))
-                wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH);
+        // 残影清理分两套源，按界面选（2026-10-11 04:3x 起）：
+        // 折叠式用 save-under 自存快照（见 UiUnderCapture_ 的机制注释）——
+        // 战场内不能拿 screenPcx16 当恢复源；旧界面保持 screenPcx16 老路径。
+        // 收缩/换位/收起三条情况：先写回旧快照（覆盖将要被抹掉的全部旧像素），
+        // 再按本次矩形重新捕获，供下一次收起使用。
+        if (g_uiFoldLayout) {
+            if (rectChanged) UiUnderRestore_();
+            if (!UiUnderCapture_(x, y, kUiBarWidth, totalH))
+                LogWarn("[Draw] under-capture failed x=%d y=%d w=%d h=%d bpp=%d",
+                    x, y, kUiBarWidth, totalH, UiBackBufferBpp_(UiDDBackBuffer_()));
         }
-        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
-            const int tailY = uiTailY + g_uiLayout.ListTop();
-            const int tailH = uiTailBlockH - g_uiLayout.ListTop();
-            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, kUiBarWidth,
-                tailH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, kUiBarWidth, tailH);
-        }
-        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailH > totalH && wnd->screenPcx16) {
-            const int tailY = uiTailY + totalH;
-            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, uiTailListWidth,
-                uiTailH - totalH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, uiTailListWidth, uiTailH - totalH);
-        }
-        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listWidth && wnd->screenPcx16) {
-            const int stripX = uiTailX + listWidth;
-            const int stripY = uiTailY + g_uiLayout.ListTop();
-            const int stripH = totalH - g_uiLayout.ListTop();
-            if (stripH > 0 && UiBltPcx16Region_(wnd->screenPcx16, stripX, stripY,
-                uiTailListWidth - listWidth, stripH, stripX, stripY))
-                wnd->H3Redraw(stripX, stripY, uiTailListWidth - listWidth, stripH);
-        }
+        else {
+            if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
+                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
+                    uiTailBlockH, uiTailX, uiTailY)) wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
+                if (uiTailH > uiTailBlockH && UiBltPcx16Region_(wnd->screenPcx16,
+                    uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH,
+                    uiTailX, uiTailY + uiTailBlockH))
+                    wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH);
+            }
+            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
+                const int tailY = uiTailY + g_uiLayout.ListTop();
+                const int tailH = uiTailBlockH - g_uiLayout.ListTop();
+                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, kUiBarWidth,
+                    tailH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, kUiBarWidth, tailH);
+            }
+            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailH > totalH && wnd->screenPcx16) {
+                const int tailY = uiTailY + totalH;
+                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, uiTailListWidth,
+                    uiTailH - totalH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, uiTailListWidth, uiTailH - totalH);
+            }
+            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listWidth && wnd->screenPcx16) {
+                const int stripX = uiTailX + listWidth;
+                const int stripY = uiTailY + g_uiLayout.ListTop();
+                const int stripH = totalH - g_uiLayout.ListTop();
+                if (stripH > 0 && UiBltPcx16Region_(wnd->screenPcx16, stripX, stripY,
+                    uiTailListWidth - listWidth, stripH, stripX, stripY))
+                    wnd->H3Redraw(stripX, stripY, uiTailListWidth - listWidth, stripH);
+            }
+        } // !g_uiFoldLayout：旧界面继续用 screenPcx16 恢复
         // 两行悬浮框整块呈现，存档列表仅覆盖自身窄矩形。
         bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, g_uiLayout.ListTop(), x, y);
         if (rows > 0)
@@ -723,36 +843,6 @@ static void UiDrawBar_(H3CombatManager* mgr)
     } __except (GuardCrashFilter_(GUARD_DRAW, GetExceptionInformation())) {
         redrawing = false;
     }
-}
-
-// 折叠版收起时失效残影跟踪（第二套折叠界面用），让下一次展开帧直接重画、
-// 不误判 rectChanged。
-static void UiInvalidateTail_()
-{
-    uiTailX = -1;
-    uiTailY = uiTailH = uiTailBlockH = uiTailListWidth = -1;
-}
-
-// 折叠版收起瞬间恢复上一帧呈现矩形（2026-10-11 02:2x 实机实证回归）：
-// 战场每帧自动重绘能覆盖大部分旧区域，但增量呈现下并非全部——收起后
-// 偶发彩色条纹残留（中上部、非必现）。恢复源 screenPcx16 是不含本插件
-// 绘制的干净场景合成，与 UiDrawBar_ 内 rectChanged 恢复同款手法；只在
-// 展开→收起切换的首帧执行一次，随后失效跟踪。
-static void UiRestoreTail_()
-{
-    if (uiTailX < 0) return;
-    H3WindowManager* wnd = H3WindowManager::Get();
-    if (wnd && wnd->screenPcx16) {
-        if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
-                uiTailBlockH, uiTailX, uiTailY))
-            wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
-        if (uiTailH > uiTailBlockH
-            && UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY + uiTailBlockH,
-                uiTailListWidth, uiTailH - uiTailBlockH, uiTailX, uiTailY + uiTailBlockH))
-            wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth,
-                uiTailH - uiTailBlockH);
-    }
-    UiInvalidateTail_();
 }
 
 // 悬浮条位置夹在战场对话框矩形内（2026-10-05 用户实测：战场框外的呈现/
@@ -1065,6 +1155,8 @@ static void UiResetForBattle_()
     g_ui.rebindKey = 0;
     g_ui.rebindGuardUntil = 0;
     ClearBattleInputs_();
+    // 快照只属于当前这一帧的战场像素；换场即失效，避免跨战斗写回旧战场。
+    UiUnderRelease_();
 }
 
 // ---- 键盘/鼠标状态机（原 Entry 钩子体，第3步迁入；仅改调用通道，逻辑逐行等价） ----

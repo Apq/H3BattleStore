@@ -157,8 +157,9 @@ public:
     }
 
     // 画状态灯（展开/收起同一位置）：小灯图按 2R+1 分配、灯心取 (R,R)，
-    // UiDrawStatusLamp_ 的外框圈正好铺满不越界（02:4x 前按 2r+1 分配会
-    // 单边越界 1px 踩相邻堆内存，表现为战场偶发彩色条纹）。
+    // UiDrawStatusLamp_ 的外框圈正好铺满不越界。（注意：H3LoadedPcx16::
+    // FillRectangle 自带钳制，越界只会被裁掉，不会写坏堆内存——早年把
+    // "彩色条纹"归因于此是错的，已更正，见 docs/变更记录.md 2026-10-11。）
     void DrawFoldLamp_(H3CombatManager* mgr)
     {
         const bool storageAllowed = UiStorageAllowed_(mgr);
@@ -206,22 +207,20 @@ public:
             FoldTakeDefaultCursor_();
             return;
         }
-        // 收起：若上一帧还是展开态（tail 有效），先把展开矩形从 screenPcx16
-        // 拷回一次再失效跟踪——战场每帧自动重绘覆盖大部分区域，但 02:2x
-        // 实机实证增量呈现下偶发彩色条纹残留（中上部、非必现），恢复一次
-        // 保证确定性清场。恢复前后打 debug 行：复现时核 rect/两个 blt 结果
-        // 与 screenPcx16 指针，区分"没恢复"与"源缓冲不干净"两种可能。
-        if (uiTailX >= 0) {
-            const int tailX = uiTailX, tailY = uiTailY;
-            const int tailBlockH = uiTailBlockH, tailListW = uiTailListWidth;
-            const int tailH = uiTailH;
-            H3WindowManager* dbgWnd = H3WindowManager::Get();
+        // 收起：把展开期间被面板盖住的战场像素从自存快照写回（save-under，
+        // 见 BattleUi.inc.cpp 的 UiUnderCapture_ 机制注释）。战场内**不能**
+        // 从 screenPcx16 拷回恢复源——那是战场外方案，战内实测复现彩色条纹
+        // （用户 04:0x 实证）。快照由 UiDrawBar_ 在折叠布局每帧 rectChanged
+        // 前捕获；从未展开过则没有快照，无从恢复也不需要恢复。
+        // 换场时快照由 UiResetForBattle_ 释放，不跨战斗保留。
+        if (UiUnderBufValid_()) {
+            const int tailX = g_ui.x, tailY = UiOriginY_();
+            const int tailH = g_uiLayout.Height(UiListRows_());
             g_foldDrawing = true;
-            UiRestoreTail_();
+            const bool ok = UiUnderRestore_();
             g_foldDrawing = false;
-            LogDebug("[Ui] fold collapse restore x=%d y=%d blockH=%d listW=%d totalH=%d screen=%p",
-                tailX, tailY, tailBlockH, tailListW, tailH,
-                dbgWnd ? (const void*)dbgWnd->screenPcx16 : nullptr);
+            LogDebug("[Ui] fold collapse restore x=%d y=%d h=%d ok=%d",
+                tailX, tailY, tailH, ok ? 1 : 0);
         }
         // 离开展开区域（吸收态）：恢复接管前的光标，再画灯。
         FoldRestoreCursor_();
