@@ -35,13 +35,9 @@ static const int kUiDefaultY = 4;
 // 不可拖动）；第二套折叠式界面经 Initialize() 改为战场内右上角。
 static int g_uiBarAnchorX = 8;
 static int g_uiBarAnchorY = 8;
-// 折叠版把状态灯移动到面板右上角，面板从灯向左、向下展开。
+// 折叠版把状态灯移出面板：面板右缘与灯左缘之间留间隙（灯不被面板压住），
+// 灯由 BattleFoldBar 在面板绘制之后单独画在原位，收起/展开同一位置。
 static bool g_uiFoldLayout = false;
-// 灯在合成图内的中心：X 距右缘留 1px（使 radius+1 的外框圈 463..479 不
-// 越出 480 宽合成图），Y 在首行带内。收起小图与展开面板共用同一几何，
-// 切换时灯严格不跳位；BattleFoldBar.inc.cpp 的灯心/锚点推导也用这两个值。
-static const int kFoldLampInBarX = kUiBarWidth - hbs_ui::StatusLampRadius - 2;
-static const int kFoldLampInBarY = hbs_ui::StatusLampRadius + 1;
 // HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
 static const int kUiLogPackX = 392;
 static const int kUiLogPackWidth = 84;
@@ -593,18 +589,12 @@ static void UiDrawBar_(H3CombatManager* mgr)
         font->TextDraw(c, label, 6, UiBandHeight_(), hbs_ui::StatusLabelWidth, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
         const bool storageAllowed = UiStorageAllowed_(mgr);
-        const int statusLampX = g_uiFoldLayout ? kFoldLampInBarX : hbs_ui::StatusLampX;
-        const int statusLampY = g_uiFoldLayout ? kFoldLampInBarY
-            : hbs_ui::StatusLampY(g_uiLayout);
-        if (g_uiFoldLayout) {
-            // 折叠版把灯移到面板右上角：先铺一块深色衬底，再画灯，
-            // 衬底左缘 463、右缘 479，整圈都在 480 宽合成图内。
-            c->FillRectangle(statusLampX - hbs_ui::StatusLampRadius - 1,
-                statusLampY - hbs_ui::StatusLampRadius - 1,
-                2 * hbs_ui::StatusLampRadius + 3, 2 * hbs_ui::StatusLampRadius + 3,
-                20, 20, 20);
-        }
-        UiDrawStatusLamp_(c, statusLampX, statusLampY, storageAllowed);
+        // 状态灯：旧界面画在合成图原位（第二行带内）；折叠版布局下灯移出
+        // 面板外（见 g_uiFoldLayout 注释），这里不再往面板里画，由
+        // BattleFoldBar 在面板之后单独画在原位。
+        if (!g_uiFoldLayout)
+            UiDrawStatusLamp_(c, hbs_ui::StatusLampX,
+                hbs_ui::StatusLampY(g_uiLayout), storageAllowed);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_store.saveKey);

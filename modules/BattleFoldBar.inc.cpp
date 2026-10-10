@@ -13,33 +13,38 @@
 // 锚点边距见 BattleInputPolicy.hpp 的 kFoldGameWidth/kFoldMargin（生产与
 // 回归测试共用）。收起态灯热区额外外扩 padding，方便瞄准。
 static const int kFoldLampPad = 4;
+// 灯含 UiDrawStatusLamp_ 外框圈的总半径（圈半径 = radius+1）；小灯图按
+// 2R+1 分配才不越界（2026-10-11 02:4x 越界踩堆实证）。
+static const int kFoldLampRadius = hbs_ui::StatusLampRadius + 1;
+// 面板右缘与灯左缘之间的间隙：灯保持原位、不被展开的面板压住
+// （用户 03:1x 纠正："保持灯的位置不变,向左(及下)展开的区域,不应该与灯重叠"）。
+static const int kFoldLampGap = 2;
 
 static bool g_foldExpanded = false;
 static H3LoadedPcx16* g_foldLamp = nullptr;
+// 灯心（屏幕游戏坐标），由 FoldSyncAnchor_ 每帧从战斗对话框刷新；面板由
+// 灯位反推，收起/展开切换时灯严格不跳位，且面板右缘不压灯。
+static int g_foldLampX = 0;
+static int g_foldLampY = 0;
 // 展开态面板矩形（每帧由 UiDrawBar_ 的推导量刷新；输入钩子即时查询）。
 static int g_foldPanelX = 0;
 static int g_foldPanelY = 0;
 static int g_foldPanelW = 0;
 static int g_foldPanelH = 0;
+// 呈现钩子重入闸（2026-10-11 02:18 闪退实证）：H3Redraw 会同步重入
+// AfterBlt→Draw，无闸时"画→H3Redraw→Draw"无限递归栈溢出（0xC00000FD）。
+// 收起路径与展开路径共用（UiDrawBar_ 自身另有 redrawing 闸）。
+static bool g_foldDrawing = false;
 
-// 灯中心（游戏坐标）：与展开面板内的灯位严格同一处（合成图内中心见
-// kFoldLampInBarX/Y，BattleUi 定义；其半径+1 外框圈不越合成图），
-// 保证收起↔展开切换时灯不跳位。面板从灯向左、向下生长。
-static int FoldLampCenterX_()
-{
-    return g_uiBarAnchorX + kFoldLampInBarX;
-}
-
-static int FoldLampCenterY_()
-{
-    return g_uiLayout.OriginY(g_uiBarAnchorY) + kFoldLampInBarY;
-}
+// 灯心：与收起态小图中心同一坐标，展开态也不变（灯独立于面板绘制）。
+static int FoldLampCenterX_() { return g_foldLampX; }
+static int FoldLampCenterY_() { return g_foldLampY; }
 
 // 锚定战场矩形（2026-10-11 02:3x 用户实证纠正）：目标区域是战斗对话框
 // （mgr->dlg）的内右上角，不是 800x600 逻辑屏的右上角——HD 分辨率下战场
 // 对话框居中且尺寸随分辨率变化，按逻辑屏算的 (785,16) 会落到战场外顶部
-// 中间。每帧从 dlg 刷新锚点（换场/分辨率变化自动跟随）；无战斗或矩形
-// 放不下面板时保持上次值。Initialize 的 800x600 值只是首次进战斗前的占位。
+// 中间。每帧从 dlg 刷新灯心与面板锚点（换场/分辨率变化自动跟随）；无战斗、
+// 矩形放不下"面板+灯"时保持上次值。Initialize 的值只是进战斗前的占位。
 static void FoldSyncAnchor_(H3CombatManager* mgr)
 {
     const H3CombatDlg* dlg = mgr ? mgr->dlg : nullptr;
@@ -48,28 +53,37 @@ static void FoldSyncAnchor_(H3CombatManager* mgr)
     const int dy = dlg->GetY();
     const int dw = dlg->GetWidth();
     const int dh = dlg->GetHeight();
-    if (dw < kUiBarWidth + 2 * kFoldMargin || dh < 4 * kFoldMargin) return;
-    const int lampX = dx + dw - kFoldMargin - hbs_ui::StatusLampRadius - 1;
-    const int lampY = dy + kFoldMargin + hbs_ui::StatusLampRadius + 1;
-    // 锚点由灯位反推：X 方向直接减"灯在条内中心"（kFoldLampInBarX），
-    // 与 FoldLampCenterX_() 同一来源，杜绝两处推导漂移。
-    const int anchorX = lampX - kFoldLampInBarX;
-    const int originY = lampY - kFoldLampInBarY;
-    int anchorY = originY + (g_uiLayout.bandHeight - 24) / 2;
+    // 需要同时容纳面板（kUiBarWidth）与灯（2R+间隙+边距），否则不动。
+    if (dw < kUiBarWidth + kFoldMargin + 2 * kFoldLampRadius + kFoldLampGap
+        || dh < 4 * kFoldMargin) return;
+    // 灯心贴战场内右上角：右缘内 kFoldMargin、上缘内 kFoldMargin。
+    const int lampX = dx + dw - kFoldMargin - kFoldLampRadius;
+    const int lampY = dy + kFoldMargin + kFoldLampRadius;
+    // 面板：右缘与灯左缘之间留 kFoldLampGap，上缘与灯顶缘齐平，
+    // 面板从灯向左、向下生长（OriginY 反推 anchorY 使面板顶缘落在 lampY-R）。
+    const int panelRight = lampX - kFoldLampRadius - kFoldLampGap;
+    const int panelTop = lampY - kFoldLampRadius;
+    const int anchorX = panelRight - kUiBarWidth;
+    int anchorY = panelTop + (g_uiLayout.bandHeight - 24) / 2;
     if (anchorY < 0) anchorY = 0;
-    if (anchorX != g_uiBarAnchorX || anchorY != g_uiBarAnchorY) {
+    if (anchorX != g_uiBarAnchorX || anchorY != g_uiBarAnchorY
+        || lampX != g_foldLampX || lampY != g_foldLampY) {
         g_uiBarAnchorX = anchorX;
         g_uiBarAnchorY = anchorY;
-        LogDebug("[Ui] fold anchor dlg=%d,%d %dx%d anchor=%d,%d lamp=%d,%d",
-            dx, dy, dw, dh, anchorX, anchorY, FoldLampCenterX_(), FoldLampCenterY_());
+        g_foldLampX = lampX;
+        g_foldLampY = lampY;
+        LogDebug("[Ui] fold anchor dlg=%d,%d %dx%d anchor=%d,%d lamp=%d,%d gap=%d",
+            dx, dy, dw, dh, anchorX, anchorY, lampX, lampY, kFoldLampGap);
     }
 }
 
 static void FoldHotZone_(int cursorX, int cursorY, bool* inLamp, bool* inPanel)
 {
-    const int lampW = 2 * hbs_ui::StatusLampRadius + 1 + 2 * kFoldLampPad;
-    const int lampX = FoldLampCenterX_() - hbs_ui::StatusLampRadius - kFoldLampPad;
-    const int lampY = FoldLampCenterY_() - hbs_ui::StatusLampRadius - kFoldLampPad;
+    // 灯热区：灯可见范围（含外框圈）再外扩 kFoldLampPad，便于瞄准；
+    // 外扩量已覆盖面板右缘与灯左缘之间的间隙，两个热区不会出现死缝。
+    const int lampW = 2 * kFoldLampRadius + 1 + 2 * kFoldLampPad;
+    const int lampX = FoldLampCenterX_() - kFoldLampRadius - kFoldLampPad;
+    const int lampY = FoldLampCenterY_() - kFoldLampRadius - kFoldLampPad;
     *inLamp = FoldBarRectContains_(lampX, lampY, lampW, lampW, cursorX, cursorY);
     *inPanel = FoldBarRectContains_(g_foldPanelX, g_foldPanelY,
         g_foldPanelW, g_foldPanelH, cursorX, cursorY);
@@ -102,34 +116,64 @@ class FoldableBarUi final : public IBattleStoreUi {
 public:
     void Initialize() override
     {
-        // 初值占位（800x600 逻辑屏右上）：真正的锚点由 FoldSyncAnchor_ 每帧
-        // 从战斗对话框矩形刷新（Initialize 时还没有战斗）。忽略 BarX/BarY
-        // （键名与旧行为不变）。
+        // 初值占位（800x600 逻辑屏内右上）：真正的灯心与面板锚点由
+        // FoldSyncAnchor_ 每帧从战斗对话框矩形刷新（Initialize 时还没有
+        // 战斗）。忽略 BarX/BarY（键名与旧行为不变）。
         g_uiFoldLayout = true;
-        g_uiBarAnchorX = kFoldGameWidth - kFoldMargin - kFoldLampInBarX;
+        g_foldLampX = kFoldGameWidth - kFoldMargin - kFoldLampRadius;
+        g_foldLampY = kFoldMargin + kFoldLampRadius;
+        g_uiBarAnchorX = g_foldLampX - kFoldLampRadius - kFoldLampGap - kUiBarWidth;
         g_uiBarAnchorY = kFoldMargin;
         LogInfo("[Ui] fold bar placeholder anchor=%d,%d lamp=%d,%d",
             g_uiBarAnchorX, g_uiBarAnchorY, FoldLampCenterX_(), FoldLampCenterY_());
     }
 
+    // 画状态灯（展开/收起同一位置）：小灯图按 2R+1 分配、灯心取 (R,R)，
+    // UiDrawStatusLamp_ 的外框圈正好铺满不越界（02:4x 前按 2r+1 分配会
+    // 单边越界 1px 踩相邻堆内存，表现为战场偶发彩色条纹）。
+    void DrawFoldLamp_(H3CombatManager* mgr)
+    {
+        const bool storageAllowed = UiStorageAllowed_(mgr);
+        const int lampW = 2 * kFoldLampRadius + 1;
+        if (!g_foldLamp || !g_foldLamp->buffer
+            || g_foldLamp->width != lampW || g_foldLamp->height != lampW) {
+            if (g_foldLamp) g_foldLamp->Destroy();
+            g_foldLamp = H3LoadedPcx16::Create(lampW, lampW);
+            if (!g_foldLamp || !g_foldLamp->buffer) return;
+        }
+        g_foldLamp->FillRectangle(0, 0, lampW, lampW, 20, 20, 20);
+        UiDrawStatusLamp_(g_foldLamp, kFoldLampRadius, kFoldLampRadius,
+            storageAllowed);
+        H3WindowManager* wnd = H3WindowManager::Get();
+        if (!wnd || !wnd->screenPcx16) return;
+        const int lampX = FoldLampCenterX_() - kFoldLampRadius;
+        const int lampY = FoldLampCenterY_() - kFoldLampRadius;
+        if (UiBltPcx16Region_(g_foldLamp, 0, 0, lampW, lampW, lampX, lampY)) {
+            g_foldDrawing = true;
+            wnd->H3Redraw(lampX, lampY, lampW, lampW);
+            g_foldDrawing = false;
+        }
+    }
+
     void Draw(H3CombatManager* mgr) override
     {
-        // 重入闸（2026-10-11 02:18 闪退实证）：收起态 H3Redraw 会同步重入
-        // AfterBlt→Draw，无闸时"画灯→H3Redraw→Draw"无限递归栈溢出。
-        // 旧 UiDrawBar_ 的 redrawing 闸同理，只护展开路径，这里护收起路径。
-        static bool foldDrawing = false;
-        if (foldDrawing) return;
+        if (g_foldDrawing) return;
         FoldSyncAnchor_(mgr);
         FoldUpdateFromCursor_();
         if (g_foldExpanded) {
-            foldDrawing = true;
+            g_foldDrawing = true;
             UiDrawBar_(mgr);
-            foldDrawing = false;
+            g_foldDrawing = false;
             // 记录展开态面板矩形（两行控制条 + 当前列表），供热区判定。
             g_foldPanelX = g_ui.x;
             g_foldPanelY = UiOriginY_();
             g_foldPanelW = kUiBarWidth;
             g_foldPanelH = g_uiLayout.Height(UiListRows_());
+            // 灯在面板之外原位重画：面板右缘与灯左缘之间留间隙，
+            // 展开不压灯、收起不跳位（用户 03:1x 纠正）。
+            g_foldDrawing = true;
+            DrawFoldLamp_(mgr);
+            g_foldDrawing = false;
             return;
         }
         // 收起：若上一帧还是展开态（tail 有效），先把展开矩形从 screenPcx16
@@ -142,36 +186,14 @@ public:
             const int tailBlockH = uiTailBlockH, tailListW = uiTailListWidth;
             const int tailH = uiTailH;
             H3WindowManager* dbgWnd = H3WindowManager::Get();
-            foldDrawing = true;
+            g_foldDrawing = true;
             UiRestoreTail_();
-            foldDrawing = false;
+            g_foldDrawing = false;
             LogDebug("[Ui] fold collapse restore x=%d y=%d blockH=%d listW=%d totalH=%d screen=%p",
                 tailX, tailY, tailBlockH, tailListW, tailH,
                 dbgWnd ? (const void*)dbgWnd->screenPcx16 : nullptr);
         }
-        // 灯图尺寸必须容纳 UiDrawStatusLamp_ 的整圈外边框（radius+1）：
-        // 02:4x 前小图按 2r+1=15 分配，外圈写到图外越界踩相邻堆内存，
-        // 表现为战场偶发彩色条纹。中心取 (r+1, r+1)，边框正好铺满不越界。
-        const bool storageAllowed = UiStorageAllowed_(mgr);
-        const int lampW = 2 * (hbs_ui::StatusLampRadius + 1) + 1;
-        if (!g_foldLamp || !g_foldLamp->buffer
-            || g_foldLamp->width != lampW || g_foldLamp->height != lampW) {
-            if (g_foldLamp) g_foldLamp->Destroy();
-            g_foldLamp = H3LoadedPcx16::Create(lampW, lampW);
-            if (!g_foldLamp || !g_foldLamp->buffer) return;
-        }
-        g_foldLamp->FillRectangle(0, 0, lampW, lampW, 20, 20, 20);
-        UiDrawStatusLamp_(g_foldLamp, hbs_ui::StatusLampRadius + 1,
-            hbs_ui::StatusLampRadius + 1, storageAllowed);
-        H3WindowManager* wnd = H3WindowManager::Get();
-        if (!wnd || !wnd->screenPcx16) return;
-        const int lampX = FoldLampCenterX_() - hbs_ui::StatusLampRadius - 1;
-        const int lampY = FoldLampCenterY_() - hbs_ui::StatusLampRadius - 1;
-        if (UiBltPcx16Region_(g_foldLamp, 0, 0, lampW, lampW, lampX, lampY)) {
-            foldDrawing = true;
-            wnd->H3Redraw(lampX, lampY, lampW, lampW);
-            foldDrawing = false;
-        }
+        DrawFoldLamp_(mgr);
     }
 
     void PollHover() override
