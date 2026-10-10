@@ -651,9 +651,14 @@ static void UiDrawBar_(H3CombatManager* mgr)
         if (rows > 0) {
             const int listY = UiBandHeight_() + UiBandHeight_();
             for (int row = 0; row < rows; ++row) {
-                if (row == g_ui.hoverRow)
+                if (row == g_ui.hoverRow) {
+                    // 2026-10-10 用户反馈悬停高亮不醒目：提亮底色并加金色描边
+                    //（与打包按钮/滚动条边框同色系），行内白字对比仍足。
                     c->FillRectangle(2, listY + row * UiRowHeight_(),
-                        kUiListWidth - 4, UiRowHeight_(), 90, 70, 20);
+                        kUiListWidth - 4, UiRowHeight_(), 128, 102, 36);
+                    c->DrawFrame(2, listY + row * UiRowHeight_(),
+                        kUiListWidth - 4, UiRowHeight_(), 220, 200, 110);
+                }
                 char stamp[32] = {};
                 StoreFormatStamp_(g_store.entries[g_ui.scroll.first + row], stamp, sizeof(stamp));
                 font->TextDraw(c, stamp, 6, listY + row * UiRowHeight_(),
