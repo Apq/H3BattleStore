@@ -15,8 +15,8 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 //
 
 IDR_VERSIONINFO VERSIONINFO
- FILEVERSION 0,10,2026,1010
- PRODUCTVERSION 0,10,2026,1010
+ FILEVERSION 0,11,2026,1011
+ PRODUCTVERSION 0,11,2026,1011
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -34,12 +34,12 @@ BEGIN
             VALUE "Comments", "战场存档"
             VALUE "CompanyName", "Apq"
             VALUE "FileDescription", "战场存档"
-            VALUE "FileVersion", "0.10.2026.1010"
+            VALUE "FileVersion", "0.11.2026.1011"
             VALUE "InternalName", "H3BattleStore"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "H3BattleStore.dll"
             VALUE "ProductName", "战场存档"
-            VALUE "ProductVersion", "0.10.2026.1010"
+            VALUE "ProductVersion", "0.11.2026.1011"
         END
     END
     BLOCK "VarFileInfo"
