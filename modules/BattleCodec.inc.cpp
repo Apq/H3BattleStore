@@ -632,8 +632,11 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
                 s.protectionAirEffect, s.protectionFireEffect, s.protectionWaterEffect,
                 s.protectionEarthEffect, s.shieldEffect, s.airShieldEffect, s.slowEffect,
                 CodecStackFloat_(s, 0x450), CodecStackFloat_(s, 0x4A4)};
+            // 2026-10-10 用户裁定：幅度界 ±1000000 无游戏语义出处，删除；仅查有限性
+            // ——NaN 写回游戏内存会扩散进伤害计算，且逐字节 verify 对 NaN 自比较
+            // 照样"相等"，必须事前拦截。
             for (float f : effects)
-                if (!(f >= -1000000.0f && f <= 1000000.0f)) return reject("non-finite spell effect");
+                if (!_finite(f)) return reject("non-finite spell effect");
             if ((s.aiTarget.side == -1 && s.aiTarget.slot != -1)
                 || (s.aiTarget.side != -1 && (s.aiTarget.side < 0 || s.aiTarget.side > 1
                 || s.aiTarget.slot < 0 || s.aiTarget.slot >= 20
@@ -983,8 +986,10 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         for (int slot = 0; slot < 21; ++slot) {
             for (int vector = 0; vector < 4; ++vector) {
                 const std::vector<CodecIdentity>& items = capture.stacks[side][slot].relations[vector];
-                // 42 = 2×21 战斗槽结构界（每个部队最多出现一次），非拍脑袋上限。
-                if (items.size() > 42) relations.Fail();
+                // U16 计数字段容量闸（防截断写出自损坏文件）。原 42 条"每目标最多
+                // 出现一次"是未证实推断——原生关系向量是瞬态容器，无去重保证
+                // （2026-10-10 用户裁定删除）。
+                if (items.size() > 0xFFFF) relations.Fail();
                 relations.U16((uint16_t)items.size());
                 for (size_t i = 0; i < items.size(); ++i) {
                     relations.I32(items[i].side);
@@ -1109,7 +1114,8 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     out->rngMirrorSeed = battleReader.U32();
     for (int side = 0; side < 2; ++side) {
         const uint32_t count = battleReader.U32();
-        if (count > 1024) battleReader.ok = false;
+        // 法术表 81 项结构界（capture 侧 ReadSpellSet_ 同限）。
+        if (count > 81) battleReader.ok = false;
         out->eagleEye[side].resize(battleReader.ok ? count : 0);
         for (uint32_t i = 0; i < count && battleReader.ok; ++i)
             out->eagleEye[side][i] = battleReader.I32();
@@ -1209,7 +1215,9 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
         for (int slot = 0; slot < 21; ++slot) {
             for (int vector = 0; vector < 4; ++vector) {
                 const uint16_t count = relationReader.U16();
-                if (count > 42) relationReader.ok = false;
+                // resize 内存安全闸，与采集侧 ReadPointerRelations_ 可读性上限
+                // 同口径 100000；原 42 为未证实推断（2026-10-10 用户裁定删除）。
+                if (count > 100000) relationReader.ok = false;
                 std::vector<CodecIdentity>& items = out->stacks[side][slot].relations[vector];
                 items.resize(relationReader.ok ? count : 0);
                 for (uint16_t i = 0; relationReader.ok && i < count; ++i) {

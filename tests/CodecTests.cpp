@@ -713,6 +713,20 @@ int main()
         bad = stable; bad.stacks[0][0].position = 186;
         bad.squares[22] = stable.squares[23]; bad.squares[186] = stable.squares[22];
         Expect(RestorePolicy_(bad, &error), "ordinary stack final legal square186 accepted");
+        // 2026-10-10 用户裁定：浮点只查有限性（幅度界删除）——NaN 会骗过逐字节
+        // verify（自比较"相等"），必须事前拦截；有限大值信任游戏。
+        {
+            const uint32_t nanBits = 0x7FC00000u, infBits = 0x7F800000u;
+            float nanValue = 0, infValue = 0;
+            memcpy(&nanValue, &nanBits, sizeof(nanValue));
+            memcpy(&infValue, &infBits, sizeof(infValue));
+            bad = stable; bad.stacks[0][0].frenzyMultiplier = nanValue;
+            Expect(!RestorePolicy_(bad, &error), "NaN spell effect rejected");
+            bad = stable; bad.stacks[0][0].slowEffect = infValue;
+            Expect(!RestorePolicy_(bad, &error), "infinite spell effect rejected");
+            bad = stable; bad.stacks[0][0].frenzyMultiplier = 900000.0f;
+            Expect(RestorePolicy_(bad, &error), "finite large spell effect trusted (v8)");
+        }
     }
     bad = stable; bad.version = 2;
     Expect(!RestorePolicy_(bad, &error), "old incomplete v2 rejected");
