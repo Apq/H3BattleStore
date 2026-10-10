@@ -1127,3 +1127,43 @@ static void UiHandleFrameClick_(int gameX, int gameY)
     }
     if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
 }
+
+// ---- 界面实现装配（docs/09 第2步立契约）：HdNativeUi 转发现有入口，行为零变化。 ----
+
+// 换场清理：手势、悬停与改键交互状态；服务数据由 BattleReset_ 负责。
+static void UiResetForBattle_()
+{
+    g_ui.scroll = {};
+    g_ui.listGesture = {};
+    g_ui.listRightHeld = false;
+    g_ui.hoverRow = -1;
+    g_ui.logLevelHover = -1;
+    UiCancelRebind_("battle reset");
+    g_ui.rebindKey = 0;
+    g_ui.rebindGuardUntil = 0;
+}
+
+class HdNativeUi final : public IBattleStoreUi {
+public:
+    void Draw(H3CombatManager* mgr) override { UiDrawBar_(mgr); }
+    void PollHover() override
+    {
+        const H3POINT cursor = H3POINT::GetCursorPosition();
+        g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
+    }
+    void FrameClick(int gameX, int gameY) override { UiHandleFrameClick_(gameX, gameY); }
+    void PollRebindKey() override { UiPollRebindKey_(); }
+    bool ReloadEntries(const H3CombatManager* mgr) override { return UiReloadEntries_(mgr); }
+    bool HitBar(H3Msg* msg, bool fullBlock) override { return UiHitBar_(msg, fullBlock); }
+    void HandleMouse(H3Msg* msg) override { UiHandleMouse_(msg); }
+    void MaintainRestore(H3CombatManager* mgr) override { UiMaintainRestore_(mgr); }
+    void ProcessRestore(H3CombatManager* mgr, int result) override { UiProcessRestore_(mgr, result); }
+    void CancelRebind(const char* reason) override { UiCancelRebind_(reason); }
+    void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
+    void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }
+    void OnBattleReset() override { UiResetForBattle_(); }
+};
+
+static HdNativeUi g_hdNativeUi;
+// 钩子层唯一界面入口；第3步起 Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
+static IBattleStoreUi* const g_uiPort = &g_hdNativeUi;

@@ -370,11 +370,11 @@ static bool TryCaptureCombat_()
         DiagEnd_("persisted-unverified", error.c_str()); return false;
     }
     DiagSummary_(decoded, "readback");
-    UiMarkSaved_(document.timestampUtcMs);
+    g_uiPort->MarkSaved(document.timestampUtcMs);
     // 保存成功后刷新常驻列表，第一项就是刚存的档。
     //（列表按时间戳倒序，最新必在首位）；提示可有可无，列表不能少。
 
-    UiReloadEntries_(mgr);
+    g_uiPort->ReloadEntries(mgr);
     DiagEnd_("ok", "persisted and readback verified; runtime restore not verified");
     return true;
 }
@@ -391,7 +391,7 @@ static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin
     DiagBegin_("save", origin, mgr);
     LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
         g_store.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
-    if (!TryCaptureCombat_()) UiMarkNotice_("保存失败：详见日志");
+    if (!TryCaptureCombat_()) g_uiPort->MarkNotice("保存失败：详见日志");
 }
 
 static HHOOK g_combatKeyboardHook = nullptr;
@@ -524,7 +524,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
     if (leftDown) {
         g_ui.listGesture = {};
         g_ui.scroll.dragging = false;
-        if (!swallow) { UiCancelRebind_("outside mouse click"); return false; }
+        if (!swallow) { g_uiPort->CancelRebind("outside mouse click"); return false; }
         g_ui.listGesture.Begin(hitScroll);
         if (hitScroll) {
             UiScrollbarDown_(gameY);
@@ -608,10 +608,10 @@ static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
     }
     // Native hotkeys become 0x200 item commands, not overlay mouse clicks.
     if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
-    const bool onBar = UiHitBar_(msg, true);
+    const bool onBar = g_uiPort->HitBar(msg, true);
     const bool onList = UiPointInList_(msg->position.x, msg->position.y);
     if (onBar || onList || g_ui.scroll.dragging) {
-        UiHandleMouse_(msg);
+        g_uiPort->HandleMouse(msg);
         return true;
     }
     return false;
@@ -723,7 +723,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                     if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
                         && BattleMainDialog_(mgr))
                         DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
-                    UiProcessRestore_(mgr, result);
+                    g_uiPort->ProcessRestore(mgr, result);
                 }
             }
             __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { DiagHookFault_(); }
@@ -833,18 +833,11 @@ static void BattleReset_()
     // 消息登记不追栈帧链；下一代 Enter 清理旧代元数据，旧调用迟到的
     // Update/Leave 用 token 核验，不会误操作同地址的新登记。
     g_store.entries.clear();
-    g_ui.scroll = {};
-    g_ui.listGesture = {};
-    g_ui.listRightHeld = false;
     g_store.battleKey.clear();
-    g_ui.hoverRow = -1;
-    g_ui.logLevelHover = -1;
     if (g_storeListFailure.seen) LogWarn("[List] reset suppressed=%u", g_storeListFailure.suppressed);
     g_storeListFailure = {};
     g_commandKeys = {};
-    UiCancelRebind_("battle reset");
-    g_ui.rebindKey = 0;
-    g_ui.rebindGuardUntil = 0;
+    g_uiPort->OnBattleReset();
 
     ClearBattleInputs_();
 }
@@ -888,19 +881,14 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
     __try {
         H3CombatManager* mgr = H3CombatManager::Get();
         if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr) && !mgr->finished)
-            UiDrawBar_(mgr);
+            g_uiPort->Draw(mgr);
     }
     __except (GuardCrashFilter_(GUARD_BLT, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
 // 悬停即时刷新日志等级行高亮：面板 mouse-over 事件频率不可靠（H3Auto 教训），
-// 每帧按光标位置重算；UiDrawBar_ 每帧全量重画，无需额外失效。
-static void UiPollLogLevelHover_()
-{
-    const H3POINT cursor = H3POINT::GetCursorPosition();
-    g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
-}
+// 每帧按光标位置重算；Draw 每帧全量重画，无需额外失效。（实现在 HdNativeUi::PollHover）
 
 static void CombatCycleAfter_(H3CombatManager* mgr, int result)
 {
@@ -926,10 +914,10 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
     }
     // 读档请求独立维护：超时/换场/结束在这里取消，不受消息深度与恢复安全点
     // 门控（2026-10-10 玩家日志：消费入口被绝对深度阻断时请求挂起五分多秒）。
-    UiMaintainRestore_(mgr);
+    g_uiPort->MaintainRestore(mgr);
     if (readable && !mgr->finished && mgr->dlg) {
         if (g_battleInitialized && g_battleListDirty && BattleMainDialog_(mgr)) {
-            if (UiReloadEntries_(mgr)) {
+            if (g_uiPort->ReloadEntries(mgr)) {
                 g_battleListDirty = false;
                 g_ui.hoverRow = -1;
 
@@ -939,8 +927,8 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         }
         if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(mgr)) return;
         EnsureCombatKeyboardHook_();
-        UiPollRebindKey_();
-        UiPollLogLevelHover_();
+        g_uiPort->PollRebindKey();
+        g_uiPort->PollHover();
         if (now < g_ui.rebindGuardUntil)
             InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
         // 存档键松开后重新武装单次边沿（配合 TrySave_ 的 g_saveEdgeConsumed 闩锁）
@@ -950,7 +938,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
         const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
         if (clickX >= 0 && clickY >= 0)
-            UiHandleFrameClick_((int)clickX, (int)clickY);
+            g_uiPort->FrameClick((int)clickX, (int)clickY);
         // 存档键触发 = 松开→按下的边沿（2026-10-05 用户实测：改键单次短按
         // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
         // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
@@ -971,7 +959,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
             keyWasDown = !g_ui.awaitingRebind
                 && (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
         }
-        UiDrawBar_(mgr);
+        g_uiPort->Draw(mgr);
     }
     else {
         CancelSaveWait_("combat unavailable or finished");
