@@ -22,26 +22,17 @@ static int g_foldPanelY = 0;
 static int g_foldPanelW = 0;
 static int g_foldPanelH = 0;
 
-// 灯中心 = 展开面板的右上锚点：面板右缘贴战场右缘、上缘贴灯上缘，
-// 面板向左向下生长。灯与面板属同一区域，展开态下灯也在面板内。
+// 灯中心（游戏坐标）：与展开面板内的灯位严格同一处（合成图内灯在
+// kUiBarWidth-radius-1, radius+1），保证收起↔展开切换时灯不跳位。
+// 面板右缘贴战场右缘（留 kFoldMargin），面板从灯向左、向下生长。
 static int FoldLampCenterX_()
 {
-    return g_uiBarAnchorX + hbs_ui::StatusLampX;
+    return g_uiBarAnchorX + kUiBarWidth - hbs_ui::StatusLampRadius - 1;
 }
 
 static int FoldLampCenterY_()
 {
-    return g_uiBarAnchorY + hbs_ui::StatusLampY(g_uiLayout);
-}
-
-static int FoldAnchorX_()
-{
-    return FoldLampCenterX_() - kUiBarWidth;
-}
-
-static int FoldAnchorY_()
-{
-    return FoldLampCenterY_() - hbs_ui::StatusLampY(g_uiLayout);
+    return g_uiLayout.OriginY(g_uiBarAnchorY) + hbs_ui::StatusLampRadius + 1;
 }
 
 static void FoldHotZone_(int cursorX, int cursorY, bool* inLamp, bool* inPanel)
@@ -81,18 +72,29 @@ class FoldableBarUi final : public IBattleStoreUi {
 public:
     void Initialize() override
     {
-        // 锚点：状态灯中心贴战场内右上角；面板以灯为锚向左下展开。
+        // 锚点一次性算准：灯中心 = 战场右缘-边距（X）、边距+半径（Y）。
+        // 由灯位反推面板左上角，展开/收起切换时灯严格不动。
         // 忽略 BarX/BarY（键名与旧行为不变）。
         g_uiFoldLayout = true;
+        g_uiBarAnchorX = kFoldGameWidth - kFoldMargin
+            - kUiBarWidth + hbs_ui::StatusLampRadius + 1;
+        g_uiBarAnchorY = kFoldMargin;
         LogInfo("[Ui] fold bar anchor=%d,%d lamp=%d,%d expanded_input=灯热区",
-            FoldAnchorX_(), FoldAnchorY_(), FoldLampCenterX_(), FoldLampCenterY_());
+            g_uiBarAnchorX, g_uiBarAnchorY, FoldLampCenterX_(), FoldLampCenterY_());
     }
 
     void Draw(H3CombatManager* mgr) override
     {
+        // 重入闸（2026-10-11 02:18 闪退实证）：收起态 H3Redraw 会同步重入
+        // AfterBlt→Draw，无闸时"画灯→H3Redraw→Draw"无限递归栈溢出。
+        // 旧 UiDrawBar_ 的 redrawing 闸同理，只护展开路径，这里护收起路径。
+        static bool foldDrawing = false;
+        if (foldDrawing) return;
         FoldUpdateFromCursor_();
         if (g_foldExpanded) {
+            foldDrawing = true;
             UiDrawBar_(mgr);
+            foldDrawing = false;
             // 记录展开态面板矩形（两行控制条 + 当前列表），供热区判定。
             g_foldPanelX = g_ui.x;
             g_foldPanelY = UiOriginY_();
@@ -120,8 +122,11 @@ public:
         if (!wnd || !wnd->screenPcx16) return;
         const int lampX = FoldLampCenterX_() - hbs_ui::StatusLampRadius;
         const int lampY = FoldLampCenterY_() - hbs_ui::StatusLampRadius;
-        if (UiBltPcx16Region_(g_foldLamp, 0, 0, lampW, lampW, lampX, lampY))
+        if (UiBltPcx16Region_(g_foldLamp, 0, 0, lampW, lampW, lampX, lampY)) {
+            foldDrawing = true;
             wnd->H3Redraw(lampX, lampY, lampW, lampW);
+            foldDrawing = false;
+        }
     }
 
     void PollHover() override
