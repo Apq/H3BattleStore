@@ -175,6 +175,42 @@ constexpr bool StorageWindowTruthTable() {
     return true;
 }
 static_assert(StorageWindowTruthTable());
+// 折叠界面"读档后收起"的作用域回归（2026-10-11 06:0x 玩家实测回归）：
+// 折叠层只在**真的读过档**时强制收起，普通消息不得收起。原缺陷是把收起
+// 钩子挂在消息钩子后无条件调用（ProcessRestore 每条消息都会到），结果鼠标
+// 刚移出灯就被按回未展开态，再也展不开、没机会读档。
+// 这里用纯函数复刻生产语义：帧内 FoldUpdate_ 推进展开态，消息只在
+// restoreApplied 为真时收起。
+constexpr bool FoldRestoreCollapseScope() {
+    // 帧内：FoldUpdate_ 用纯判定推进展开态；消息：只有 restoreApplied 为真才收起。
+    bool expanded = false;
+    auto frame = [&expanded](bool inLamp, bool inPanel) {
+        expanded = FoldBarWantsExpanded_(expanded, inLamp, inPanel);
+    };
+    auto message = [&expanded](bool restoreApplied) {
+        if (restoreApplied) expanded = false;
+    };
+    // 读档前：hover 灯展开 → 移入面板保持 → 普通消息不得收起。
+    frame(true, false);
+    if (!expanded) return false;
+    frame(false, true);                 // 光标移出灯、进入面板
+    if (!expanded) return false;
+    message(false);                     // 普通战斗消息（无读档）
+    if (!expanded) return false;        // 必须仍然展开
+    frame(false, true);
+    if (!expanded) return false;
+    // 读过档：收起一次，且重新 hover 灯能再展开、并能移入面板。
+    message(true);
+    if (expanded) return false;
+    frame(true, false);
+    if (!expanded) return false;
+    frame(false, true);
+    if (!expanded) return false;        // 读档后仍能移入面板
+    // 之后再来普通消息，不得再次收起。
+    message(false);
+    return expanded;
+}
+static_assert(FoldRestoreCollapseScope());
 constexpr BattleStorageWindowState_ idleHuman = {
     true, false, true, false, false, false, false, false, false, true, true};
 static_assert(BattleStorageAllowed_(idleHuman));

@@ -268,10 +268,15 @@ public:
         UiHandleMouse_(msg);
     }
     void MaintainRestore(H3CombatManager* mgr) override { UiMaintainRestore_(mgr); }
-    void ProcessRestore(H3CombatManager* mgr, int result) override { UiProcessRestore_(mgr, result); }
-    // 读档成功后强制收起：战场被 kRefreshField 整体重绘，展开态继续会把
-    // 界面自身的面板像素拍进 save-under 新快照，之后收起写回即彩条。
-    void OnRestoreApplied() override { FoldForceCollapse_(); }
+    // 只有真的读过档才强制收起：读档会 kRefreshField 整体重绘战场，展开态继续
+    // 会把界面自身的面板像素拍进 save-under 新快照，之后收起写回即彩条
+    // （2026-10-11 05:2x 实证）。普通消息同样会走到这里（Entry 每条符合条件
+    // 的消息都调 ProcessRestore），此时 UiProcessRestore_ 返回 false，绝不能
+    // 收起——否则鼠标刚移出灯就被按回未展开态，再也展不开（06:0x 回归）。
+    void ProcessRestore(H3CombatManager* mgr, int result) override
+    {
+        if (UiProcessRestore_(mgr, result)) FoldForceCollapse_();
+    }
     void CancelRebind(const char* reason) override { UiCancelRebind_(reason); }
     void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
     void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }

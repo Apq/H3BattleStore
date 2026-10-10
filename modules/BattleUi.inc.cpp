@@ -1053,19 +1053,24 @@ static void UiMaintainRestore_(H3CombatManager* mgr)
         UiMarkNotice_("读档等待超时，已取消；请重试");
 }
 
-static void UiProcessRestore_(H3CombatManager* mgr, int result)
+// 返回 true 表示本次真的消费了读档请求（读档流程已跑过一遍，无论成败）。
+// 调用方据此判断是否需要"读档后界面复位"——只有真的读过档才需要；
+// 普通消息也会走到这里（Entry 每条符合条件的消息都调 ProcessRestore），
+// 若不分青红皂白复位，界面会被消息流反复强制收起（2026-10-11 06:0x
+// 回归：鼠标因此永远移不进展开区域，没机会读档）。
+static bool UiProcessRestore_(H3CombatManager* mgr, int result)
 {
     StoreEntry entry;
     unsigned generation = 0;
     std::string expectedKey;
-    if (!StoreConsumeRestore_(mgr, result, &entry, &generation, &expectedKey)) return;
-    UiRunRestoreFlow_(mgr, entry, generation, expectedKey);
-    // 读档成功：backbuffer 已被 kRefreshField 换成读档后的战场场景。
+    if (!StoreConsumeRestore_(mgr, result, &entry, &generation, &expectedKey)) return false;
+    // 读档流程会 kRefreshField 整体重绘战场，backbuffer 换成读档后的场景。
     // save-under 快照必须作废——旧快照是读档前的战场像素，写回新战场就是
     // 彩条（2026-10-11 05:2x 玩家实测：读档后偶发一小块彩条）。
-    // 界面层面的"强制收起"由 Entry 在 ProcessRestore 之后调契约方法
-    // OnRestoreApplied() 完成（见 IBattleStoreUi），此处只管快照。
+    // 无论读档成败都作废：失败会回滚，屏幕同样被动过。
     UiUnderInvalidate_();
+    UiRunRestoreFlow_(mgr, entry, generation, expectedKey);
+    return true;
 }
 
 

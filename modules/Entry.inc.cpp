@@ -606,10 +606,6 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                         && BattleMainDialog_(mgr))
                         DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
                     g_uiPort->ProcessRestore(mgr, result);
-                    // 读档成功后界面复位：折叠界面借此强制收起——读档会
-                    // kRefreshField 整体重绘战场，展开态继续会把界面自身的
-                    // 面板像素拍进 save-under 新快照，之后收起写回即彩条。
-                    g_uiPort->OnRestoreApplied();
                 }
             }
             __except (GuardCrashFilter_(GUARD_MESSAGE, GetExceptionInformation())) { DiagHookFault_(); }
