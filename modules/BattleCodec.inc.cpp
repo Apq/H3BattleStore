@@ -13,7 +13,9 @@ static const uint32_t kSectionLog = 5;
 static const uint32_t kSectionHeroes = 6;
 static const uint32_t kSectionRelations = 7;
 static const uint32_t kSectionSpells = 8;
-static const uint32_t kCodecVersion = 7;
+// v8（2026-10-10 用户裁定升版）：法力只在 heroes 段存一份（原 battle 段重复字段删除）。
+// 旧 v7 档全部拒绝，玩家重新存档。
+static const uint32_t kCodecVersion = 8;
 
 // Hero body slots 13..16: ballista, ammo cart, tent, catapult. No pointers.
 static constexpr int kMachineBodySlot_ = 13;
@@ -482,14 +484,9 @@ static bool CodecSpellControlEnabled_(bool tacticsPhase, bool hasHero,
     return !tacticsPhase && hasHero && (!heroCasted || castOverride) && hasSpellbook;
 }
 
-// 145 catapult .. 148 ammo cart war machines plus the 149 arrow tower use
-// native machine DEFs that never satisfy the strict creature-frame gate;
-// same-battle restore renders them through the DEF the game already draws.
-static bool CodecDefFrameGateApplies_(int32_t type)
-{
-    return type < 145;
-}
-
+// 2026-10-10 用户裁定：动画帧检查精简为“DEF 指针非空且对象头可读”（2026-10-06
+// 43DEDA 空指针直送渲染的实证前案防线）；组号/帧号信任游戏自洽（存档值来自
+// 正在正常渲染的战斗），145~149 机器/箭塔不再单独豁免——统一最小检查。
 static void CodecInvalidateHover_(CodecCapture* capture)
 {
     capture->creatureAtMousePos = -1;
@@ -562,8 +559,10 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
     // Non-fortified battles never index door resources and may retain stale door bytes.
     if (saved.siegeKind2 > 0 && (saved.siegeKind < 0 || saved.siegeKind > 3))
         return reject("城门状态超出有效范围");
+    // 墙阶段 0..4 是五阶段贴图的结构界；HP 上限为拍脑袋值，2026-10-10 用户裁定删除，
+    // 仅保留非负（HP 由投石机/魔法累积伤害决定，无游戏上限语义可查）。
     for (int wall = 0; wall < 18; ++wall)
-        if (saved.fortWallsHp[wall] < 0 || saved.fortWallsHp[wall] > 1000000
+        if (saved.fortWallsHp[wall] < 0
             || saved.fortWallsAlive[wall] < 0 || saved.fortWallsAlive[wall] > 4)
             return reject("城墙状态超出有效范围");
     for (const auto& name : saved.wallPcxNames)
@@ -575,9 +574,12 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
             return reject("箭塔资源名无效");
         if (!t.defName[0] && !t.missileName[0]) continue;
         const int slot = t.scalars[6];
-        if (!saved.siegeKind2 || t.scalars[0] < 0 || t.scalars[0] > 150
-            || t.scalars[3] < 0 || t.scalars[3] > 1 || t.scalars[4] < 0 || t.scalars[4] > 1023
-            || t.scalars[5] < 0 || slot < 0 || slot >= 20
+        // 朝向 0..1（塔左右朝向）、关联槽 0..19、类型 149、塔位 254/251/255 是结构界。
+        // 塔类型参数/DEF 组号/帧号（scalars[0]/[4]/[5]）原上限 150/1023/1023 为拍脑袋值，
+        // 2026-10-10 用户裁定删除：存档值来自正在正常渲染的塔，恢复按同名资源加载
+        // 同一对象，组号/帧号必然落在对象结构内。
+        if (!saved.siegeKind2 || t.scalars[3] < 0 || t.scalars[3] > 1
+            || slot < 0 || slot >= 20
             || !saved.stacks[1][slot].occupied || saved.stacks[1][slot].type != 149
             || saved.stacks[1][slot].position != towerHex[tower])
             return reject("箭塔状态或关联槽位无效");
@@ -586,11 +588,10 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
         for (int slot = 0; slot < 21; ++slot) {
             const CodecStack& s = saved.stacks[side][slot];
             if (s.occupied) {
-                if (s.spellIds.size() > 100000) return reject("saved spell deque too large");
+                // 数量闸在解码侧（解码安全）；此处只查写回白名单与结构界。
                 for (int spell : s.spellIds)
                     if (spell < 0 || spell >= 81) return reject("saved spell id invalid");
                 for (int v = 0; v < 4; ++v) {
-                    if (s.relations[v].size() > 100000) return reject("saved relation vector too large");
                     for (const CodecIdentity& id : s.relations[v])
                         if (id.side < 0 || id.side > 1 || id.slot < 0 || id.slot >= 20
                             || !saved.stacks[id.side][id.slot].occupied)
@@ -603,10 +604,9 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
                 // ranges and the AI pointer target apply (no emptiness or
                 // side/slot identity requirements).
                 if (s.occupied) {
+                    // 绘制偏移原上限 ±1000000 为拍脑袋值，2026-10-10 用户裁定删除。
                     if (s.type < 0 || s.type > 0x95 || !CodecStackPositionValid_(s)
-                        || s.activeSpellNumber < 0 || s.activeSpellNumber > 81
-                        || s.renderOffsetX < -1000000 || s.renderOffsetX > 1000000
-                        || s.renderOffsetY < -1000000 || s.renderOffsetY > 1000000)
+                        || s.activeSpellNumber < 0 || s.activeSpellNumber > 81)
                         return reject("reserved slot scalar outside valid range");
                     if ((s.aiTarget.side == -1) != (s.aiTarget.slot == -1)
                         || (s.aiTarget.side != -1 && (s.aiTarget.side < 0 || s.aiTarget.side > 1
@@ -619,14 +619,14 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
             if (!s.occupied) continue;
             if (s.side != side || s.sideIndex != slot)
                 return reject("saved stack slot reference invalid");
+            // 类型 0..0x95（生物表）、位置结构界、双格朝向 -1..1、法术数 0..81 均为
+            // 结构界保留；绘制偏移原上限 ±1000000 为拍脑袋值，2026-10-10 用户裁定删除。
             if (s.type < 0 || s.type > 0x95 || s.numberAlive < 0 || s.numberForeverDead < 0
                 || s.numberAtStart < 0 || s.numberAlive > s.numberAtStart
                 || s.healthLost < 0 || s.infoCombat[0] <= 0 || s.healthLost >= s.infoCombat[0]
                 || !CodecStackPositionValid_(s)
                 || s.secondHexOrientation < -1 || s.secondHexOrientation > 1
-                || s.activeSpellNumber < 0 || s.activeSpellNumber > 81
-                || s.renderOffsetX < -1000000 || s.renderOffsetX > 1000000
-                || s.renderOffsetY < -1000000 || s.renderOffsetY > 1000000)
+                || s.activeSpellNumber < 0 || s.activeSpellNumber > 81)
                 return reject("saved stack scalar outside valid range");
             const float effects[] = {s.frenzyMultiplier, s.blindEffect, s.fireShieldEffect,
                 s.protectionAirEffect, s.protectionFireEffect, s.protectionWaterEffect,
@@ -892,11 +892,10 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
     battle.Bytes(capture.massSpellTarget, sizeof(capture.massSpellTarget));
     battle.Bytes(capture.accessibleSquares, sizeof(capture.accessibleSquares));
     battle.Bytes(capture.accessibleSquares2, sizeof(capture.accessibleSquares2));
-    for (int side = 0; side < 2; ++side) battle.U16((uint16_t)capture.spellPoints[side]);
+    // v8：法力不再写入 battle 段（heroes 段已存同一份，重复字段删除）。
     battle.U32(capture.rngTlsSeed);
     battle.U32(capture.rngMirrorSeed);
     for (int side = 0; side < 2; ++side) {
-        if (capture.eagleEye[side].size() > 1024) { battle.Fail(); break; }
         battle.U32((uint32_t)capture.eagleEye[side].size());
         for (size_t i = 0; i < capture.eagleEye[side].size(); ++i)
             battle.I32(capture.eagleEye[side][i]);
@@ -927,7 +926,7 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         squares.U8((uint8_t)square.stackSide);
         squares.U8((uint8_t)square.stackIndex);
         squares.U8(square.twoHexMonsterSquare);
-        if (square.deadStacksNumber < 0 || square.deadStacksNumber > 14) squares.Fail();
+        // 尸体数 0..14 由 capture 侧（deadStackSide[15] 数组边界）保证；镜像闸删除。
         squares.I32(square.deadStacksNumber);
         for (int dead = 0; dead < square.deadStacksNumber; ++dead) {
             squares.U8((uint8_t)square.deadStackSide[dead]);
@@ -940,7 +939,6 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
 
     CodecWriter obstacles;
     obstacles.U32(kCodecVersion);
-    if (capture.obstacles.size() > 4096) obstacles.Fail();
     obstacles.U32((uint32_t)capture.obstacles.size());
     for (size_t i = 0; i < capture.obstacles.size(); ++i) {
         const CodecObstacle& item = capture.obstacles[i];
@@ -964,7 +962,6 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
 
     CodecWriter log;
     log.U32(kCodecVersion);
-    if (capture.logLines.size() > 100000) log.Fail();
     log.U32((uint32_t)capture.logLines.size());
     for (size_t i = 0; i < capture.logLines.size(); ++i)
         log.Text(capture.logLines[i].data(), capture.logLines[i].size());
@@ -986,6 +983,7 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         for (int slot = 0; slot < 21; ++slot) {
             for (int vector = 0; vector < 4; ++vector) {
                 const std::vector<CodecIdentity>& items = capture.stacks[side][slot].relations[vector];
+                // 42 = 2×21 战斗槽结构界（每个部队最多出现一次），非拍脑袋上限。
                 if (items.size() > 42) relations.Fail();
                 relations.U16((uint16_t)items.size());
                 for (size_t i = 0; i < items.size(); ++i) {
@@ -1001,9 +999,9 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
     for (int side = 0; side < 2; ++side) {
         for (int slot = 0; slot < 21; ++slot) {
             const std::vector<int32_t>& ids = capture.stacks[side][slot].spellIds;
-            if (ids.size() > 100000) spells.Fail();
             spells.U32((uint32_t)ids.size());
             for (size_t i = 0; i < ids.size(); ++i) {
+                // 法术编号白名单（法术表 81 项）：写回游戏内存前的取值门，保留。
                 if (ids[i] < 0 || ids[i] >= 81) spells.Fail();
                 spells.I32(ids[i]);
             }
@@ -1106,7 +1104,7 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     battleReader.Bytes(out->massSpellTarget, sizeof(out->massSpellTarget));
     battleReader.Bytes(out->accessibleSquares, sizeof(out->accessibleSquares));
     battleReader.Bytes(out->accessibleSquares2, sizeof(out->accessibleSquares2));
-    for (int side = 0; side < 2; ++side) out->spellPoints[side] = (int16_t)battleReader.U16();
+    // v8：法力从 heroes 段读取（battle 段重复字段已删除）。
     out->rngTlsSeed = battleReader.U32();
     out->rngMirrorSeed = battleReader.U32();
     for (int side = 0; side < 2; ++side) {
@@ -1193,18 +1191,17 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     CodecReader heroReader(heroes->bytes.data(), heroes->bytes.size());
     if (heroReader.U32() != kCodecVersion) { if (error) *error = "hero section version mismatch"; return false; }
     for (int side = 0; side < 2; ++side) {
-        const int16_t points = (int16_t)heroReader.U16();
-        if (points != out->spellPoints[side]) heroReader.ok = false;
-        const uint8_t present = heroReader.U8();
-        if (present > 1) heroReader.ok = false;
-        out->heroPresent[side] = present == 1;
+        // v8：法力唯一存于此处（battle 段重复字段已删，不再比较）。
+        out->spellPoints[side] = (int16_t)heroReader.U16();
+        out->heroPresent[side] = heroReader.U8() == 1;
         for (CodecWarMachine_& machine : out->warMachines[side]) {
             machine.id = heroReader.I32();
             machine.subtype = heroReader.I32();
         }
+        // 写回白名单：机器装备值会直接 memcpy 进英雄身体槽 13..16，保留。
         if (!CodecWarMachinesValid_(out->heroPresent[side], out->warMachines[side])) heroReader.ok = false;
     }
-    if (!heroReader.Finish()) { if (error) *error = "hero section is corrupt or mana differs from battle section"; return false; }
+    if (!heroReader.Finish()) { if (error) *error = "hero section is corrupt"; return false; }
 
     CodecReader relationReader(relations->bytes.data(), relations->bytes.size());
     if (relationReader.U32() != kCodecVersion) { if (error) *error = "relation section version mismatch"; return false; }

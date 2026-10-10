@@ -282,7 +282,10 @@ struct RestoreObjects_
                 prepared.constructed = true;
                 if (!PrepareDeque(prepared.bytes.get(), saved.spellIds, error)
                     || !PrepareRelations(prepared.bytes.get(), mgr, saved, error)) return false;
-                if (slot < 20 && saved.occupied && CodecDefFrameGateApplies_(saved.type)) {
+                // 2026-10-10 用户裁定：DEF 检查精简为最小集（指针非空+对象头可读，
+                // 2026-10-06 43DEDA 空指针前案防线），组号/帧号信任游戏自洽，
+                // 145~149 机器/箭塔不再单独豁免。
+                if (slot < 20 && saved.occupied) {
                     H3LoadedDef* def = prepared.replace ? stack->def : mgr->stacks[side][slot].def;
                     if (!RestoreCreatureDefReady_(def, saved)) {
                         // 2026-10-07: an ammo-cart slot was rejected with no slot
@@ -292,18 +295,18 @@ struct RestoreObjects_
                             saved.animationFrame, (const void*)def,
                             Readable_(def, sizeof(*def)) ? (int)def->groupsCount : -1,
                             prepared.replace ? 1 : 0);
-                        if (error) *error = "saved creature DEF frame unavailable";
+                        if (error) *error = "saved creature DEF unavailable";
                         return false;
                     }
                 }
-                if (slot < 20 && old.occupied && CodecDefFrameGateApplies_(old.type)
+                if (slot < 20 && old.occupied
                     && !RestoreCreatureDefReady_(mgr->stacks[side][slot].def, old)) {
                     LogDebug("[Objects op=%ld] rollback def gate side=%d slot=%d type=%d anim=%d/%d def=%p groups=%d",
                         g_diag.id, side, slot, old.type, old.animation,
                         old.animationFrame, (const void*)mgr->stacks[side][slot].def,
                         Readable_(mgr->stacks[side][slot].def, sizeof(H3LoadedDef))
                             ? (int)mgr->stacks[side][slot].def->groupsCount : -1);
-                    if (error) *error = "rollback creature DEF frame unavailable";
+                    if (error) *error = "rollback creature DEF unavailable";
                     return false;
                 }
             }

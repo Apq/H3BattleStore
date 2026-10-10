@@ -175,6 +175,14 @@ static void TestRejects()
     truncated.pop_back();
     Expect(!hbs::detail::Decode(truncated.data(), truncated.size(), decoded, error), "truncated tail rejected");
 
+    {
+        // v2 升版回归（2026-10-10 用户裁定）：旧 v1 格式头必须拒绝，旧档全部作废。
+        std::vector<uint8_t> legacy = encoded;
+        legacy[4] = 1; // 头部 offset 4 为 uint16 格式版本
+        legacy[5] = 0;
+        Expect(!hbs::detail::Decode(legacy.data(), legacy.size(), decoded, error), "legacy v1 format rejected");
+    }
+
     ArchiveDocument duplicate = document;
     duplicate.sections.push_back(document.sections[0]);
     std::vector<uint8_t> dupEncoded;
@@ -379,11 +387,27 @@ static void TestHiddenArchivesStayOnDisk()
     ArchiveRecord outside = original;
     outside.path = root + L"..\\not-owned.hbs";
     Expect(!store.Load(outside, loaded, error), "outside load path refused");
+    // 2026-10-10 用户裁定（16 删除）：记录四元组不再参与加载校验——文件名↔内容
+    // 身份与调用方 battleKey 比较是防线；伪造 record 字段（同 path）应加载成功，
+    // 且以文件内容为准。
     ArchiveRecord forged = original;
     ++forged.sequence;
-    Expect(!store.Load(forged, loaded, error), "forged record metadata refused");
+    forged.targetKey = Key('9', '9');
+    {
+        std::wstring forgedError;
+        ArchiveDocument forgedDoc;
+        const bool ok = store.Load(forged, forgedDoc, forgedError);
+        Expect(ok, "forged record metadata ignored");
+        if (ok) Expect(forgedDoc.targetKey == document.targetKey
+            && forgedDoc.sequence == document.sequence, "loaded identity comes from file");
+    }
+    {
+        std::vector<ArchiveRecord> relisted;
+        Expect(store.List("", "", relisted, error) && relisted.size() == 1
+            && SameRecord(relisted[0], original), "list unchanged by forged load");
+    }
     Expect(GetFileAttributesW(original.path.c_str()) != INVALID_FILE_ATTRIBUTES,
-        "refused loads leave valid archive untouched");
+        "loads leave valid archive untouched");
 
     const std::wstring foreignPath = root + L"foreign.hbs";
     const std::wstring corruptPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 2);

@@ -291,18 +291,15 @@ static bool ObstacleDerefSeh_(H3LoadedDef* def)
     return true;
 }
 
+// 2026-10-10 用户裁定：最小集——指针非空、对象头（含 +0x18 引用计数字段）可读可写、
+// 引用值有效。引用计数要被本事务直接加减，这是写游戏内存前的必要预检；
+// 组/帧/调色板结构遍历删除（对象由游戏资源管理器维护，结构自洽信游戏）。
 static bool RestoreObstacleDefSane_(const H3LoadedDef* def)
 {
-    return def && Readable_(def, sizeof(H3LoadedDef))
-        && def->groupsCount >= 1 && def->groupsCount <= 1024
-        && Readable_(def->groups, def->groupsCount * sizeof(*def->groups))
-        && Readable_(def->groups[0], sizeof(H3LoadedDef::DefGroup))
-        && def->groups[0]->count >= 1 && def->groups[0]->count <= 100000
-        && Readable_(def->groups[0]->frames, def->groups[0]->count * sizeof(H3DefFrame*))
-        && Readable_(def->groups[0]->frames[0], sizeof(H3DefFrame))
-        && !IsBadWritePtr(reinterpret_cast<uint8_t*>(const_cast<H3LoadedDef*>(def)) + 0x18, sizeof(INT32))
-        && *(const INT32*)(reinterpret_cast<const uint8_t*>(def) + 0x18) > 0
-        && *(const INT32*)(reinterpret_cast<const uint8_t*>(def) + 0x18) < 0x7FFFFFFF;
+    if (!def || !Readable_(def, 0x1C)) return false;
+    const INT32 refs = *(const INT32*)(reinterpret_cast<const uint8_t*>(def) + 0x18);
+    return !IsBadWritePtr(reinterpret_cast<uint8_t*>(const_cast<H3LoadedDef*>(def)) + 0x18, sizeof(INT32))
+        && refs > 0 && refs < 0x7FFFFFFF;
 }
 
 struct RestoreObstacleKey_
@@ -358,12 +355,13 @@ static bool RestoreObstaclePreflight_(H3CombatManager* mgr, const CodecCapture& 
         if (item.anchorHex >= 187 || item.cellCount > 8 || item.ownerSide < -1 || item.ownerSide > 1
             || !item.defName[0] || !memchr(item.defName, 0, sizeof(item.defName)))
             return reject("saved obstacle payload is invalid");
+        // 2026-10-10 用户裁定：删除与当前游戏静态表的一致性比对（47）——存档障碍
+        // 与现场障碍本就允许不同（清障魔法/力场），表名/占格布局匹配属于过度预检。
+        // 表漂移场景由“原生 Place 按表落格 → 恢复后逐字节验证发现格子不一致 → 回滚”
+        // 兜底，不会静默错位。保留 info 存在性：重建落格需要它。
         const H3ObstacleInfo* info = ObstacleInfoFor_(item.kindId);
         if (!info || !Readable_(info, sizeof(*info)))
             return reject("saved obstacle kind is not present in this game build");
-        char name[16];
-        if (!ObstacleName_(info->defName, name) || strcmp(name, item.defName) != 0)
-            return reject("saved obstacle def name does not match the live table");
         bool found = false;
         for (UINT k = 0; k < count; ++k) {
             const H3Obstacle& entry = vector.CFirst()[k];
@@ -372,12 +370,6 @@ static bool RestoreObstaclePreflight_(H3CombatManager* mgr, const CodecCapture& 
                 && kind == item.kindId && entry.anchorHex == item.anchorHex) found = true;
         }
         if (!found) ++additions;
-        if (info->blockedCount < 0 || info->blockedCount > 8
-            || (uint8_t)info->blockedCount != item.cellCount)
-            return reject("saved obstacle cell count does not match the live table");
-        for (int c = 0; c < item.cellCount; ++c)
-            if (ObstacleCellHex_(item.anchorHex, info->relativeCells[c]) != (int)item.cells[c])
-                return reject("saved obstacle cell layout does not match the live table");
     }
     if (count + additions + rollbackAdds > 4096)
         return reject("obstacle vector would exceed the supported size");
@@ -715,19 +707,11 @@ static int RestoreMarkCreatureFrames_(H3CombatManager* mgr, const CodecCapture& 
 
 static bool RestoreCreatureDefReady_(H3LoadedDef* def, const CodecStack& stack)
 {
-    if (!Readable_(def, sizeof(*def)) || def->groupsCount < 1 || def->groupsCount > 1024
-        || stack.animation < 0 || stack.animation >= def->groupsCount
-        || !Readable_(def->groups, def->groupsCount * sizeof(*def->groups))
-        || !Readable_(def->activeGroups, def->groupsCount * sizeof(*def->activeGroups))
-        || !def->activeGroups[0] || !def->activeGroups[stack.animation]
-        || !Readable_(def->groups[0], sizeof(H3LoadedDef::DefGroup))
-        || def->groups[0]->count < 1)
-        return false;
-    const H3LoadedDef::DefGroup* group = def->groups[stack.animation];
-    return Readable_(group, sizeof(*group)) && group->count > 0 && group->count <= 100000
-        && stack.animationFrame >= 0 && stack.animationFrame < group->count
-        && Readable_(group->frames, group->count * sizeof(*group->frames))
-        && Readable_(group->frames[stack.animationFrame], sizeof(H3DefFrame));
+    (void)stack;
+    // 2026-10-10 用户裁定：只保留 2026-10-06 实证崩溃（43DEDA 空指针直送渲染）的
+    // 防线——DEF 指针非空且对象头可读。组号/帧号/活动组结构遍历删除：存档值来自
+    // 正在正常渲染的战斗，游戏推进逻辑保证帧号在 DEF 组内。
+    return def && Readable_(def, 2 * sizeof(void*));
 }
 
 // Rebuild bottom input gates only; full refresh also enters turn/auto-cast logic.

@@ -24,7 +24,9 @@
 namespace hbs {
 
 static const uint32_t kMagic = 0x31425348u; // 小端字节序 48 53 42 31 = "HSB1"（2026-10-06 实测盘上四档核验）
-static const uint16_t kFormatVersion = 1;
+// v2（2026-10-10 用户裁定升版）：battle 段去掉与 heroes 段重复的法力字段；
+// 不再要求键格式与列表记录四元组一致。旧版 v1 文件全部拒绝，玩家重新存档。
+static const uint16_t kFormatVersion = 2;
 static const uint32_t kMaxSections = 16;
 static const uint32_t kMinSectionId = 1;
 static const uint32_t kMaxSectionId = 16;
@@ -315,10 +317,8 @@ inline bool Decode(const uint8_t* data, size_t size, ArchiveDocument& document, 
     cursor += kKeyHexChars;
     document.targetKey.assign(reinterpret_cast<const char*>(data + cursor), kKeyHexChars);
     cursor += kKeyHexChars;
-    if (!IsKey(document.battleKey) || !IsKey(document.targetKey)) {
-        SetError(error, L"archive key is not 64 hex characters");
-        return false;
-    }
+    // 2026-10-10 用户裁定：不单独校验键格式——非 64hex 的 battleKey 不可能等于
+    // 当前战斗指纹，后续键比较自然拒绝；错误定位交给那一步。
     uint32_t sectionCount = 0;
     if (!GetU64(data, size - 4, cursor, document.timestampUtcMs, error)
         || !GetU32(data, size - 4, cursor, document.sequence, error)
@@ -986,14 +986,9 @@ inline bool ArchiveStore::Load(const ArchiveRecord& record, ArchiveDocument& doc
         detail::SetError(error, L"filename does not match archive identity");
         return false;
     }
-    if (record.battleKey != document.battleKey
-        || record.targetKey != document.targetKey
-        || record.timestampUtcMs != document.timestampUtcMs
-        || record.sequence != document.sequence) {
-        document = ArchiveDocument();
-        detail::SetError(error, L"record metadata does not match archive");
-        return false;
-    }
+    // 2026-10-10 用户裁定：删除 record 与 document 的四元组一致性比较（16）——
+    // 文件名↔内容身份与 battleKey 比较已绑定“文件属于当前战斗”，四元组只防
+    // “扫描后文件被替换为同指纹档”的窄窗口，而同指纹档本就是玩家可合法选择的。
     return true;
 }
 

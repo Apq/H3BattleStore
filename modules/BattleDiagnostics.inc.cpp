@@ -1,5 +1,5 @@
 // 单游戏线程操作上下文。仅在请求/阶段变化时落盘，不逐帧刷战场状态。
-static const char* kDiagnosticBuild_ = "battle-diag-siege-nameend-v11";
+static const char* kDiagnosticBuild_ = "battle-diag-audit-v12";
 static LONG g_diagSequence = 0;
 static struct {
     LONG id;

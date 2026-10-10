@@ -178,13 +178,9 @@ static void TestControlStatePolicy_()
         "loading pre-cast state re-enables spellbook gate");
     Expect(!CodecSpellControlEnabled_(false, true, 1, false, true),
         "loading already-cast state keeps spellbook gate closed");
-    Expect(CodecDefFrameGateApplies_(0) && CodecDefFrameGateApplies_(132)
-        && CodecDefFrameGateApplies_(144), "creature DEF gate applies to regular creatures");
-    Expect(!CodecDefFrameGateApplies_(145) && !CodecDefFrameGateApplies_(146)
-        && !CodecDefFrameGateApplies_(147) && !CodecDefFrameGateApplies_(148)
-        && !CodecDefFrameGateApplies_(149),
-        "war machines and arrow tower skip the DEF frame gate");
-    printf("PASS control state policy: wait, defend, spellbook and DEF gate\n");
+    // 2026-10-10 用户裁定：CodecDefFrameGateApplies_（145~149 机器/箭塔豁免）随
+    // DEF 帧结构检查精简为最小集而删除——所有类型统一“指针非空+对象头可读”。
+    printf("PASS control state policy: wait, defend and spellbook\n");
 }
 
 static void TestNormalizeStaleLinks_()
@@ -278,8 +274,9 @@ static void TestDisplayCaches_()
     std::string error;
     Expect(CodecEncode(*actual, &expected, &error), "encode display cache baseline");
     const size_t tailSize = 3 * (7 * sizeof(int32_t) + 2 * 13) + sizeof(saved->wallPcxNames);
+    // v8：battle 段删除 2×U16 法力字段（只存 heroes 段），锚点前移 4 字节。
     const size_t extraStart = expected[0].bytes.size() - tailSize - sizeof(saved->extraScalars);
-    Expect(extraStart == 736, "empty eagle-eye layout places manager extras at 736");
+    Expect(extraStart == 732, "empty eagle-eye layout places manager extras at 732 (v8)");
     actual->extraScalars[packed + 157] ^= 1;
     Expect(CodecEncode(*actual, &changed, &error), "encode corrupt path cache");
     size_t first = 0;
@@ -424,6 +421,13 @@ int main()
     Expect(CodecDecode(sections, &decoded, &error), "decode");
     Expect(decoded.turn == 7 && decoded.currentMonIndex == 3, "battle scalars");
     Expect(decoded.spellPoints[1] == -4, "signed spell points");
+    {
+        // v8 升版回归：旧 v7 段版本必须整体拒绝（永不兼容旧档，玩家重新存档）。
+        std::vector<hbs::ArchiveSection> v7Sections = sections;
+        v7Sections[0].bytes[0] = 7;
+        std::unique_ptr<CodecCapture> legacy(new CodecCapture{});
+        Expect(!CodecDecode(v7Sections, legacy.get(), &error), "legacy v7 sections rejected");
+    }
     Expect(decoded.fortWallsHp[17] == 900, "fort hp");
     Expect(decoded.stacks[0][2].numberAlive == 18, "stack count");
     Expect(decoded.stacks[0][2].infoFlags == 0x1234ABCDu, "info flags width");
@@ -686,16 +690,19 @@ int main()
         Expect(!RestorePolicy_(bad, &error), "tower resource association requires type149");
         bad = siege; bad.stacks[1][0].occupied = false;
         Expect(!RestorePolicy_(bad, &error), "tower resource association requires occupied slot");
+        // 2026-10-10 用户裁定：塔帧号（scalars[5]）数值界删除——存档值来自正在
+        // 正常渲染的塔，同名资源即同一对象，帧号必然合法。
         bad = siege; bad.towers[0].scalars[5] = -1;
-        Expect(!RestorePolicy_(bad, &error), "negative tower frame rejected");
+        Expect(RestorePolicy_(bad, &error), "negative tower frame trusted by policy (v8)");
         bad = siege; memset(bad.towers[0].defName, 'x', 13);
         Expect(!RestorePolicy_(bad, &error), "unterminated tower resource name rejected");
         bad = siege; memset(bad.wallPcxNames[89], 'x', 13);
         Expect(!RestorePolicy_(bad, &error), "unterminated last wall resource name rejected");
-        for (int hp : {-1, 1000001}) {
-            bad = siege; bad.fortWallsHp[17] = hp;
-            Expect(!RestorePolicy_(bad, &error), "wall HP outside zero to one million rejected");
-        }
+        // 2026-10-10 用户裁定：HP 上限删除（拍脑袋界），非负保留。
+        bad = siege; bad.fortWallsHp[17] = -1;
+        Expect(!RestorePolicy_(bad, &error), "negative wall HP rejected");
+        bad = siege; bad.fortWallsHp[17] = 1000001;
+        Expect(RestorePolicy_(bad, &error), "large wall HP trusted by policy (v8)");
         for (int frame : {-1, 5}) {
             bad = siege; bad.fortWallsAlive[17] = frame;
             Expect(!RestorePolicy_(bad, &error), "wall frame outside zero to four rejected");

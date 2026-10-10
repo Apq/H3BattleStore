@@ -44,48 +44,19 @@ static bool SiegeResourceReady_(const H3ResourceItem* item, const char* name)
         && _strnicmp((const char*)raw + 4, name, 13) == 0;
 }
 
-static bool SiegeFrameReady_(const H3DefFrame* frame)
+// 2026-10-10 用户裁定：PCX 几何/缓冲检查与 DEF 组/帧/调色板遍历删除——对象由
+// 游戏资源管理器加载和维护，结构自洽信游戏（v10 日志实锤：尺寸正常的资源被
+// nameEnd 断言误拒，同类“替游戏操心”检查弊大于利）。保留 SiegeResourceReady_
+// 最小集：引用计数将被本事务直接加减（写游戏内存）、释放走虚表调用（需可读）、
+// 名字匹配（身份确认）。SiegeFrameReady_ 一并删除（无调用者）。
+static bool SiegeDefReady_(const H3LoadedDef* def, const char* name)
 {
-    return Readable_(frame, sizeof(*frame)) && frame->width > 0 && frame->width <= 8192
-        && frame->height > 0 && frame->height <= 8192
-        && frame->frameWidth >= 0 && frame->frameWidth <= frame->width
-        && frame->frameHeight >= 0 && frame->frameHeight <= frame->height
-        && frame->marginLeft >= 0 && frame->marginLeft <= frame->width - frame->frameWidth
-        && frame->marginTop >= 0 && frame->marginTop <= frame->height - frame->frameHeight
-        && frame->rawDataSize > 0 && frame->rawDataSize <= 64 * 1024 * 1024
-        && frame->dataSize >= 0 && frame->dataSize <= 64 * 1024 * 1024
-        && frame->compressionType >= 0 && frame->compressionType <= 3
-        && Readable_(frame->rawData, (size_t)frame->rawDataSize);
-}
-
-static bool SiegeDefReady_(const H3LoadedDef* def, const char* name, int sequence, int frameIndex)
-{
-    if (!SiegeResourceReady_(def, name) || !Readable_(def, sizeof(*def))
-        || def->groupsCount < 1 || def->groupsCount > 1024
-        || sequence < 0 || sequence >= def->groupsCount
-        || !Readable_(def->groups, def->groupsCount * sizeof(*def->groups))
-        || !Readable_(def->activeGroups, def->groupsCount * sizeof(*def->activeGroups))
-        || !def->activeGroups[0] || !def->activeGroups[sequence]
-        || def->widthDEF <= 0 || def->widthDEF > 8192
-        || def->heightDEF <= 0 || def->heightDEF > 8192
-        || !Readable_(def->palette565, sizeof(H3Palette565))) return false;
-    const H3LoadedDef::DefGroup* base = def->groups[0];
-    const H3LoadedDef::DefGroup* group = def->groups[sequence];
-    if (!Readable_(base, sizeof(*base)) || base->count < 1 || base->count > 100000
-        || !Readable_(group, sizeof(*group)) || group->count < 1 || group->count > 100000
-        || frameIndex < 0 || frameIndex >= group->count
-        || !Readable_(group->frames, group->count * sizeof(*group->frames))) return false;
-    return SiegeFrameReady_(group->frames[frameIndex]);
+    return SiegeResourceReady_(def, name) && Readable_(def, sizeof(*def));
 }
 
 static bool SiegePcxReady_(const H3LoadedPcx* pcx, const char* name)
 {
-    if (!SiegeResourceReady_(pcx, name) || !Readable_(pcx, sizeof(*pcx))
-        || pcx->width < 1 || pcx->width > 8192 || pcx->height < 1 || pcx->height > 8192
-        || pcx->scanlineSize < pcx->width || pcx->scanlineSize > 32768
-        || pcx->bufSize < 1 || pcx->bufSize > 64 * 1024 * 1024) return false;
-    const uint64_t needed = (uint64_t)pcx->scanlineSize * (uint64_t)pcx->height;
-    return needed <= (uint64_t)pcx->bufSize && Readable_(pcx->buffer, (size_t)needed);
+    return SiegeResourceReady_(pcx, name) && Readable_(pcx, sizeof(*pcx));
 }
 
 static bool SiegeCaptureReadyDiag_(const CodecCapture& capture, int* aux, int* index)
@@ -229,17 +200,11 @@ struct RestoreSiege_
     static bool ResourceMatches(const H3ResourceItem* item, const CodecCapture& capture, int index) {
         const char* name = Name(capture, index);
         if (!item) return !name[0];
+        // 2026-10-10 用户裁定：塔 DEF 组号/帧号与弹道组全帧遍历删除（信任游戏
+        // 自洽：存档值来自正在正常渲染的塔/弹道，加载同名资源即同一对象）。
+        // 统一最小检查：身份（名字）+ 可释放性（引用/虚表）。
         if (index >= 6) return SiegePcxReady_((const H3LoadedPcx*)item, name);
-        const CodecTower_& tower = capture.towers[index / 2];
-        const H3LoadedDef* def = (const H3LoadedDef*)item;
-        if (!SiegeDefReady_(def, name, index % 2 ? 0 : tower.scalars[4],
-            index % 2 ? 0 : tower.scalars[5])) return false;
-        if (index % 2) {
-            const H3LoadedDef::DefGroup* group = def->groups[0];
-            for (int frame = 0; frame < group->count; ++frame)
-                if (!SiegeFrameReady_(group->frames[frame])) return false;
-        }
-        return true;
+        return SiegeDefReady_((const H3LoadedDef*)item, name);
     }
     bool ReferencesCoverSlots(const H3CombatManager* mgr) const {
         for (int i = 0; i < (mgr ? 192 : 96); ++i) {
@@ -336,7 +301,7 @@ struct RestoreSiege_
                 if (fault || !releasable)
                     return Fault("预加载攻城资源的原生对象或引用无效，已停止战斗", error);
                 if (!Release(error)) return false;
-                return Reject("保存的攻城 DEF 帧、弹道组零帧或墙 PCX 尺寸及缓冲无效", error);
+                return Reject("保存的攻城资源加载后校验失败", error);
             }
         }
         ready = true;
