@@ -73,10 +73,10 @@ static void StoreListFailure_(const char* phase, const std::string& error)
         LogWarn("[List op=%ld] phase=%s failed reason=%s suppressed=%u", g_diag.id, phase, error.c_str(), skipped);
 }
 
-// 列表数据扫描：清输入队列、按场次指纹取档、填 entries；成功补记失败限频恢复。
+// 列表数据扫描：按场次指纹取档、填 entries；成功补记失败限频恢复。
+// （输入管道清理由界面包装 UiReloadEntries_ 负责，服务不触碰输入状态。）
 static bool StoreReloadList_(const H3CombatManager* mgr)
 {
-    ClearBattleInputs_();
     g_store.entries.clear();
     std::string battleKey;
     std::string error;
@@ -333,4 +333,21 @@ static bool StorePlayerWindow_(const H3CombatManager* mgr, int messageResult, co
         return false;
     }
     return true;
+}
+
+// 保存请求（原 Entry TrySave_，第3步迁入）：边沿闩锁 + 窗口门禁 + 发起捕获。
+// 返回 false = 捕获失败（调用方负责界面提示）。rebindWaiting/rebindLatch 为
+// 界面交互态快照，仅入日志不参与判定。
+static bool StoreRequestSave_(H3CombatManager* mgr, int messageResult, const char* origin,
+    bool rebindWaiting, char rebindLatch)
+{
+    if (InterlockedExchange(&g_saveEdgeConsumed, 1)) {
+        LogTrace("[Input] duplicate edge suppressed origin=%s", origin);
+        return true;
+    }
+    if (!StorePlayerWindow_(mgr, messageResult, nullptr)) return true;
+    DiagBegin_("save", origin, mgr);
+    LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
+        g_store.saveKey, rebindWaiting ? 1 : 0, rebindLatch ? rebindLatch : '-', messageResult);
+    return TryCaptureCombat_();
 }

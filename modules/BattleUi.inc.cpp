@@ -95,6 +95,19 @@ static struct
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
 
+// 输入管道（原 Entry，第3步随键盘/鼠标状态机迁入）：钩子事件写入、帧泵经
+// 接口消费；跨线程可见用 Interlocked，语义与原实现逐行一致。
+static volatile LONG g_pendingSaveKey = 0;
+static volatile LONG g_pendingClickX = -1;
+static volatile LONG g_pendingClickY = -1;
+
+static void ClearBattleInputs_()
+{
+    InterlockedExchange(&g_pendingClickX, -1);
+    InterlockedExchange(&g_pendingClickY, -1);
+    InterlockedExchange(&g_pendingSaveKey, 0);
+}
+
 
 static int UiOriginY_() { return g_uiLayout.OriginY(g_ui.y); }
 static int UiListRows_() { return g_ui.scroll.Rows(g_store.entries.size()); }
@@ -147,9 +160,10 @@ static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
 static const int GUARD_COPY = GuardRegisterHook_("BattleStore.CopyPixels");
 
 
-// 列表数据扫描在服务层 StoreReloadList_；这里只重置界面滚动、悬停与手势。
+// 列表数据扫描在服务层 StoreReloadList_；这里清输入管道并重置界面滚动、悬停与手势。
 static bool UiReloadEntries_(const H3CombatManager* mgr)
 {
+    ClearBattleInputs_();
     g_ui.scroll = {};
     g_ui.hoverRow = -1;
     g_ui.listGesture = {};
@@ -1141,6 +1155,188 @@ static void UiResetForBattle_()
     UiCancelRebind_("battle reset");
     g_ui.rebindKey = 0;
     g_ui.rebindGuardUntil = 0;
+    ClearBattleInputs_();
+}
+
+// ---- 键盘/鼠标状态机（原 Entry 钩子体，第3步迁入；仅改调用通道，逻辑逐行等价） ----
+
+// 系统键盘钩子：letter 翻译、改键/存档键日志与 pending 投递（闩锁占用）。
+static bool UiOnSystemKey_(const UiKeyEvent_& e)
+{
+    const char letter = UiVirtualKeyToLetter_(e.vk, e.source == 0);
+    if (letter && (letter == g_store.saveKey || g_ui.awaitingRebind))
+        WriteLogLv(e.repeat && !e.up ? LOG_TRACE : LOG_DEBUG, "[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+            e.up ? "up" : "down", e.repeat ? 1 : 0, e.vk, letter, g_store.saveKey,
+            g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
+            (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
+    if (letter && !e.up && !e.repeat) {
+        if (g_ui.awaitingRebind || letter != g_store.saveKey
+            || StorePlayerWindow_(H3CombatManager::Get(), 0, nullptr))
+            InterlockedExchange(&g_pendingSaveKey, letter);
+        else
+            InterlockedExchange(&g_saveEdgeConsumed, 1);
+    }
+    return false;
+}
+
+// 系统鼠标钩子：命中判定、拖动/滚轮/手势状态机与点击投递（combatOpen=false 时清手势放行）。
+static bool UiOnSystemMouse_(const UiMouseEvent_& e, bool combatOpen)
+{
+    if (!combatOpen) {
+        g_ui.scroll.dragging = false;
+        g_ui.listGesture = {};
+        g_ui.listRightHeld = false;
+        return false;
+    }
+    const bool move = e.kind == 0, leftDown = e.kind == 1, leftUp = e.kind == 2,
+        rightDown = e.kind == 3, rightUp = e.kind == 4, wheel = e.kind == 5;
+    const bool hitList = UiPointInList_(e.gameX, e.gameY);
+    const bool hitScroll = UiPointInScrollbar_(e.gameX, e.gameY);
+    const bool swallow = hitList || UiPointInUiBlock_(e.gameX, e.gameY);
+    if (move || leftDown || rightDown || wheel) UiCancelReleasedPointer_();
+    if (g_ui.scroll.dragging && (move || leftUp)) {
+        UiScrollbarDrag_(e.gameY);
+        if (leftUp) {
+            g_ui.scroll.dragging = false;
+            g_ui.listGesture = {};
+        }
+        return true;
+    }
+    if (wheel) {
+        if (g_ui.scroll.dragging) return true;
+        if (!hitList) return false;
+        UiScrollWheel_((short)e.wheelDelta);
+        g_ui.listGesture.CancelClick();
+        InterlockedExchange(&g_pendingClickX, -1);
+        InterlockedExchange(&g_pendingClickY, -1);
+        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_store.entries.size());
+        return true;
+    }
+    if (move) return hitList;
+    if (leftDown) {
+        g_ui.listGesture = {};
+        g_ui.scroll.dragging = false;
+        if (!swallow) { UiCancelRebind_("outside mouse click"); return false; }
+        g_ui.listGesture.Begin(hitScroll);
+        if (hitScroll) {
+            UiScrollbarDown_(e.gameY);
+            InterlockedExchange(&g_pendingClickX, -1);
+            InterlockedExchange(&g_pendingClickY, -1);
+        }
+        return true;
+    }
+    if (leftUp) {
+        const auto release = g_ui.listGesture.Release(swallow, hitScroll);
+        if (release == BattleUiRelease_::Pass) return false;
+        if (release == BattleUiRelease_::Swallow) return true;
+        if (hitList && !StorePlayerWindow_(H3CombatManager::Get(), 0, nullptr)) return true;
+        InterlockedExchange(&g_pendingClickX, e.gameX);
+        InterlockedExchange(&g_pendingClickY, e.gameY);
+        LogDetail_("点击已吞并：game=(%d,%d)", e.gameX, e.gameY);
+        return true;
+    }
+    if (rightDown) { g_ui.listRightHeld = swallow; return swallow; }
+    if (rightUp) {
+        const bool held = g_ui.listRightHeld;
+        g_ui.listRightHeld = false;
+        return swallow || held;
+    }
+    return false;
+}
+
+// 游戏键盘消息（原生前）：改键/存档键日志。
+static void UiOnGameKeyBefore_(const H3Msg* msg, int level)
+{
+    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
+    if (pressed == g_store.saveKey || g_ui.awaitingRebind)
+        WriteLogLv(level, "[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
+            msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
+            (int)msg->subtype, pressed ? pressed : '?', g_store.saveKey,
+            (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
+            g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
+}
+
+// 游戏鼠标消息：吞并判定（条/列表/拖动中 → 手势处理并吞）。
+static bool UiOnGameMouse_(H3Msg* msg)
+{
+    if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
+    const bool onBar = UiHitBar_(msg, true);
+    const bool onList = UiPointInList_(msg->position.x, msg->position.y);
+    if (onBar || onList || g_ui.scroll.dragging) {
+        UiHandleMouse_(msg);
+        return true;
+    }
+    return false;
+}
+
+// 游戏键盘消息（原生后）：改键捕获与存档边沿触发。
+static void UiOnGameKeyAfter_(H3CombatManager* mgr, const H3Msg* msg, int result, DWORD now, bool waitBlocked)
+{
+    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
+    if (g_ui.awaitingRebind) {
+        UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
+        InterlockedExchange(&g_pendingSaveKey, 0);
+        return;
+    }
+    if (pressed && pressed == g_store.saveKey) {
+        static bool msgKeyWasDown = false;
+        const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
+        if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
+            if (!downNow) g_ui.rebindKey = 0;
+            LogTrace("[Input] save suppressed source=game reason=rebind-latch");
+        } else if (downNow && !msgKeyWasDown && !waitBlocked
+            && now >= g_ui.rebindGuardUntil) {
+            if (!StoreRequestSave_(mgr, result, "game-message", g_ui.awaitingRebind, g_ui.rebindKey))
+                UiMarkNotice_("保存失败：详见日志");
+        } else {
+            LogTrace("[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
+                downNow ? 1 : 0, msgKeyWasDown ? 1 : 0, waitBlocked ? 1 : 0,
+                now < g_ui.rebindGuardUntil ? 1 : 0);
+        }
+        msgKeyWasDown = downNow;
+    }
+}
+
+// 帧内键轮询（原 CombatCycleAfter_ 中段）：改键保护窗、闩锁重 arm、
+// 存档键边沿触发（2026-10-05 用户实测：改键单次短按立即松开也会穿透触发
+// 存档——残留 hook 事件在改键完成后仍被消费；边沿要求"上一帧该键是松开的"）。
+static void UiOnFrameKeyPoll_(H3CombatManager* mgr, DWORD now, bool waitBlocked)
+{
+    if (now < g_ui.rebindGuardUntil)
+        InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
+    // 存档键松开后重新武装单次边沿（配合 StoreRequestSave_ 的闩锁）
+    if (!(GetAsyncKeyState(g_store.saveKey) & 0x8000))
+        InterlockedExchange(&g_saveEdgeConsumed, 0);
+    static bool keyWasDown = false;
+    const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
+    if (pressed) LogDebug("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
+        pressed, g_store.saveKey, (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0,
+        keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
+        waitBlocked ? 1 : 0);
+    if (pressed == g_store.saveKey && !g_ui.awaitingRebind) {
+        const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
+        if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
+            if (!downNow) g_ui.rebindKey = 0;  // 改键那次按键松开后才解锁
+        } else if (downNow && !keyWasDown && now >= g_ui.rebindGuardUntil) {
+            if (!StoreRequestSave_(mgr, 0, "system-frame", g_ui.awaitingRebind, g_ui.rebindKey))
+                UiMarkNotice_("保存失败：详见日志");
+        }
+        keyWasDown = downNow;
+    } else {
+        keyWasDown = !g_ui.awaitingRebind
+            && (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
+    }
+}
+
+// 钩子故障清理：输入管道与手势状态（DiagHookFault_ 的界面部分）。
+static void UiOnFaultCleanup_()
+{
+    InterlockedExchange(&g_pendingClickX, -1);
+    InterlockedExchange(&g_pendingClickY, -1);
+    InterlockedExchange(&g_pendingSaveKey, 0);
+    g_ui.scroll.dragging = false;
+    g_ui.listGesture = {};
+    g_ui.listRightHeld = false;
 }
 
 class HdNativeUi final : public IBattleStoreUi {
@@ -1151,7 +1347,13 @@ public:
         const H3POINT cursor = H3POINT::GetCursorPosition();
         g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
     }
-    void FrameClick(int gameX, int gameY) override { UiHandleFrameClick_(gameX, gameY); }
+    void FrameClick() override
+    {
+        const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
+        const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
+        if (clickX >= 0 && clickY >= 0)
+            UiHandleFrameClick_((int)clickX, (int)clickY);
+    }
     void PollRebindKey() override { UiPollRebindKey_(); }
     bool ReloadEntries(const H3CombatManager* mgr) override { return UiReloadEntries_(mgr); }
     bool HitBar(H3Msg* msg, bool fullBlock) override { return UiHitBar_(msg, fullBlock); }
@@ -1162,8 +1364,18 @@ public:
     void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
     void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }
     void OnBattleReset() override { UiResetForBattle_(); }
+    bool OnSystemKey(const UiKeyEvent_& e) override { return UiOnSystemKey_(e); }
+    bool OnSystemMouse(const UiMouseEvent_& e, bool combatOpen) override { return UiOnSystemMouse_(e, combatOpen); }
+    void OnGameKeyBefore(const H3Msg* msg, int level) override { UiOnGameKeyBefore_(msg, level); }
+    bool OnGameMouse(H3Msg* msg) override { return UiOnGameMouse_(msg); }
+    void OnGameKeyAfter(H3CombatManager* mgr, const H3Msg* msg, int result, unsigned now, bool waitBlocked) override { UiOnGameKeyAfter_(mgr, msg, result, now, waitBlocked); }
+    void OnFrameKeyPoll(H3CombatManager* mgr, unsigned now, bool waitBlocked) override { UiOnFrameKeyPoll_(mgr, now, waitBlocked); }
+    void OnListReloaded() override { g_ui.hoverRow = -1; }
+    void OnFaultCleanup() override { UiOnFaultCleanup_(); }
+    bool IsRebindWaiting() const override { return g_ui.awaitingRebind; }
+    char RebindLatchKey() const override { return g_ui.rebindKey; }
 };
 
 static HdNativeUi g_hdNativeUi;
-// 钩子层唯一界面入口；第3步起 Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
+// 钩子层唯一界面入口；Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
 static IBattleStoreUi* const g_uiPort = &g_hdNativeUi;

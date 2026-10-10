@@ -381,24 +381,12 @@ static bool TryCaptureCombat_()
 
 
 
-static void TrySave_(H3CombatManager* mgr, int messageResult, const char* origin)
-{
-    if (InterlockedExchange(&g_saveEdgeConsumed, 1)) {
-        LogTrace("[Input] duplicate edge suppressed origin=%s", origin);
-        return;
-    }
-    if (!StorePlayerWindow_(mgr, messageResult, nullptr)) return;
-    DiagBegin_("save", origin, mgr);
-    LogDebug("[Input op=%ld] saveKey=%c rebind=%d latch=%c messageResult=%d", g_diag.id,
-        g_store.saveKey, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-', messageResult);
-    if (!TryCaptureCombat_()) g_uiPort->MarkNotice("保存失败：详见日志");
-}
+// 保存请求入口 StoreRequestSave_ 已随第3步迁入服务层；三个触发点
+// （game-message / system-frame / system-key 投递）都在界面事件内。
+
 
 static HHOOK g_combatKeyboardHook = nullptr;
 static HHOOK g_combatMouseHook = nullptr;
-static volatile LONG g_pendingSaveKey = 0;
-static volatile LONG g_pendingClickX = -1;
-static volatile LONG g_pendingClickY = -1;
 
 static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
 {
@@ -416,35 +404,21 @@ static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
     return true;
 }
 
+// 翻译层（第3步断直连）：钩子事件转 POD 交界面实现，钩子层只做守卫与翻译。
 static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION) {
         if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(H3CombatManager::Get())) return false;
         if (g_uiWaitSaveUntil) { ++g_waitKeyEvents; return true; }
-        const char letter = UiVirtualKeyToLetter_((int)wParam, true);
-        const bool up = (lParam & 0x80000000) != 0;
-        const bool repeat = (lParam & 0x40000000) != 0;
-        if (letter && (letter == g_store.saveKey || g_ui.awaitingRebind))
-            WriteLogLv(repeat && !up ? LOG_TRACE : LOG_DEBUG, "[Input] source=system event=%s repeat=%d vk=%d letter=%c save=%c rebind=%d latch=%c guard_remaining=%ld pending=%ld",
-                up ? "up" : "down", repeat ? 1 : 0, (int)wParam, letter, g_store.saveKey,
-                g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
-                (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
-        if (letter && !up && !repeat) {
-            if (g_ui.awaitingRebind || letter != g_store.saveKey
-                || StorePlayerWindow_(H3CombatManager::Get(), 0, nullptr))
-                InterlockedExchange(&g_pendingSaveKey, letter);
-            else
-                InterlockedExchange(&g_saveEdgeConsumed, 1);
-        }
+        UiKeyEvent_ e = {};
+        e.vk = (int)wParam;
+        e.up = (lParam & 0x80000000) != 0;
+        e.repeat = (lParam & 0x40000000) != 0;
+        e.down = !e.up;
+        e.source = 0;
+        return g_uiPort->OnSystemKey(e);
     }
     return false;
-}
-
-static void ClearBattleInputs_()
-{
-    InterlockedExchange(&g_pendingClickX, -1);
-    InterlockedExchange(&g_pendingClickY, -1);
-    InterlockedExchange(&g_pendingSaveKey, 0);
 }
 
 static void DiagHookFault_()
@@ -460,13 +434,8 @@ static void DiagHookFault_()
     g_restoreRequest.pending = false;
     g_diag.id = 0;
     g_diag.writing = false;
-    InterlockedExchange(&g_pendingClickX, -1);
-    InterlockedExchange(&g_pendingClickY, -1);
     g_uiWaitSaveUntil = 0;
-    g_ui.scroll.dragging = false;
-    g_ui.listGesture = {};
-    g_ui.listRightHeld = false;
-    InterlockedExchange(&g_pendingSaveKey, 0);
+    g_uiPort->OnFaultCleanup();
 }
 
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
@@ -476,6 +445,7 @@ static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lPar
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
+// 翻译层：事件种类识别 + 战场守卫 + 屏幕→游戏坐标，交界面实现。
 static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code != HC_ACTION) return false;
@@ -488,68 +458,21 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
     if (g_uiWaitSaveUntil) { ++g_waitMouseEvents; return true; }
     if (!leftDown && !leftUp && !rightDown && !rightUp && !move && !wheel) return false;
     H3CombatManager* combat = H3CombatManager::Get();
-    if (g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal) {
-        g_ui.scroll.dragging = false;
-        g_ui.listGesture = {};
-        g_ui.listRightHeld = false;
-        return false;
-    }
-    const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
-    int gameX = 0, gameY = 0;
-    if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) return false;
-    const bool hitList = UiPointInList_(gameX, gameY);
-    const bool hitScroll = UiPointInScrollbar_(gameX, gameY);
-    const bool swallow = hitList || UiPointInUiBlock_(gameX, gameY);
-    if (move || leftDown || rightDown || wheel) UiCancelReleasedPointer_();
-    if (g_ui.scroll.dragging && (move || leftUp)) {
-        UiScrollbarDrag_(gameY);
-        if (leftUp) {
-            g_ui.scroll.dragging = false;
-            g_ui.listGesture = {};
+    const bool combatOpen = !(g_restoreBusy || !BattleMainDialog_(combat) || combat->finished || g_restoreFatal);
+    UiMouseEvent_ e = {};
+    e.kind = move ? 0 : leftDown ? 1 : leftUp ? 2 : rightDown ? 3 : rightUp ? 4 : 5;
+    if (combatOpen) {
+        const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
+        int gameX = 0, gameY = 0;
+        if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) return false;
+        e.gameX = gameX;
+        e.gameY = gameY;
+        if (wheel) {
+            const auto extended = reinterpret_cast<const MOUSEHOOKSTRUCTEX*>(lParam);
+            e.wheelDelta = static_cast<short>(HIWORD(extended->mouseData));
         }
-        return true;
     }
-    if (wheel) {
-        if (g_ui.scroll.dragging) return true;
-        if (!hitList) return false;
-        const auto extended = reinterpret_cast<const MOUSEHOOKSTRUCTEX*>(lParam);
-        UiScrollWheel_(static_cast<short>(HIWORD(extended->mouseData)));
-        g_ui.listGesture.CancelClick();
-        InterlockedExchange(&g_pendingClickX, -1);
-        InterlockedExchange(&g_pendingClickY, -1);
-        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_store.entries.size());
-        return true;
-    }
-    if (move) return hitList;
-    if (leftDown) {
-        g_ui.listGesture = {};
-        g_ui.scroll.dragging = false;
-        if (!swallow) { g_uiPort->CancelRebind("outside mouse click"); return false; }
-        g_ui.listGesture.Begin(hitScroll);
-        if (hitScroll) {
-            UiScrollbarDown_(gameY);
-            InterlockedExchange(&g_pendingClickX, -1);
-            InterlockedExchange(&g_pendingClickY, -1);
-        }
-        return true;
-    }
-    if (leftUp) {
-        const auto release = g_ui.listGesture.Release(swallow, hitScroll);
-        if (release == BattleUiRelease_::Pass) return false;
-        if (release == BattleUiRelease_::Swallow) return true;
-        if (hitList && !StorePlayerWindow_(combat, 0, nullptr)) return true;
-        InterlockedExchange(&g_pendingClickX, gameX);
-        InterlockedExchange(&g_pendingClickY, gameY);
-        LogDetail_("点击已吞并：game=(%d,%d)", gameX, gameY);
-        return true;
-    }
-    if (rightDown) { g_ui.listRightHeld = swallow; return swallow; }
-    if (rightUp) {
-        const bool held = g_ui.listRightHeld;
-        g_ui.listRightHeld = false;
-        return swallow || held;
-    }
-    return false;
+    return g_uiPort->OnSystemMouse(e, combatOpen);
 }
 
 static LRESULT CALLBACK CombatMouseHook_(int code, WPARAM wParam, LPARAM lParam)
@@ -597,52 +520,11 @@ static bool CombatMessageBefore_(H3Msg* msg, int inputLevel)
         }
     }
     if (msg && (msg->command == eMsgCommand::KEY_DOWN || msg->command == eMsgCommand::KEY_UP)) {
-        const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
-        if (pressed == g_store.saveKey || g_ui.awaitingRebind)
-            WriteLogLv(inputLevel, "[Input] source=game event=%s cmd=%d subtype=%d letter=%c save=%c physical_down=%d rebind=%d latch=%c guard_remaining=%ld pending=%ld",
-                msg->command == eMsgCommand::KEY_DOWN ? "down" : "up", (int)msg->command,
-                (int)msg->subtype, pressed ? pressed : '?', g_store.saveKey,
-                (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0, g_ui.awaitingRebind ? 1 : 0,
-                g_ui.rebindKey ? g_ui.rebindKey : '-', (LONG)(g_ui.rebindGuardUntil - GetTickCount()), g_pendingSaveKey);
+        g_uiPort->OnGameKeyBefore(msg, inputLevel);
         return false;
     }
     // Native hotkeys become 0x200 item commands, not overlay mouse clicks.
-    if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
-    const bool onBar = g_uiPort->HitBar(msg, true);
-    const bool onList = UiPointInList_(msg->position.x, msg->position.y);
-    if (onBar || onList || g_ui.scroll.dragging) {
-        g_uiPort->HandleMouse(msg);
-        return true;
-    }
-    return false;
-}
-
-static void CombatMessageAfter_(H3CombatManager* mgr, H3Msg* msg, int result, int inputLevel)
-{
-    if (!msg || (msg->command != eMsgCommand::KEY_DOWN && msg->command != eMsgCommand::KEY_UP)) return;
-    const DWORD now = GetTickCount();
-    const char pressed = UiVirtualKeyToLetter_(msg->subtype, false);
-    if (g_ui.awaitingRebind) {
-        UiHandleRebindKey_(pressed, msg->subtype == h3::NH3VKey::H3VK_ESCAPE);
-        InterlockedExchange(&g_pendingSaveKey, 0);
-        return;
-    }
-    if (pressed && pressed == g_store.saveKey) {
-        static bool msgKeyWasDown = false;
-        const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
-        if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
-            if (!downNow) g_ui.rebindKey = 0;
-            LogTrace("[Input] save suppressed source=game reason=rebind-latch");
-        } else if (downNow && !msgKeyWasDown && !g_uiWaitSaveUntil
-            && now >= g_ui.rebindGuardUntil) {
-            TrySave_(mgr, result, "game-message");
-        } else {
-            LogTrace("[Input] save suppressed source=game down=%d previous_down=%d wait=%d guard=%d",
-                downNow ? 1 : 0, msgKeyWasDown ? 1 : 0, g_uiWaitSaveUntil ? 1 : 0,
-                now < g_ui.rebindGuardUntil ? 1 : 0);
-        }
-        msgKeyWasDown = downNow;
-    }
+    return g_uiPort->OnGameMouse(msg);
 }
 
 static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
@@ -657,7 +539,7 @@ static void DiagCommand_(const H3CombatManager* mgr, const H3Msg& input,
         translated ? translated->itemId : -1, result, (int)mgr->action,
         mgr->actionParameter, mgr->actionTarget, mgr->actionParameter2,
         mgr->currentMonSide, mgr->currentMonIndex, mgr->currentActiveSide,
-        g_ui.awaitingRebind ? 1 : 0, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)));
+        g_uiPort->IsRebindWaiting() ? 1 : 0, *((const int32_t*)((const uint8_t*)mgr + 0x132B4)));
     LogDetail_("%s", text);
     if (level == LOG_DEBUG) LogDebug("%s", text);
 }
@@ -683,7 +565,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                 const int edgeLevel = g_commandKeys.Level((int)keyboardInput.subtype,
                     keyboardInput.command == eMsgCommand::KEY_DOWN);
                 const char letter = UiVirtualKeyToLetter_(keyboardInput.subtype, false);
-                inputLevel = LogCommandLevel_(g_ui.awaitingRebind || (letter && letter == g_store.saveKey)
+                inputLevel = LogCommandLevel_(g_uiPort->IsRebindWaiting() || (letter && letter == g_store.saveKey)
                     || keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR, edgeLevel);
             }
             if (!g_restoreBusy && !g_restoreFatal && BattleMainDialog_(mgr)) {
@@ -719,7 +601,7 @@ static int __stdcall Hook_CombatMessage_(HiHook* hook, H3CombatManager* mgr, H3M
                     && g_messageFrames.Boundary(g_battleGeneration, mgr,
                         CombatIsReadable_(mgr) ? mgr->dlg : nullptr)) {
                     // The native dialog mutates msg into item commands in place.
-                    if (hasKeyboardInput) CombatMessageAfter_(mgr, &keyboardInput, result, inputLevel);
+                    if (hasKeyboardInput) g_uiPort->OnGameKeyAfter(mgr, &keyboardInput, result, GetTickCount(), g_uiWaitSaveUntil != 0);
                     if (inputLevel == LOG_DEBUG && hasKeyboardInput && keyboardInput.subtype == h3::NH3VKey::H3VK_SPACEBAR
                         && BattleMainDialog_(mgr))
                         DiagInputState_(mgr, keyboardInput.command == eMsgCommand::KEY_DOWN ? "space-after-down" : "space-after-up", result);
@@ -838,8 +720,6 @@ static void BattleReset_()
     g_storeListFailure = {};
     g_commandKeys = {};
     g_uiPort->OnBattleReset();
-
-    ClearBattleInputs_();
 }
 
 static const int GUARD_LIFECYCLE = GuardRegisterHook_("BattleStore.Lifecycle");
@@ -919,7 +799,7 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         if (g_battleInitialized && g_battleListDirty && BattleMainDialog_(mgr)) {
             if (g_uiPort->ReloadEntries(mgr)) {
                 g_battleListDirty = false;
-                g_ui.hoverRow = -1;
+                g_uiPort->OnListReloaded();
 
                 LogInfo("[List] 战斗开始自动加载完成，常驻列表条数=%u generation=%u",
                     (unsigned)g_store.entries.size(), g_battleGeneration);
@@ -929,36 +809,8 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
         EnsureCombatKeyboardHook_();
         g_uiPort->PollRebindKey();
         g_uiPort->PollHover();
-        if (now < g_ui.rebindGuardUntil)
-            InterlockedExchange(&g_pendingSaveKey, 0);  // 改键残留不触发存档
-        // 存档键松开后重新武装单次边沿（配合 TrySave_ 的 g_saveEdgeConsumed 闩锁）
-        if (!(GetAsyncKeyState(g_store.saveKey) & 0x8000))
-            InterlockedExchange(&g_saveEdgeConsumed, 0);
-        static bool keyWasDown = false;
-        const LONG clickX = InterlockedExchange(&g_pendingClickX, -1);
-        const LONG clickY = InterlockedExchange(&g_pendingClickY, -1);
-        if (clickX >= 0 && clickY >= 0)
-            g_uiPort->FrameClick((int)clickX, (int)clickY);
-        // 存档键触发 = 松开→按下的边沿（2026-10-05 用户实测：改键单次短按
-        // 立即松开也会穿透触发存档——残留的 hook 事件在改键完成后仍被消费。
-        // 边沿要求"上一帧该键是松开的"，任何残留/重复事件都构不成边沿）。
-        const char pressed = (char)InterlockedExchange(&g_pendingSaveKey, 0);
-        if (pressed) LogDebug("[Input] source=frame letter=%c save=%c physical_down=%d previous_down=%d rebind=%d latch=%c wait=%d",
-            pressed, g_store.saveKey, (GetAsyncKeyState(g_store.saveKey) & 0x8000) ? 1 : 0,
-            keyWasDown ? 1 : 0, g_ui.awaitingRebind ? 1 : 0, g_ui.rebindKey ? g_ui.rebindKey : '-',
-            g_uiWaitSaveUntil ? 1 : 0);
-        if (pressed == g_store.saveKey && !g_ui.awaitingRebind) {
-            const bool downNow = (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
-            if (g_ui.rebindKey && pressed == g_ui.rebindKey) {
-                if (!downNow) g_ui.rebindKey = 0;  // 改键那次按键松开后才解锁
-            } else if (downNow && !keyWasDown && now >= g_ui.rebindGuardUntil) {
-                TrySave_(mgr, 0, "system-frame");
-            }
-            keyWasDown = downNow;
-        } else {
-            keyWasDown = !g_ui.awaitingRebind
-                && (GetAsyncKeyState(g_store.saveKey) & 0x8000) != 0;
-        }
+        // 键轮询（改键保护窗、闩锁重 arm、存档键边沿触发）整体在界面事件内。
+        g_uiPort->OnFrameKeyPoll(mgr, now, g_uiWaitSaveUntil != 0);
         g_uiPort->Draw(mgr);
     }
     else {

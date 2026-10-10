@@ -29,7 +29,7 @@ static bool CombatIsReadable_(const H3CombatManager* mgr);
 static bool CombatCanCapture_(const H3CombatManager* mgr, const char** reason);
 static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error);
 static std::wstring ArchiveRoot_();
-static void ClearBattleInputs_();
+static bool TryCaptureCombat_();
 
 Patcher*         _P  = nullptr;
 PatcherInstance* _PI = nullptr;
