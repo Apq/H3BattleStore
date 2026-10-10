@@ -211,12 +211,12 @@ int wmain(int argc, wchar_t** argv)
             == BattleRestoreMaintain_::CancelBattleChanged, "finished/unreadable battle cancels first");
         Check(BattleRestoreMaintainDecision_({true, true, 21, 25, 60000})
             == BattleRestoreMaintain_::CancelBattleChanged, "generation change cancels before timeout");
-        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 4999ul})
-            == BattleRestoreMaintain_::Keep, "under five seconds still waits for the boundary");
-        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 5000ul})
-            == BattleRestoreMaintain_::Keep, "exactly five seconds keeps strict-greater timeout");
-        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 5001ul})
-            == BattleRestoreMaintain_::CancelTimeout, "over five seconds cancels even without any boundary");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 19999ul})
+            == BattleRestoreMaintain_::Keep, "under twenty seconds still waits for the boundary");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 20000ul})
+            == BattleRestoreMaintain_::Keep, "exactly twenty seconds keeps strict-greater timeout");
+        Check(BattleRestoreMaintainDecision_({true, true, 21, 21, 20001ul})
+            == BattleRestoreMaintain_::CancelTimeout, "over twenty seconds cancels even without any boundary");
         BattleMessageFrames_ frames = {};
         BattleMessageFrame_ ancestor = {};
         frames.Enter(ancestor, 19u, (const void*)0x11110000, (const void*)0xAAAA0000);

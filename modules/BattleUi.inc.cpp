@@ -1298,7 +1298,7 @@ static void UiProcessRestore_(H3CombatManager* mgr, int result)
 {
     if (!g_restoreRequest.pending || g_restoreBusy) return;
     if (result == 2 || g_restoreRequest.generation != g_battleGeneration
-        || GetTickCount() - g_restoreRequest.requested > 5000) {
+        || GetTickCount() - g_restoreRequest.requested > kRestoreQueueTimeoutMs_) {
         g_restoreRequest.pending = false;
         return;
     }

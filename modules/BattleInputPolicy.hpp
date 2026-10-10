@@ -22,8 +22,12 @@ static constexpr bool BattleStorageAllowed_(const BattleStorageWindowState_& sta
 }
 
 // 读档请求的独立维护判定（2026-10-10 玩家日志：绝对消息深度阻断消费入口后，
-// 5 秒超时也永远到不了，请求挂起 5 分 40 秒红灯）。维护只取消排队状态，
+// 超时取消也永远到不了，请求挂起 5 分 40 秒红灯）。维护只取消排队状态，
 // 不写任何战斗内存；每帧调用，不受恢复安全点门控。
+// 超时兜底 20 秒（2026-10-10 应用户要求由 5 秒加长）：排队请求滞留 20 秒
+// 仍无消费边界即取消；UiExecuteRestore_ 进入确认前已清 pending，确认框
+// 耗时从不计入排队年龄。
+static constexpr unsigned long kRestoreQueueTimeoutMs_ = 20000;
 enum class BattleRestoreMaintain_ { Keep, CancelBattleChanged, CancelTimeout };
 struct BattleRestoreMaintainState_ {
     bool pending;
@@ -37,9 +41,8 @@ static constexpr BattleRestoreMaintain_ BattleRestoreMaintainDecision_(const Bat
     if (!s.pending) return BattleRestoreMaintain_::Keep;
     if (!s.battleAvailable || s.entryGeneration != s.currentGeneration)
         return BattleRestoreMaintain_::CancelBattleChanged;
-    // 严格大于：恰好 5000ms 仍保留（UiExecuteRestore_ 进入确认前即清 pending，
-    // 确认框耗时从不计入排队年龄）。
-    if (s.ageMs > 5000ul) return BattleRestoreMaintain_::CancelTimeout;
+    // 严格大于：恰好 20000ms 仍保留。
+    if (s.ageMs > kRestoreQueueTimeoutMs_) return BattleRestoreMaintain_::CancelTimeout;
     return BattleRestoreMaintain_::Keep;
 }
 
