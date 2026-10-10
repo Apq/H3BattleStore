@@ -131,11 +131,16 @@ public:
             g_foldPanelH = g_uiLayout.Height(UiListRows_());
             return;
         }
-        // 收起：只画状态灯，失效残影跟踪。战场内每帧自动重绘，上一帧展开的
-        // 大矩形会被战斗场景自然覆盖，不需要从 screenPcx16 拷回（与战场外
-        // 区域的差异，2026-10-11 用户纠正）。灯色跟随保存窗口门禁，语义与
-        // 旧界面同一判定（UiStorageAllowed_）。
-        UiInvalidateTail_();
+        // 收起：若上一帧还是展开态（tail 有效），先把展开矩形从 screenPcx16
+        // 拷回一次再失效跟踪——战场每帧自动重绘覆盖大部分区域，但 02:2x
+        // 实机实证增量呈现下偶发彩色条纹残留（中上部、非必现），恢复一次
+        // 保证确定性清场。灯色跟随保存窗口门禁，语义与旧界面同一判定
+        // （UiStorageAllowed_）。
+        if (uiTailX >= 0) {
+            foldDrawing = true;
+            UiRestoreTail_();
+            foldDrawing = false;
+        }
         const bool storageAllowed = UiStorageAllowed_(mgr);
         const int lampW = 2 * hbs_ui::StatusLampRadius + 1;
         if (!g_foldLamp || !g_foldLamp->buffer

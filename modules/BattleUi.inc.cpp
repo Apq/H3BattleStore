@@ -731,14 +731,34 @@ static void UiDrawBar_(H3CombatManager* mgr)
     }
 }
 
-// 折叠版收起时失效残影跟踪（第二套折叠界面用）。战场内不需要像战场外那样
-// 手工把旧区域从 screenPcx16 拷回：战斗场景每帧自动重绘 backbuffer（悬浮框
-// 本身也是每帧重画），旧的大矩形在收起后自然被场景覆盖。这里只把跟踪置为
-// 无效，让下一次展开帧直接重画、不误判 rectChanged。
+// 折叠版收起时失效残影跟踪（第二套折叠界面用），让下一次展开帧直接重画、
+// 不误判 rectChanged。
 static void UiInvalidateTail_()
 {
     uiTailX = -1;
     uiTailY = uiTailH = uiTailBlockH = uiTailListWidth = -1;
+}
+
+// 折叠版收起瞬间恢复上一帧呈现矩形（2026-10-11 02:2x 实机实证回归）：
+// 战场每帧自动重绘能覆盖大部分旧区域，但增量呈现下并非全部——收起后
+// 偶发彩色条纹残留（中上部、非必现）。恢复源 screenPcx16 是不含本插件
+// 绘制的干净场景合成，与 UiDrawBar_ 内 rectChanged 恢复同款手法；只在
+// 展开→收起切换的首帧执行一次，随后失效跟踪。
+static void UiRestoreTail_()
+{
+    if (uiTailX < 0) return;
+    H3WindowManager* wnd = H3WindowManager::Get();
+    if (wnd && wnd->screenPcx16) {
+        if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
+                uiTailBlockH, uiTailX, uiTailY))
+            wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
+        if (uiTailH > uiTailBlockH
+            && UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY + uiTailBlockH,
+                uiTailListWidth, uiTailH - uiTailBlockH, uiTailX, uiTailY + uiTailBlockH))
+            wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth,
+                uiTailH - uiTailBlockH);
+    }
+    UiInvalidateTail_();
 }
 
 // 悬浮条位置夹在战场对话框矩形内（2026-10-05 用户实测：战场框外的呈现/
