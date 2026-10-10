@@ -31,8 +31,10 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir Condition="'$(H3BS_UI_NULL)'=='1'">$(ProjectDir)Release\null\</OutDir>
     <IntDir Condition="'$(H3BS_UI_NULL)'=='1'">$(ProjectDir)Release\null\obj\</IntDir>
-    <OutDir Condition="'$(H3BS_UI_NULL)'!='1'">$(ProjectDir)Release\</OutDir>
-    <IntDir Condition="'$(H3BS_UI_NULL)'!='1'">$(ProjectDir)Release\obj\</IntDir>
+    <OutDir Condition="'$(H3BS_UI_NATIVE)'=='1'">$(ProjectDir)Release\native\</OutDir>
+    <IntDir Condition="'$(H3BS_UI_NATIVE)'=='1'">$(ProjectDir)Release\native\obj\</IntDir>
+    <OutDir Condition="'$(H3BS_UI_NULL)'!='1' And '$(H3BS_UI_NATIVE)'!='1'">$(ProjectDir)Release\</OutDir>
+    <IntDir Condition="'$(H3BS_UI_NULL)'!='1' And '$(H3BS_UI_NATIVE)'!='1'">$(ProjectDir)Release\obj\</IntDir>
     <TargetName>H3BattleStore</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -49,7 +51,8 @@
       <AdditionalOptions>/utf-8 /wd4235 /wd4005 /wd4267 /wd4018 /wd4553 /wd4010 /wd4996 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)..\H3API\single_header;$(ProjectDir)lzma;$(ProjectDir)third_party;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions Condition="'$(H3BS_UI_NULL)'=='1'">WIN32;NDEBUG;_WINDOWS;_USRDLL;WINDOWS_IGNORE_PACKING_MISMATCH;_CRT_SECURE_NO_WARNINGS;Z7_ST;JSON_NOEXCEPTION;H3BS_UI_NULL=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(H3BS_UI_NULL)'!='1'">WIN32;NDEBUG;_WINDOWS;_USRDLL;WINDOWS_IGNORE_PACKING_MISMATCH;_CRT_SECURE_NO_WARNINGS;Z7_ST;JSON_NOEXCEPTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(H3BS_UI_NATIVE)'=='1'">WIN32;NDEBUG;_WINDOWS;_USRDLL;WINDOWS_IGNORE_PACKING_MISMATCH;_CRT_SECURE_NO_WARNINGS;Z7_ST;JSON_NOEXCEPTION;H3BS_UI_NATIVE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(H3BS_UI_NULL)'!='1' And '$(H3BS_UI_NATIVE)'!='1'">WIN32;NDEBUG;_WINDOWS;_USRDLL;WINDOWS_IGNORE_PACKING_MISMATCH;_CRT_SECURE_NO_WARNINGS;Z7_ST;JSON_NOEXCEPTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -85,6 +88,7 @@
     <ClInclude Include="modules\BattleStoreService.inc.cpp" />
     <ClInclude Include="modules\BattleUiPort.hpp" />
     <ClInclude Include="modules\NullUiPort.inc.cpp" />
+    <ClInclude Include="modules\BattleFoldBar.inc.cpp" />
     <ClInclude Include="modules\BattleUi.inc.cpp" />
     <ClInclude Include="modules\Entry.inc.cpp" />
     <ClInclude Include="resource.h" />

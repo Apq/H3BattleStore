@@ -31,6 +31,12 @@ static int UiRowHeight_() { return g_uiLayout.rowHeight; }
 static const int kUiListVisibleRows = hbs_ui::kUiListVisibleRows;
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
+// 悬浮条锚点（左上角游戏坐标）。HdNativeUi 恒 (8,8)（2026-10-05 定稿固定
+// 不可拖动）；第二套折叠式界面经 Initialize() 改为战场内右上角。
+static int g_uiBarAnchorX = 8;
+static int g_uiBarAnchorY = 8;
+// 折叠版把状态灯移动到面板右上角，面板从灯向左、向下展开。
+static bool g_uiFoldLayout = false;
 // HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
 static const int kUiLogPackX = 392;
 static const int kUiLogPackWidth = 84;
@@ -125,6 +131,51 @@ static void UiScrollbarDrag_(int py) {
 
 static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
 static const int GUARD_COPY = GuardRegisterHook_("BattleStore.CopyPixels");
+
+// UiDrawBar_ 的上一帧呈现矩形（残影跟踪）。收起态切换（第二套折叠界面）时
+// 据此把旧区域从 screenPcx16 拷回，避免展开块留下残影。
+static int uiTailX = -1;
+static int uiTailY = -1;
+static int uiTailH = -1;
+static int uiTailBlockH = -1;
+static int uiTailListWidth = -1;
+static H3CombatManager* uiTailMgr = nullptr;
+
+// 存读档窗口判定 + 变化 debug 日志（状态灯与提示共用；两类界面一致口径）。
+static bool UiStorageAllowed_(H3CombatManager* mgr)
+{
+    const bool storageAllowed = !g_restoreBusy && !g_restoreRequest.pending
+        && CombatStorageWindow_(mgr);
+    static int lastStorageAllowed = -1;
+    static unsigned lastStorageGeneration = ~0u;
+    if (lastStorageAllowed != (int)storageAllowed || lastStorageGeneration != g_battleGeneration) {
+        LogDebug("[StorageWindow] allowed=%d generation=%u initialized=%d human_side=%d action=%d executor=%d spell=%d busy=%d pending=%d",
+            storageAllowed ? 1 : 0, g_battleGeneration, g_battleInitialized ? 1 : 0,
+            mgr->currentActiveSide, (int)mgr->action, g_executorDepth, g_spellDepth,
+            g_restoreBusy ? 1 : 0, g_restoreRequest.pending ? 1 : 0);
+        lastStorageAllowed = (int)storageAllowed;
+        lastStorageGeneration = g_battleGeneration;
+    }
+    return storageAllowed;
+}
+
+// 状态灯（圆）绘制到合成图；(centerX, centerY) 为合成图内灯中心。
+// 抽取供第二套折叠界面在收起态复用同一外观。
+static void UiDrawStatusLamp_(H3LoadedPcx16* c, int centerX, int centerY, bool storageAllowed)
+{
+    const hbs_ui::LampColor lamp = hbs_ui::StatusLampColor(storageAllowed);
+    const int radius = hbs_ui::StatusLampRadius;
+    for (int dy = -radius - 1; dy <= radius + 1; ++dy) {
+        const int half = hbs_ui::LampHalfWidth(dy, radius + 1);
+        c->FillRectangle(centerX - half, centerY + dy, 2 * half + 1, 1, 30, 30, 30);
+    }
+    for (int dy = -radius; dy <= radius; ++dy) {
+        const int half = hbs_ui::LampHalfWidth(dy, radius);
+        c->FillRectangle(centerX - half, centerY + dy, 2 * half + 1, 1,
+            lamp.r, lamp.g, lamp.b);
+    }
+    c->FillRectangle(centerX - 3, centerY - 3, 3, 2, 220, 245, 225);
+}
 
 
 // 列表数据扫描在服务层 StoreReloadList_；这里清输入管道并重置界面滚动、悬停与手势。
@@ -426,7 +477,8 @@ static void UiDrawBar_(H3CombatManager* mgr)
         if (!wnd || !font || !UiDDBackBuffer_()) return;
         const hbs_ui::Layout layout = hbs_ui::ForFont(font->height);
         g_uiLayout = layout;
-        g_ui.x = g_ui.y = 8;
+        g_ui.x = g_uiBarAnchorX;
+        g_ui.y = g_uiBarAnchorY;
         const int y = UiOriginY_();
         const int compositeH = layout.Height(kUiListVisibleRows);
         if (!g_barComposite || !g_barComposite->buffer
@@ -453,20 +505,15 @@ static void UiDrawBar_(H3CombatManager* mgr)
         const int usedH = UiBandHeight_() + UiBandHeight_() + rows * UiRowHeight_();
         // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
         // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
-        static int lastX = -1;
-        static int lastY = -1;
-        static int lastH = -1;
-        static int lastBlockH = -1;
-        static int lastListWidth = -1;
-        static H3CombatManager* lastMgr = nullptr;
-        if (lastMgr != mgr) {
-            lastX = lastY = lastH = lastBlockH = lastListWidth = -1;
-            lastMgr = mgr;
+        // 跟踪变量为 file scope（uiTail*），供第二套折叠界面收起时清场。
+        if (uiTailMgr != mgr) {
+            uiTailX = uiTailY = uiTailH = uiTailBlockH = uiTailListWidth = -1;
+            uiTailMgr = mgr;
         }
         // 两行悬浮框矩形恒定，残影跟踪只跟随存档列表行数。
         const int totalH = usedH;
-        const bool rectChanged = lastX != x || lastY != y || lastH != totalH
-            || lastBlockH != g_uiLayout.ListTop() || lastListWidth != listWidth;
+        const bool rectChanged = uiTailX != x || uiTailY != y || uiTailH != totalH
+            || uiTailBlockH != g_uiLayout.ListTop() || uiTailListWidth != listWidth;
         // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
         c->FillRectangle(0, 0, kUiBarWidth, UiBandHeight_(), 0, 0, 0);
         c->FillRectangle(0, UiBandHeight_(), kUiBarWidth, UiBandHeight_(), 0, 0, 0);
@@ -540,32 +587,20 @@ static void UiDrawBar_(H3CombatManager* mgr)
         }
         font->TextDraw(c, label, 6, UiBandHeight_(), hbs_ui::StatusLabelWidth, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
-        const bool storageAllowed = !g_restoreBusy && !g_restoreRequest.pending
-            && CombatStorageWindow_(mgr);
-        static int lastStorageAllowed = -1;
-        static unsigned lastStorageGeneration = ~0u;
-        if (lastStorageAllowed != (int)storageAllowed || lastStorageGeneration != g_battleGeneration) {
-            LogDebug("[StorageWindow] allowed=%d generation=%u initialized=%d human_side=%d action=%d executor=%d spell=%d busy=%d pending=%d",
-                storageAllowed ? 1 : 0, g_battleGeneration, g_battleInitialized ? 1 : 0,
-                mgr->currentActiveSide, (int)mgr->action, g_executorDepth, g_spellDepth,
-                g_restoreBusy ? 1 : 0, g_restoreRequest.pending ? 1 : 0);
-            lastStorageAllowed = (int)storageAllowed;
-            lastStorageGeneration = g_battleGeneration;
+        const bool storageAllowed = UiStorageAllowed_(mgr);
+        const int statusLampX = g_uiFoldLayout ? kUiBarWidth - hbs_ui::StatusLampRadius - 1
+            : hbs_ui::StatusLampX;
+        const int statusLampY = g_uiFoldLayout ? hbs_ui::StatusLampRadius + 1
+            : hbs_ui::StatusLampY(g_uiLayout);
+        if (g_uiFoldLayout) {
+            // 折叠版把灯移到面板右上角：先铺一块深色衬底，再画灯，
+            // 使底色描边完整落在面板内、不压住日志等级热区边界。
+            c->FillRectangle(statusLampX - hbs_ui::StatusLampRadius - 1,
+                statusLampY - hbs_ui::StatusLampRadius - 1,
+                2 * hbs_ui::StatusLampRadius + 3, 2 * hbs_ui::StatusLampRadius + 3,
+                20, 20, 20);
         }
-        const hbs_ui::LampColor lamp = hbs_ui::StatusLampColor(storageAllowed);
-        const int lampX = hbs_ui::StatusLampX;
-        const int lampY = hbs_ui::StatusLampY(g_uiLayout);
-        const int radius = hbs_ui::StatusLampRadius;
-        for (int dy = -radius - 1; dy <= radius + 1; ++dy) {
-            const int half = hbs_ui::LampHalfWidth(dy, radius + 1);
-            c->FillRectangle(lampX - half, lampY + dy, 2 * half + 1, 1, 30, 30, 30);
-        }
-        for (int dy = -radius; dy <= radius; ++dy) {
-            const int half = hbs_ui::LampHalfWidth(dy, radius);
-            c->FillRectangle(lampX - half, lampY + dy, 2 * half + 1, 1,
-                lamp.r, lamp.g, lamp.b);
-        }
-        c->FillRectangle(lampX - 3, lampY - 3, 3, 2, 220, 245, 225);
+        UiDrawStatusLamp_(c, statusLampX, statusLampY, storageAllowed);
         char key[16] = {};
         char keyUtf8[8] = {};
         _snprintf(keyUtf8, sizeof(keyUtf8), "键:%c", g_store.saveKey);
@@ -639,32 +674,32 @@ static void UiDrawBar_(H3CombatManager* mgr)
         }
         bool bltOk = false;
         redrawing = true;
-        if (rectChanged && lastX >= 0 && lastY != y && wnd->screenPcx16) {
-            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, lastY, kUiBarWidth,
-                lastBlockH, lastX, lastY)) wnd->H3Redraw(lastX, lastY, kUiBarWidth, lastBlockH);
-            if (lastH > lastBlockH && UiBltPcx16Region_(wnd->screenPcx16,
-                lastX, lastY + lastBlockH, lastListWidth, lastH - lastBlockH,
-                lastX, lastY + lastBlockH))
-                wnd->H3Redraw(lastX, lastY + lastBlockH, lastListWidth, lastH - lastBlockH);
+        if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
+            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
+                uiTailBlockH, uiTailX, uiTailY)) wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
+            if (uiTailH > uiTailBlockH && UiBltPcx16Region_(wnd->screenPcx16,
+                uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH,
+                uiTailX, uiTailY + uiTailBlockH))
+                wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH);
         }
-        if (rectChanged && lastX >= 0 && lastY == y && lastBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
-            const int tailY = lastY + g_uiLayout.ListTop();
-            const int tailH = lastBlockH - g_uiLayout.ListTop();
-            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, kUiBarWidth,
-                tailH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, kUiBarWidth, tailH);
+        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
+            const int tailY = uiTailY + g_uiLayout.ListTop();
+            const int tailH = uiTailBlockH - g_uiLayout.ListTop();
+            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, kUiBarWidth,
+                tailH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, kUiBarWidth, tailH);
         }
-        if (rectChanged && lastX >= 0 && lastY == y && lastH > totalH && wnd->screenPcx16) {
-            const int tailY = lastY + totalH;
-            if (UiBltPcx16Region_(wnd->screenPcx16, lastX, tailY, lastListWidth,
-                lastH - totalH, lastX, tailY)) wnd->H3Redraw(lastX, tailY, lastListWidth, lastH - totalH);
+        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailH > totalH && wnd->screenPcx16) {
+            const int tailY = uiTailY + totalH;
+            if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, uiTailListWidth,
+                uiTailH - totalH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, uiTailListWidth, uiTailH - totalH);
         }
-        if (rectChanged && lastX >= 0 && lastY == y && lastListWidth > listWidth && wnd->screenPcx16) {
-            const int stripX = lastX + listWidth;
-            const int stripY = lastY + g_uiLayout.ListTop();
+        if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listWidth && wnd->screenPcx16) {
+            const int stripX = uiTailX + listWidth;
+            const int stripY = uiTailY + g_uiLayout.ListTop();
             const int stripH = totalH - g_uiLayout.ListTop();
             if (stripH > 0 && UiBltPcx16Region_(wnd->screenPcx16, stripX, stripY,
-                lastListWidth - listWidth, stripH, stripX, stripY))
-                wnd->H3Redraw(stripX, stripY, lastListWidth - listWidth, stripH);
+                uiTailListWidth - listWidth, stripH, stripX, stripY))
+                wnd->H3Redraw(stripX, stripY, uiTailListWidth - listWidth, stripH);
         }
         // 两行悬浮框整块呈现，存档列表仅覆盖自身窄矩形。
         bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, g_uiLayout.ListTop(), x, y);
@@ -675,11 +710,11 @@ static void UiDrawBar_(H3CombatManager* mgr)
         if (rows > 0) wnd->H3Redraw(x, y + UiBandHeight_() + UiBandHeight_(),
             listWidth, rows * UiRowHeight_());
         redrawing = false;
-        lastX = x;
-        lastY = y;
-        lastH = totalH;
-        lastBlockH = g_uiLayout.ListTop();
-        lastListWidth = listWidth;
+        uiTailX = x;
+        uiTailY = y;
+        uiTailH = totalH;
+        uiTailBlockH = g_uiLayout.ListTop();
+        uiTailListWidth = listWidth;
         static LogFailureWindow_ bltFailures;
         unsigned skipped = 0;
         const int bltReport = bltFailures.Observe(!bltOk, infoNow, 30000, &skipped);
@@ -694,6 +729,26 @@ static void UiDrawBar_(H3CombatManager* mgr)
     } __except (GuardCrashFilter_(GUARD_DRAW, GetExceptionInformation())) {
         redrawing = false;
     }
+}
+
+// 收起切换后清上一帧呈现矩形（第二套折叠界面用）：与 UiDrawBar_ 的残影恢复
+// 同源，把旧区域从 screenPcx16 拷回 backbuffer 并刷新，随后失效跟踪。
+static void UiRestoreTail_()
+{
+    H3WindowManager* wnd = H3WindowManager::Get();
+    if (uiTailX < 0) return;
+    if (wnd && wnd->screenPcx16) {
+        if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
+                uiTailBlockH, uiTailX, uiTailY))
+            wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
+        if (uiTailH > uiTailBlockH
+            && UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY + uiTailBlockH,
+                uiTailListWidth, uiTailH - uiTailBlockH, uiTailX, uiTailY + uiTailBlockH))
+            wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth,
+                uiTailH - uiTailBlockH);
+    }
+    uiTailX = -1;
+    uiTailY = uiTailH = uiTailBlockH = uiTailListWidth = -1;
 }
 
 // 悬浮条位置夹在战场对话框矩形内（2026-10-05 用户实测：战场框外的呈现/
@@ -1227,6 +1282,9 @@ public:
     char RebindLatchKey() const override { return g_ui.rebindKey; }
 };
 
+#if defined(H3BS_UI_NATIVE)
+// 旧界面装配（编译期宏 H3BS_UI_NATIVE=1 选出；默认走 BattleFoldBar.inc.cpp）。
 static HdNativeUi g_hdNativeUi;
 // 钩子层唯一界面入口；Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
 static IBattleStoreUi* const g_uiPort = &g_hdNativeUi;
+#endif

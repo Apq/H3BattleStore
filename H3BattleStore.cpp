@@ -49,9 +49,12 @@ PatcherInstance* _PI = nullptr;
 #include "modules/BattleRestore.inc.cpp"
 #include "modules/BattleStoreService.inc.cpp"
 #include "modules/BattleUiPort.hpp"
-#ifdef H3BS_UI_NULL
+#if defined(H3BS_UI_NULL)
 #include "modules/NullUiPort.inc.cpp"
 #else
 #include "modules/BattleUi.inc.cpp"
+#ifndef H3BS_UI_NATIVE
+#include "modules/BattleFoldBar.inc.cpp"
+#endif
 #endif
 #include "modules/Entry.inc.cpp"

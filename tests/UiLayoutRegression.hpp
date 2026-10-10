@@ -121,6 +121,22 @@ static_assert(hbs_ui::StatusLampY(tall) + hbs_ui::StatusLampRadius + 1 < tall.Li
 static_assert(hbs_ui::LampHalfWidth(0, 7) == 7 && hbs_ui::LampHalfWidth(7, 7) == 0);
 static_assert(hbs_ui::StatusLampColor(true).g > hbs_ui::StatusLampColor(true).r);
 static_assert(hbs_ui::StatusLampColor(false).r > hbs_ui::StatusLampColor(false).g);
+// 折叠界面热区语义（BattleFoldBar）：展开态必须光标留在面板内；收起态只有灯
+// 是热区；边界按左闭右开。
+static_assert(FoldBarWantsExpanded_(false, true, true));
+static_assert(FoldBarWantsExpanded_(false, false, true) == false);
+static_assert(FoldBarWantsExpanded_(true, false, true));
+static_assert(FoldBarWantsExpanded_(true, true, false) == false);
+static_assert(FoldBarRectContains_(10, 20, 30, 40, 10, 20));
+static_assert(FoldBarRectContains_(10, 20, 30, 40, 39, 59));
+static_assert(!FoldBarRectContains_(10, 20, 30, 40, 40, 59));
+static_assert(!FoldBarRectContains_(10, 20, 30, 40, 60, 20));
+static_assert(!FoldBarRectContains_(10, 20, 30, 40, 9, 30));
+// 折叠锚点落在战场内右上角方向（常量与生产共用，宽度不属纯布局头不管辖）。
+static_assert(kFoldGameWidth - kFoldMargin > 8);
+static_assert(kFoldGameWidth >= 800);
+static_assert(kFoldMargin > 0 && kFoldMargin < 64);
+static_assert(kFoldGameWidth - kFoldMargin > kFoldGameWidth / 2);
 constexpr bool StorageWindowTruthTable() {
     for (unsigned mask = 0; mask < (1u << 11); ++mask) {
         const BattleStorageWindowState_ state = {

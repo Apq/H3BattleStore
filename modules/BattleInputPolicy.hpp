@@ -167,3 +167,20 @@ static constexpr bool BattleIsKeyboardMessage_(int command)
 {
     return command == 0x1 || command == 0x2;
 }
+
+// 折叠式界面热区语义（第二套界面，默认实现；docs/09 第8节）：
+// 展开态要求光标留在整个面板矩形内，移出即收起；收起态只有状态灯是
+// 热区，光标进入才展开。判定纯函数化便于回归。
+static constexpr bool FoldBarWantsExpanded_(bool expanded, bool inLamp, bool inPanel)
+{
+    return expanded ? inPanel : inLamp;
+}
+
+static constexpr bool FoldBarRectContains_(int x, int y, int w, int h, int px, int py)
+{
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+// 折叠式界面锚点常量（生产实现与回归测试共用；锚点=战场内右上角）。
+static const int kFoldGameWidth = 800;   // SoD 800x600 游戏坐标
+static const int kFoldMargin = 8;

@@ -92,17 +92,22 @@ SaveKey=G
 build.bat /t:Rebuild
 ```
 
-默认界面为 HdNativeUi（HD 原生悬浮条）。界面实现为编译期单选，Null 变体（只记日志、不绘制、不吞输入）用：
+默认界面为折叠式（屏幕右上角状态灯，悬停展开完整悬浮框）。界面实现为编译期单选，旧两行常显条与 Null 变体按宏选出：
 
 ```bat
-build.bat /t:Rebuild /p:H3BS_UI_NULL=1
+build.bat /t:Rebuild                         默认：折叠式
+build.bat /t:Rebuild /p:H3BS_UI_NATIVE=1    旧两行常显悬浮条
+build.bat /t:Rebuild /p:H3BS_UI_NULL=1      Null：只记日志，不绘制不吞输入
 ```
+
+折叠式语义：收起时只剩状态灯（绿=可存读/红=不可），鼠标移到灯上自动向左向下展开完整悬浮框（仍是两行控制条 + 普通存档列表，非下拉框），鼠标移出展开区域自动收起；展开后交互与旧界面一致，收起态只放行灯区内输入（存档键、改键等键盘路径不受折叠影响）。
 
 输出文件：
 
 ```text
-Release\H3BattleStore.dll                默认 HdNativeUi（部署目标）
-Release\null\H3BattleStore.dll           NullUi 变体（验证/实验用，不部署）
+Release\H3BattleStore.dll                默认折叠式（部署目标）
+Release\native\H3BattleStore.dll         旧两行常显条
+Release\null\H3BattleStore.dll           Null 变体（验证/实验用，不部署）
 ```
 
 ## 测试
