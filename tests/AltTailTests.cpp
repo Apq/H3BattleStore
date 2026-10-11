@@ -1,5 +1,7 @@
 // AltTailTests：双格兵 ALT 退后一步的纯决策核心回归（与生产同源，
 // 以 H3BATTLE_ALTTAIL_CORE_ONLY 只编译 AltTailRetreatTarget_ 层）。
+// 09:20 实测口径：原版默认 target=clicked-(orientation?+1:-1)（点击格反推一格
+// =后退两步），ALT 覆盖为点击格本身 = position 落点击格 = 只后退一格。
 #include <cstdio>
 
 #define H3BATTLE_ALTTAIL_CORE_ONLY
@@ -14,32 +16,35 @@ static void Expect(bool ok, const char* what)
 
 int main()
 {
-    // 场景基线：orientation=0（副格在左/尾左头右），position=100，尾=99，尾旁横向空格=98。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 100, 98) == 99,
-        "retreat left lands on old tail hex");
-    // orientation=1（尾右）：position=95（row5 列10），尾=96，尾旁空格=97 → 落 96。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 95, 97) == 96,
-        "retreat right lands on old tail hex");
-    // 尾旁"仅横向"：点击同一行更远/更近的非尾旁格不触发（97、99、101 等都拒绝）。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 100, 97) == -1
-        && AltTailRetreatTarget_(2, true, true, true, 0, 100, 99) == -1
-        && AltTailRetreatTarget_(2, true, true, true, 0, 100, 101) == -1,
-        "only the hex directly beside the tail triggers");
-    // 贴行边无横向空格：position=84（row4 末列），orientation=1 时尾=85 已跨行 → 拒绝。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 84, 86) == -1,
-        "no lateral space at row edge refuses");
-    // 棋盘边界：orientation=0、position=1（尾=0，尾旁=-1 越界）→ 拒绝。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 1, -1) == -1,
-        "off-board behind hex refuses");
+    // orientation=1（尾/position端在右）：position=140，正后方一格=139，点 139 → 落 139
+    // （兵 {140,141}→{139,140} = 向身后平移一格；原版会落 138 = 平移两格）。
+    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 140, 139) == 139,
+        "retreat one step (tail right): position lands on clicked hex");
+    // orientation=0（尾端在左）：position=140，正后方一格=141，点 141 → 落 141
+    // （兵 {139,140}→{140,141} = 平移一格）。
+    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 140, 141) == 141,
+        "retreat one step (tail left): position lands on clicked hex");
+    // 只有"尾部正后方那一格"触发：点击自己/副格/原版默认反推的格/更远格全部拒绝。
+    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 140, 138) == -1
+        && AltTailRetreatTarget_(2, true, true, true, 1, 140, 140) == -1
+        && AltTailRetreatTarget_(2, true, true, true, 1, 140, 141) == -1
+        && AltTailRetreatTarget_(2, true, true, true, 0, 140, 138) == -1,
+        "only the hex directly behind the tail end triggers");
+    // 贴行边无身后格：position=85（row5 首列），orientation=1 时身后格=84 已跨行 → 拒绝。
+    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 85, 84) == -1,
+        "no hex behind at row edge refuses");
+    // 棋盘边界：position=0，orientation=0 时身后格=-1 越界 → 拒绝。
+    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 0, -1) == -1,
+        "off-board retreat hex refuses");
     // 攻击/无 ALT/非双格/非人类/非移动意图一律不干预。
-    Expect(AltTailRetreatTarget_(7, true, true, true, 0, 100, 98) == -1
-        && AltTailRetreatTarget_(2, false, true, true, 0, 100, 98) == -1
-        && AltTailRetreatTarget_(2, true, false, true, 0, 100, 98) == -1
-        && AltTailRetreatTarget_(2, true, true, false, 0, 100, 98) == -1,
+    Expect(AltTailRetreatTarget_(7, true, true, true, 1, 140, 139) == -1
+        && AltTailRetreatTarget_(2, false, true, true, 1, 140, 139) == -1
+        && AltTailRetreatTarget_(2, true, false, true, 1, 140, 139) == -1
+        && AltTailRetreatTarget_(2, true, true, false, 1, 140, 139) == -1,
         "attack/no-alt/single-wide/ai-side stay vanilla");
     // position/点击格越界防御。
-    Expect(AltTailRetreatTarget_(2, true, true, true, 0, 187, 185) == -1
-        && AltTailRetreatTarget_(2, true, true, true, 0, 100, 187) == -1,
+    Expect(AltTailRetreatTarget_(2, true, true, true, 1, 187, 139) == -1
+        && AltTailRetreatTarget_(2, true, true, true, 1, 140, 187) == -1,
         "out-of-range inputs refuse");
 
     if (g_failed_) { std::printf("%d alttail test(s) failed\n", g_failed_); return 1; }
