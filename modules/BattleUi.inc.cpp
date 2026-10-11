@@ -833,7 +833,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
                         kUiListWidth - 4, UiRowHeight_(), 220, 200, 110);
                 }
                 char stamp[32] = {};
-                StoreFormatStamp_(g_store.entries[g_ui.scroll.first + row], stamp, sizeof(stamp));
+                StoreFormatFileStem_(g_store.entries[g_ui.scroll.first + row], stamp, sizeof(stamp));
                 font->TextDraw(c, stamp, 6, listY + row * UiRowHeight_(),
                     kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
             }
@@ -848,7 +848,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
                         kUiListWidth - 4, UiRowHeight_(), 220, 200, 110);
                 }
                 char stamp[40] = {};
-                StoreFormatAutoStamp_(g_store.autoEntries[g_ui.autoScroll.first + row],
+                StoreFormatFileStem_(g_store.autoEntries[g_ui.autoScroll.first + row],
                     stamp, sizeof(stamp));
                 font->TextDraw(c, stamp, kUiAutoListX + 6, listY + row * UiRowHeight_(),
                     kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
@@ -1147,10 +1147,7 @@ static void UiRunRestoreFlow_(H3CombatManager* mgr, const StoreEntry& entry,
     struct BusyReset { ~BusyReset() { ClearBattleInputs_(); g_restoreBusy = false; } } busyReset;
     DiagBegin_("load", "outer-message", mgr);
     char stamp[32] = {};
-    if (entry.slot == hbs::ArchiveSlot::Auto)
-        StoreFormatAutoStamp_(entry, stamp, sizeof(stamp));
-    else
-        StoreFormatStamp_(entry, stamp, sizeof(stamp));
+    StoreFormatFileStem_(entry, stamp, sizeof(stamp));
     char text[192] = {}, utf8[192] = {};
     _snprintf(utf8, sizeof(utf8), "读回 %s 这一档？当前未保存的进度会丢掉。", stamp);
     UiToGbk_(utf8, text, sizeof(text));

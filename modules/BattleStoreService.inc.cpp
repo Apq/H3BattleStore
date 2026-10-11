@@ -139,19 +139,16 @@ static void StoreFormatStamp_(const StoreEntry& entry, char* out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }
 
-// 自动档行（docs/02 §4）：回合是身份，时间到分钟（列表宽 168 放不下秒）。
-// 形如 "T25 20261011-2119"。
-static void StoreFormatAutoStamp_(const StoreEntry& entry, char* out, size_t cap)
+// 两列及读档确认显示实际文件名去掉后缀，不重新拼回合或时间。
+static void StoreFormatFileStem_(const StoreEntry& entry, char* out, size_t cap)
 {
-    char stamp[32] = {};
     if (!out || cap == 0) return;
-    if (!hbs::detail::FormatLocalArchiveStamp(entry.timestampUtcMs, stamp, sizeof(stamp), nullptr)
-        || strlen(stamp) < 15) {
-        _snprintf_s(out, cap, _TRUNCATE, "T%d", entry.turn);
-        return;
-    }
-    stamp[13] = 0; // yyyymmdd-hhmmss → yyyymmdd-hhmm（截掉秒）
-    _snprintf_s(out, cap, _TRUNCATE, "T%d %s", entry.turn, stamp);
+    out[0] = 0;
+    std::wstring name = hbs::detail::FileNameOf(entry.path);
+    const size_t extension = name.find_last_of(L'.');
+    if (extension != std::wstring::npos) name.resize(extension);
+    if (!WideCharToMultiByte(CP_UTF8, 0, name.c_str(), -1, out, (int)cap, nullptr, nullptr))
+        _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }
 
 static LogRepeatGate_ g_storeListFailure;
