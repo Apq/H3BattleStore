@@ -539,8 +539,14 @@ int main()
     Expect(decoded.logLines.size() == 2 && decoded.stacks[0][2].spellIds.size() == 2,
         "reuse clears old containers");
 
+    // 08:0x 用户裁定：法术编号白名单删除（0..81 是未证实的表容量假设，热血扩表
+    // 会误拒真实战斗）；任意 I32 原值写入并 round-trip 保留。
     capture.stacks[1][0].spellIds.push_back(81);
-    Expect(!CodecEncode(capture, &sections, &error), "reject invalid spell id");
+    capture.stacks[1][0].spellIds.push_back(-1);
+    Expect(CodecEncode(capture, &sections, &error) && CodecDecode(sections, &decoded, &error)
+        && decoded.stacks[1][0].spellIds.size() == 2
+        && decoded.stacks[1][0].spellIds[0] == 81
+        && decoded.stacks[1][0].spellIds[1] == -1, "any spell id round-trips");
     capture.stacks[1][0].spellIds.clear();
     capture.logLines.push_back(std::string(70000, 'y'));
     Expect(!CodecEncode(capture, &sections, &error), "reject overlong log");
@@ -573,7 +579,7 @@ int main()
     bad = stable; bad.stacks[0][0].relations[0].push_back({0, 0});
     Expect(RestorePolicy_(bad, &error), "legal changed relation accepted for prepared replacement");
     bad = stable; bad.stacks[0][0].spellIds.push_back(81);
-    Expect(!RestorePolicy_(bad, &error), "invalid prepared spell id rejected");
+    Expect(RestorePolicy_(bad, &error), "any prepared spell id accepted (08:0x whitelist removal)");
     bad = stable; bad.stacks[0][0].relations[0].push_back({1, 1});
     Expect(!RestorePolicy_(bad, &error), "relation to absent saved target rejected");
     bad = stable; bad.stacks[0][0].sideIndex = 1;

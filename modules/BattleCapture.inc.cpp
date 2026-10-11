@@ -1,10 +1,8 @@
 // ========== BattleCapture.inc.cpp ==========
-// 从当前战斗只读采集时刻状态。任何越界、空指针或未知容器都返回失败，不写游戏内存。
-
-// 战斗日志只存档尾部窗口（2026-10-11 07:5x 实证：读档后自动战斗打到 7134 回合，
-// 全量日志涨到 10 万条上下，旧防线 logCount>100000 把真实超长战斗当损坏拒绝，
-// 自动存档必然失败）。2048 条兼顾恢复后日志窗口的完整感与读档预分配开销。
-static const UINT kLogKeepMax_ = 2048;
+// 从当前战斗只读采集时刻状态。
+// 原则（2026-10-11 08:0x 用户裁定）：存档时必然处于正常游戏过程，一切该进入存档的
+// 数据必然合法——采集端不再做任何值域/关联类业务校验；内存可读性探测仅作为防崩
+// 铠甲保留，探测失败一律降级（跳过该项/截断采集），绝不因此拒绝存档。
 
 static bool Readable_(const void* address, size_t size)
 {
@@ -296,17 +294,13 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
         CodecTower_& saved = out->towers[tower];
         memcpy(&saved.scalars[0], raw, 4);
         memcpy(&saved.scalars[1], raw + 0x0C, 24);
-        if (!CaptureResourceName_(*(const void* const*)(raw + 4), saved.defName)
-            || !CaptureResourceName_(*(const void* const*)(raw + 8), saved.missileName)) {
-            if (error) *error = "箭塔资源不可读取";
-            return false;
-        }
+        // 08:0x 裁定：资源名读不到只降级为空名（CaptureResourceName_ 失败时已清零），
+        // 不拒绝存档。
+        CaptureResourceName_(*(const void* const*)(raw + 4), saved.defName);
+        CaptureResourceName_(*(const void* const*)(raw + 8), saved.missileName);
     }
     for (int wall = 0; wall < 90; ++wall)
-        if (!CaptureResourceName_(((const void* const*)((const uint8_t*)mgr + 0x13DF8))[wall], out->wallPcxNames[wall])) {
-            if (error) *error = "城墙图像资源不可读取";
-            return false;
-        }
+        CaptureResourceName_(((const void* const*)((const uint8_t*)mgr + 0x13DF8))[wall], out->wallPcxNames[wall]);
 
     static_assert(offsetof(H3CombatCreature, info) + offsetof(H3CreatureInformation, numberShots) == 0xD8,
         "native remaining ammunition offset");
@@ -320,17 +314,17 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
         out->heroPresent[side] = hero != nullptr;
         if (hero) {
             const H3Artifact* machines = hero->bodyArtifacts + kMachineBodySlot_;
-            if (!Readable_(hero, 0x1A) || !Readable_(machines, kMachineSlotsBytes_)) {
-                if (error) *error = "combat hero state is not readable";
-                return false;
+            // 08:0x 裁定：英雄结构读不到按"该侧无英雄"降级，不拒绝存档。
+            if (Readable_(hero, 0x1A) && Readable_(machines, kMachineSlotsBytes_)) {
+                out->spellPoints[side] = hero->spellPoints;
+                CodecCaptureWarMachines_(machines, out->warMachines[side]);
+            } else {
+                out->heroPresent[side] = false;
             }
-            out->spellPoints[side] = hero->spellPoints;
-            CodecCaptureWarMachines_(machines, out->warMachines[side]);
         }
-        if (!ReadSpellSet_((const uint8_t*)mgr + 0x545C + side * 0x10, &out->eagleEye[side])) {
-            if (error) *error = "eagle-eye set is invalid";
-            return false;
-        }
+        // 鹰眼集合读不到降级为空集，不拒绝存档。
+        if (!ReadSpellSet_((const uint8_t*)mgr + 0x545C + side * 0x10, &out->eagleEye[side]))
+            out->eagleEye[side].clear();
     }
 
     DiagStage_("capture.squares");
@@ -346,12 +340,10 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
         square.stackSide = source.stackSide;
         square.stackIndex = source.stackIndex;
         square.twoHexMonsterSquare = source.twoHexMonsterSquare;
-        square.deadStacksNumber = source.deadStacksNumber;
-        if (square.deadStacksNumber < 0 || square.deadStacksNumber > 14) {
-            DiagCursor_(-1, squareIndex);
-            if (error) *error = "square corpse count outside 0..14";
-            return false;
-        }
+        // 08:0x 裁定：不做业务校验；deadStackSide/Index[14] 是定长附表（结构容量
+        // 事实），计数只钳到附表容量，超出部分附表本就不存在。
+        square.deadStacksNumber = source.deadStacksNumber >= 0 && source.deadStacksNumber <= 14
+            ? source.deadStacksNumber : 0;
         memcpy(square.deadStackSide, source.deadStackSide, sizeof(square.deadStackSide));
         memcpy(square.deadStackIndex, source.deadStackIndex, sizeof(square.deadStackIndex));
         memcpy(square.belongsToAttacker, source.belongsToAttacker, sizeof(square.belongsToAttacker));
@@ -361,96 +353,58 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
 
     DiagStage_("capture.obstacles");
     UINT obstacleCount = 0;
-    if (!ObstacleVectorReady_(mgr->obstacleInfo, false, &obstacleCount)) {
-        if (error) *error = "obstacle container is not readable";
-        return false;
-    }
-    out->obstacles.reserve(obstacleCount);
-    for (UINT i = 0; i < obstacleCount; ++i) {
-        const H3Obstacle& source = mgr->obstacleInfo[i];
-        // v4: destroyed entries stay in the vector as zombies (def == 0, count never
-        // shrinks). Only live entries are saved, keyed by kind + anchor and sorted so
-        // the encoded section is independent of the vector's append order.
-        if (!source.def) continue;
-        DiagCursor_(-1, (int)i);
-        CodecObstacle item;
-        memset(&item, 0, sizeof(item));
-        if (!Readable_(source.info, sizeof(H3ObstacleInfo)) || !ObstacleKindOf_(source.info, &item.kindId)) {
-            if (error) *error = "obstacle info pointer is not a recognized kind";
-            return false;
+    // 08:0x 裁定：容器读不到按无障碍降级；单条读不到/类型不识别跳过该条，均不拒绝。
+    if (ObstacleVectorReady_(mgr->obstacleInfo, false, &obstacleCount)) {
+        out->obstacles.reserve(obstacleCount);
+        for (UINT i = 0; i < obstacleCount; ++i) {
+            const H3Obstacle& source = mgr->obstacleInfo[i];
+            // v4: destroyed entries stay in the vector as zombies (def == 0, count never
+            // shrinks). Only live entries are saved, keyed by kind + anchor and sorted so
+            // the encoded section is independent of the vector's append order.
+            if (!source.def) continue;
+            DiagCursor_(-1, (int)i);
+            CodecObstacle item;
+            memset(&item, 0, sizeof(item));
+            if (!Readable_(source.info, sizeof(H3ObstacleInfo)) || !ObstacleKindOf_(source.info, &item.kindId))
+                continue;
+            const H3ObstacleInfo* info = source.info;
+            // cells[8] 定长附表（结构容量事实）：计数只钳容量。
+            const int blocked = info->blockedCount >= 0 && info->blockedCount <= 8 ? info->blockedCount : 0;
+            if (!ObstacleName_(info->defName, item.defName))
+                continue;
+            item.anchorHex = source.anchorHex;
+            item.ownerSide = source.ownerSide;
+            item.featureTriggered = source.featureTriggered;
+            item.featureDamage = source.featureDamage;
+            item.featureDuration = source.featureDuration;
+            item.animationIndex = source.animationIndex;
+            item.cellCount = (uint8_t)blocked;
+            for (int c = 0; c < blocked; ++c)
+                item.cells[c] = (uint8_t)ObstacleCellHex_(item.anchorHex, info->relativeCells[c]);
+            out->obstacles.push_back(item);
         }
-        const H3ObstacleInfo* info = source.info;
-        if (info->blockedCount < 0 || info->blockedCount > 8) {
-            if (error) *error = "obstacle blocked count outside 0..8";
-            return false;
-        }
-        if (!ObstacleName_(info->defName, item.defName)) {
-            if (error) *error = "obstacle def name is not readable";
-            return false;
-        }
-        item.anchorHex = source.anchorHex;
-        if (item.anchorHex >= 187) {
-            if (error) *error = "obstacle anchor hex off board";
-            return false;
-        }
-        item.ownerSide = source.ownerSide;
-        item.featureTriggered = source.featureTriggered;
-        item.featureDamage = source.featureDamage;
-        item.featureDuration = source.featureDuration;
-        item.animationIndex = source.animationIndex;
-        item.cellCount = (uint8_t)info->blockedCount;
-        for (int c = 0; c < info->blockedCount; ++c) {
-            const int hex = ObstacleCellHex_(item.anchorHex, info->relativeCells[c]);
-            if (hex < 0 || hex >= 187) {
-                if (error) *error = "obstacle cell off board";
-                return false;
-            }
-            item.cells[c] = (uint8_t)hex;
-        }
-        // The live grid must link every claimed square back to this entry; a broken
-        // link means vector and squares disagree and no rebuild could be verified.
-        if (mgr->squares[item.anchorHex].obstacleIndex != (INT32)i) {
-            if (error) *error = "obstacle anchor square linkage is broken";
-            return false;
-        }
-        for (int c = 0; c < info->blockedCount; ++c)
-            if (mgr->squares[item.cells[c]].obstacleIndex != (INT32)i) {
-                if (error) *error = "obstacle cell square linkage is broken";
-                return false;
-            }
-        out->obstacles.push_back(item);
     }
     std::sort(out->obstacles.begin(), out->obstacles.end(), CodecObstacleKeyLess_);
 
     DiagStage_("capture.combat-log");
     if (mgr->dlg && Readable_(mgr->dlg, sizeof(H3CombatDlg))) {
+        // 08:0x 裁定：日志有多少存多少，全量采集。内存探测只防崩：数组整体读不到
+        // → 存 0 条；中途坏行 → 截断到此为止；单行超 0xFFFF → 同样截断（编码 U16
+        // 长度上限）。任何情况都不拒绝存档。
         const H3Vector<H3String*>& log = *(const H3Vector<H3String*>*)((const uint8_t*)mgr->dlg + 0x54);
         const UINT logCount = log.Count();
-        // 两个失败分支分开报（2026-10-11 07:5x 实证：7134 回合超长自动战斗把日志
-        // 推到 10 万条上下，旧代码把"条数超限"与"指针不可读"混为一谈，无法定位）。
-        // 千万条是 count 字段被踩的界：真实战斗打不到（每回合几十条 × 回合上限）。
-        if (logCount > 10000000) {
-            DiagCursor_(-1, (int)(logCount & 0x7FFFFFFF));
-            if (error) *error = "combat log count out of range";
-            return false;
-        }
-        if (logCount && !Readable_(log.CFirst(), logCount * sizeof(H3String*))) {
-            if (error) *error = "combat log container is not readable";
-            return false;
-        }
-        // 只存尾部窗口：restore 只需恢复最近片段，全量数十万条既让存档膨胀、
-        // 也让读档端预分配巨量 H3String（2026-10-11 07:5x：7134 回合自动战斗
-        // 的全量日志让自动存档在此前 10 万条防线上必然失败）。
-        const UINT keep = logCount > kLogKeepMax_ ? kLogKeepMax_ : logCount;
-        for (UINT i = logCount - keep; i < logCount; ++i) {
-            const H3String* line = log[i];
-            if (!line || !Readable_(line, sizeof(H3String)) || line->Length() > 0xFFFF
-                || (line->Length() && !Readable_(line->String(), line->Length()))) {
-                DiagCursor_(-1, (int)i);
-                if (error) *error = "combat log line is not readable";
-                return false;
+        const H3String* const* lines = log.CFirst();
+        if (logCount && logCount <= 10000000 && lines
+            && Readable_(lines, logCount * sizeof(H3String*))) {
+            out->logLines.reserve(logCount);
+            for (UINT i = 0; i < logCount; ++i) {
+                const H3String* line = lines[i];
+                if (!line || !Readable_(line, sizeof(H3String))) break;
+                const UINT len = line->Length();
+                if (len > 0xFFFF) break;
+                if (len && !Readable_(line->String(), len)) break;
+                out->logLines.push_back(len ? std::string(line->String(), len) : std::string());
             }
-            out->logLines.push_back(line->Length() ? std::string(line->String(), line->Length()) : std::string());
         }
     }
 
@@ -556,17 +510,17 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
                 (const H3Vector<H3CombatCreature*>*)(rawRelations + 0x514),
                 (const H3Vector<H3CombatCreature*>*)(rawRelations + 0x524)
             };
+            // 08:0x 裁定：关系向量/法术队列读不到只丢弃该项（计 unresolvable 留证），
+            // 不拒绝存档。
             for (int relation = 0; relation < 4; ++relation) {
                 if (!ReadPointerRelations_(mgr, *relations[relation], &stack.relations[relation], &unresolvable)) {
-                    LogError("[Capture op=%ld] slot=%d:%d relation=%d offset=%X", g_diag.id, side, slot, relation, 0x4F4 + relation * 0x10);
-                    if (error) *error = "stack relation is not readable";
-                    return false;
+                    LogDebug("[Capture op=%ld] slot=%d:%d relation=%d unreadable, dropped", g_diag.id, side, slot, relation);
+                    ++unresolvable;
                 }
             }
             if (!ReadDequeInts_((const uint8_t*)&source + 0x420, &stack.spellIds)) {
-                LogError("[Capture op=%ld] slot=%d:%d deque offset=420", g_diag.id, side, slot);
-                if (error) *error = "spell deque is not readable";
-                return false;
+                LogDebug("[Capture op=%ld] slot=%d:%d spell deque unreadable, dropped", g_diag.id, side, slot);
+                ++unresolvable;
             }
         }
     }

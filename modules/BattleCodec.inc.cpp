@@ -596,9 +596,8 @@ static bool RestorePolicy_(const CodecCapture& saved, std::string* error)
         for (int slot = 0; slot < 21; ++slot) {
             const CodecStack& s = saved.stacks[side][slot];
             if (s.occupied) {
-                // 数量闸在解码侧（解码安全）；此处只查写回白名单与结构界。
-                for (int spell : s.spellIds)
-                    if (spell < 0 || spell >= 81) return reject("saved spell id invalid");
+                // 08:0x 用户裁定：法术编号白名单全线删除（编码/解码/恢复策略三层
+                // 同口径——0..81 是未证实的表容量假设，热血扩表会误拒真实战斗）。
                 for (int v = 0; v < 4; ++v) {
                     for (const CodecIdentity& id : s.relations[v])
                         if (id.side < 0 || id.side > 1 || id.slot < 0 || id.slot >= 20
@@ -994,12 +993,11 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
         for (int slot = 0; slot < 21; ++slot) {
             for (int vector = 0; vector < 4; ++vector) {
                 const std::vector<CodecIdentity>& items = capture.stacks[side][slot].relations[vector];
-                // U16 计数字段容量闸（防截断写出自损坏文件）。原 42 条"每目标最多
-                // 出现一次"是未证实推断——原生关系向量是瞬态容器，无去重保证
-                // （2026-10-10 用户裁定删除）。
-                if (items.size() > 0xFFFF) relations.Fail();
-                relations.U16((uint16_t)items.size());
-                for (size_t i = 0; i < items.size(); ++i) {
+                // U16 计数字段的格式容量事实：超出截断写入（08:0x 裁定：不因容量
+                // 拒绝存档；关系向量瞬态容器真实达不到该量级）。
+                const size_t limit = items.size() > 0xFFFF ? 0xFFFF : items.size();
+                relations.U16((uint16_t)limit);
+                for (size_t i = 0; i < limit; ++i) {
                     relations.I32(items[i].side);
                     relations.I32(items[i].slot);
                 }
@@ -1014,8 +1012,8 @@ static bool CodecEncode(const CodecCapture& capture, std::vector<hbs::ArchiveSec
             const std::vector<int32_t>& ids = capture.stacks[side][slot].spellIds;
             spells.U32((uint32_t)ids.size());
             for (size_t i = 0; i < ids.size(); ++i) {
-                // 法术编号白名单（法术表 81 项）：写回游戏内存前的取值门，保留。
-                if (ids[i] < 0 || ids[i] >= 81) spells.Fail();
+                // 08:0x 裁定：法术编号原值写入（原 0..81 白名单是未证实的表容量
+                // 假设，热血环境若扩表会误拒），解码侧同放开。
                 spells.I32(ids[i]);
             }
         }
@@ -1193,7 +1191,9 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
     CodecReader logReader(log->bytes.data(), log->bytes.size());
     if (logReader.U32() != kCodecVersion) { if (error) *error = "log section version mismatch"; return false; }
     const uint32_t logCount = logReader.U32();
-    if (logCount > 100000) { if (error) *error = "log count exceeds 100000"; return false; }
+    // 08:0x 裁定后存档端全量采集：固定上限改为数学界——每行至少 2 字节长度头，
+    // 超过剩余容量的条数只可能是损坏文件（内存安全闸，非业务校验）。
+    if (logCount > (logReader.size - logReader.pos) / 2) { if (error) *error = "log count exceeds section size"; return false; }
     out->logLines.resize(logCount);
     for (uint32_t i = 0; i < logCount; ++i) {
         const uint16_t length = logReader.U16();
@@ -1248,8 +1248,8 @@ static bool CodecDecode(const std::vector<hbs::ArchiveSection>& sections, CodecC
             std::vector<int32_t>& ids = out->stacks[side][slot].spellIds;
             ids.resize(spellReader.ok ? count : 0);
             for (uint32_t i = 0; spellReader.ok && i < count; ++i) {
+                // 08:0x 裁定：与编码端同放开——原 0..81 白名单是未证实的表容量假设。
                 ids[i] = spellReader.I32();
-                if (ids[i] < 0 || ids[i] >= 81) spellReader.ok = false;
             }
         }
     }
