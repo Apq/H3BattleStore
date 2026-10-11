@@ -1,6 +1,11 @@
 // ========== BattleCapture.inc.cpp ==========
 // 从当前战斗只读采集时刻状态。任何越界、空指针或未知容器都返回失败，不写游戏内存。
 
+// 战斗日志只存档尾部窗口（2026-10-11 07:5x 实证：读档后自动战斗打到 7134 回合，
+// 全量日志涨到 10 万条上下，旧防线 logCount>100000 把真实超长战斗当损坏拒绝，
+// 自动存档必然失败）。2048 条兼顾恢复后日志窗口的完整感与读档预分配开销。
+static const UINT kLogKeepMax_ = 2048;
+
 static bool Readable_(const void* address, size_t size)
 {
     return address && !IsBadReadPtr(address, size);
@@ -421,11 +426,23 @@ static bool CaptureBattle_(const H3CombatManager* mgr, CodecCapture* out, std::s
     if (mgr->dlg && Readable_(mgr->dlg, sizeof(H3CombatDlg))) {
         const H3Vector<H3String*>& log = *(const H3Vector<H3String*>*)((const uint8_t*)mgr->dlg + 0x54);
         const UINT logCount = log.Count();
-        if (logCount > 100000 || (logCount && !Readable_(log.CFirst(), logCount * sizeof(H3String*)))) {
+        // 两个失败分支分开报（2026-10-11 07:5x 实证：7134 回合超长自动战斗把日志
+        // 推到 10 万条上下，旧代码把"条数超限"与"指针不可读"混为一谈，无法定位）。
+        // 千万条是 count 字段被踩的界：真实战斗打不到（每回合几十条 × 回合上限）。
+        if (logCount > 10000000) {
+            DiagCursor_(-1, (int)(logCount & 0x7FFFFFFF));
+            if (error) *error = "combat log count out of range";
+            return false;
+        }
+        if (logCount && !Readable_(log.CFirst(), logCount * sizeof(H3String*))) {
             if (error) *error = "combat log container is not readable";
             return false;
         }
-        for (UINT i = 0; i < logCount; ++i) {
+        // 只存尾部窗口：restore 只需恢复最近片段，全量数十万条既让存档膨胀、
+        // 也让读档端预分配巨量 H3String（2026-10-11 07:5x：7134 回合自动战斗
+        // 的全量日志让自动存档在此前 10 万条防线上必然失败）。
+        const UINT keep = logCount > kLogKeepMax_ ? kLogKeepMax_ : logCount;
+        for (UINT i = logCount - keep; i < logCount; ++i) {
             const H3String* line = log[i];
             if (!line || !Readable_(line, sizeof(H3String)) || line->Length() > 0xFFFF
                 || (line->Length() && !Readable_(line->String(), line->Length()))) {

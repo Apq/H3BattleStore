@@ -228,6 +228,7 @@ static std::string StorePlayerTextZh_(const std::string& reason)
         {"obstacle cell off board", "当前障碍物的占格超出战场。"},
         {"obstacle anchor square linkage is broken", "当前障碍物与起始格的关联已失效。"},
         {"obstacle cell square linkage is broken", "当前障碍物与战场占格的关联已失效。"},
+        {"combat log count out of range", "当前战斗的日志条数异常，可能内存已损坏。"},
         {"combat log container is not readable", "无法读取当前战斗的日志记录。"},
         {"combat log line is not readable", "当前战斗日志中存在无法读取的记录。"},
         {"AI目标指针不属于本战场", "当前电脑行动目标不属于本战场。"},
