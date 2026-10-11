@@ -290,12 +290,17 @@ static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std
     return true;
 }
 
-// 返回 true = 落盘且回读校验通过（悬浮条已打"已存档"戳）；
+// 返回 true = 落盘且回读校验通过（手动槽悬浮条已打"已存档"戳）；
 // false = 任一环节失败（拒绝/采集/编码/写盘/回读），调用方负责悬浮条提示。
-static bool TryCaptureCombat_()
+// slot（docs/02 §4）：Manual=按 G 存 手动\（提示+整列表刷新）；Auto=每回合
+// 首个玩家等待自动存 自动\（无提示、纯数据刷新不重置滚动）。
+static bool TryCaptureCombat_(hbs::ArchiveSlot slot, const char* origin)
 {
+    if (g_store.saving) return false;
+    struct SavingReset { ~SavingReset() { g_store.saving = false; } } savingReset;
+    g_store.saving = true;
     const H3CombatManager* mgr = H3CombatManager::Get();
-    if (!g_diag.id) DiagBegin_("save", "direct", mgr);
+    if (!g_diag.id) DiagBegin_("save", origin, mgr);
     DiagStage_("save.gate");
     const char* reason = nullptr;
     if (!CombatCanCapture_(mgr, &reason)) {
@@ -349,13 +354,15 @@ static bool TryCaptureCombat_()
     std::wstring storeError;
     hbs::ArchiveRecord committed;
     DiagStage_("save.write");
-    LogDebug("[Archive op=%ld] root=%s format=%s timestamp=%llu", g_diag.id,
+    LogDebug("[Archive op=%ld] root=%s format=%s slot=%s timestamp=%llu", g_diag.id,
         DiagUtf8_(ArchiveRoot_()).c_str(), g_store.saveJson ? "json" : "binary",
-        document.timestampUtcMs);
-    if (!store.Save(document, storeError, &committed)) {
+        slot == hbs::ArchiveSlot::Auto ? "auto" : "manual", document.timestampUtcMs);
+    if (!store.Save(document, storeError, &committed, slot)) {
         DiagEnd_("failed", DiagUtf8_(storeError).c_str());
         return false;
     }
+    if (!storeError.empty())
+        LogWarn("[Archive op=%ld] save warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
     LogInfo("[Archive op=%ld] persisted=1 path=%s turn=%d number=%llu sequence=%u", g_diag.id,
         DiagUtf8_(committed.path).c_str(), committed.turn,
         static_cast<unsigned long long>(committed.number), committed.sequence);
@@ -396,11 +403,16 @@ static bool TryCaptureCombat_()
         }
     }
     DiagSummary_(decoded, "readback");
-    g_uiPort->MarkSaved(document.timestampUtcMs);
-    // 保存成功后刷新常驻列表，第一项就是刚存的档。
-    //（列表按 回合/编号 两段数值倒序，刚存的档编号最大必在首位）。
-
-    g_uiPort->ReloadEntries(mgr);
+    if (slot == hbs::ArchiveSlot::Auto) {
+        // 自动档（docs/02 §4）：不打"已存档"提示；刷新纯列表数据（服务层，
+        // 不经 UiReloadEntries_ 包装——界面滚动/悬停/手势全部保留）。
+        StoreReloadList_(mgr);
+    } else {
+        g_uiPort->MarkSaved(document.timestampUtcMs);
+        // 保存成功后刷新常驻列表，第一项就是刚存的档。
+        //（列表按 回合/编号 两段数值倒序，刚存的档编号最大必在首位）。
+        g_uiPort->ReloadEntries(mgr);
+    }
     DiagEnd_("ok", "persisted and readback verified; runtime restore not verified");
     return true;
 }
@@ -461,7 +473,18 @@ static void DiagHookFault_()
     g_diag.id = 0;
     g_diag.writing = false;
     g_storeWaitSaveUntil = 0;
+    // SEH 跳出时不能依赖 C++ 局部析构（/EHsc）；明确释放自动保存重入闸。
+    g_store.autoSaving = false;
+    g_store.saving = false;
     g_uiPort->OnFaultCleanup();
+}
+
+// 跨插件回调也是外部入口，SEH保护仅包自身逻辑；失败本回合不重试。
+static BOOL __stdcall StoreBeforeAutoAction_(void* manager)
+{
+    __try { return StoreBeforeAutoActionBody_(manager); }
+    __except (GuardCrashFilter_(GUARD_CYCLE, GetExceptionInformation())) { DiagHookFault_(); }
+    return FALSE; // 回调故障这一帧不推进自动效果；已消费的回合不会重试。
 }
 
 static LRESULT CALLBACK CombatKeyboardHook_(int code, WPARAM wParam, LPARAM lParam)
@@ -741,6 +764,11 @@ static void BattleReset_()
     // 消息登记不追栈帧链；下一代 Enter 清理旧代元数据，旧调用迟到的
     // Update/Leave 用 token 核验，不会误操作同地址的新登记。
     g_store.entries.clear();
+    g_store.autoEntries.clear();
+    g_store.autoSave.Reset(); // 新战斗首个玩家等待必自动存
+    g_store.autoSaving = false;
+    g_store.saving = false;
+    ++g_store.listRevision;
     g_store.battleKey.clear();
     if (g_storeListFailure.seen) LogWarn("[List] reset suppressed=%u", g_storeListFailure.suppressed);
     g_storeListFailure = {};
@@ -832,6 +860,9 @@ static void CombatCycleAfter_(H3CombatManager* mgr, int result)
             }
         }
         if (g_restoreBusy || g_restoreFatal || !BattleMainDialog_(mgr)) return;
+        // 自动存档触发（docs/02 §4）：每回合首个玩家等待窗口；位于读档互斥
+        // 检查之后（读档进行/排队期间不自动存）。
+        StoreAutoSaveTick_(mgr);
         EnsureCombatKeyboardHook_();
         g_uiPort->PollRebindKey();
         g_uiPort->PollHover();
@@ -864,6 +895,11 @@ static void StartPlugin()
     // 存档/列举/读档三处同源取 g_store.saveJson，玩家改配置需重启生效。
     g_store.saveJson = StoreLoadSaveFormat_();
     LogInfo("[Config] saveFormat=%s", g_store.saveJson ? "json" : "binary");
+    // 可选协作ABI v1：回调返回BOOL（FALSE=等待稳定玩家窗口，TRUE=可自动行动）。
+    _P->VarInit("H3BattleStore.BusyQuery.v1", reinterpret_cast<DWORD>(&StoreAutomationBusy_));
+    _P->VarInit("H3BattleStore.BeforeAutoAction.v1", reinterpret_cast<DWORD>(&StoreBeforeAutoAction_));
+    g_storeRestoreEpoch = _P->VarInit("H3BattleStore.RestoreEpoch.v1", 0);
+    LogInfo("[Coop] H3Auto coordination callbacks registered v1");
     g_uiPort->Initialize();
     _PI->WriteHiHook(0x462600, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStart_);
     _PI->WriteHiHook(0x462E40, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStop_);

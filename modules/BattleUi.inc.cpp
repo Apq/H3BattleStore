@@ -54,6 +54,8 @@ static struct
 
     hbs_ui::ScrollList scroll;
     BattleUiPointerGesture_ listGesture;
+    unsigned gestureListRevision = 0;
+    unsigned pendingListRevision = 0;
     bool listRightHeld = false;
     bool awaitingRebind = false;
     char rebindKey = 0;          // 改键接受的键：必须先松开才允许触发存档
@@ -64,6 +66,9 @@ static struct
     bool lastNoticeHighlight = false;  // 本条通知用醒目色（读档成功）；过期后自然回常规状态行
     DWORD rebindGuardUntil = 0;  // 改键生效后短窗内忽略该键，防误触发存档
     int hoverRow = -1;
+    // 自动存档列表（docs/02 §4）：滚动/悬停与手动列表各自独立。
+    hbs_ui::ScrollList autoScroll;
+    int autoHoverRow = -1;
     // 日志等级常驻单选列表：值即 g_log_level；点击行选中并写 user.ini。
     int logLevelHover = -1;
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
@@ -84,50 +89,78 @@ static void ClearBattleInputs_()
 
 
 static int UiOriginY_() { return g_uiLayout.OriginY(g_ui.y); }
-static int UiListRows_() { return g_ui.scroll.Rows(g_store.entries.size()); }
-static int UiListDrawWidth_() {
-    return kUiListWidth + (g_store.entries.size() > kUiListVisibleRows ? hbs_ui::ScrollbarWidth : 0);
+// ---- 双列表参数化（docs/02 §4）：which 0=手动（左侧原位）、1=自动（右移） ----
+static const int kUiAutoListX = hbs_ui::AutoListX;
+static const std::vector<StoreEntry>& UiEntriesOf_(int which)
+{
+    return which ? g_store.autoEntries : g_store.entries;
 }
-static bool UiPointInList_(int px, int py) {
-    return px >= g_ui.x && px < g_ui.x + UiListDrawWidth_()
+static hbs_ui::ScrollList& UiScrollOf_(int which)
+{
+    return which ? g_ui.autoScroll : g_ui.scroll;
+}
+static int& UiHoverOf_(int which)
+{
+    return which ? g_ui.autoHoverRow : g_ui.hoverRow;
+}
+static int UiListX_(int which) { return which ? kUiAutoListX : 0; }
+static int UiListRows_(int which) { return UiScrollOf_(which).Rows(UiEntriesOf_(which).size()); }
+static int UiPanelRows_() { return hbs_ui::Max(UiListRows_(0), UiListRows_(1)); }
+static int UiListDrawWidth_(int which) {
+    return kUiListWidth + (UiEntriesOf_(which).size() > kUiListVisibleRows ? hbs_ui::ScrollbarWidth : 0);
+}
+static bool UiPointInList_(int which, int px, int py) {
+    const int lx = g_ui.x + UiListX_(which);
+    return px >= lx && px < lx + UiListDrawWidth_(which)
         && py >= UiOriginY_() + g_uiLayout.ListTop()
-        && py < UiOriginY_() + g_uiLayout.Height(UiListRows_());
+        && py < UiOriginY_() + g_uiLayout.Height(UiListRows_(which));
 }
-static bool UiPointInScrollbar_(int px, int py) {
-    return g_store.entries.size() > kUiListVisibleRows && px >= g_ui.x + kUiListWidth
-        && UiPointInList_(px, py);
+static bool UiPointInAnyList_(int px, int py) {
+    return UiPointInList_(0, px, py) || UiPointInList_(1, px, py);
+}
+static bool UiPointInScrollbar_(int which, int px, int py) {
+    return UiEntriesOf_(which).size() > kUiListVisibleRows
+        && px >= g_ui.x + UiListX_(which) + kUiListWidth
+        && UiPointInList_(which, px, py);
+}
+static int UiListAt_(int px, int py) {
+    for (int which = 0; which < 2; ++which)
+        if (UiPointInList_(which, px, py)) return which;
+    return -1;
 }
 static void UiCancelReleasedPointer_() {
-    g_ui.listGesture.StopReleasedDrag(g_ui.scroll.dragging,
-        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+    const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    g_ui.listGesture.StopReleasedDrag(g_ui.scroll.dragging, leftDown);
+    g_ui.listGesture.StopReleasedDrag(g_ui.autoScroll.dragging, leftDown);
     if (!(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) g_ui.listRightHeld = false;
 }
-static void UiScrollBy_(int rows) {
-    g_ui.scroll.Move(rows, g_store.entries.size());
-    g_ui.hoverRow = -1;
+static void UiScrollBy_(int which, int rows) {
+    UiScrollOf_(which).Move(rows, UiEntriesOf_(which).size());
+    UiHoverOf_(which) = -1;
 }
-static void UiScrollWheel_(int delta) {
-    g_ui.scroll.Wheel(delta, g_store.entries.size());
-    g_ui.hoverRow = -1;
+static void UiScrollWheel_(int which, int delta) {
+    UiScrollOf_(which).Wheel(delta, UiEntriesOf_(which).size());
+    UiHoverOf_(which) = -1;
 }
-static void UiScrollbarDown_(int py) {
+static void UiScrollbarDown_(int which, int py) {
     const int y = py - UiOriginY_() - g_uiLayout.ListTop();
-    const auto bar = hbs_ui::ForList(g_uiLayout, g_store.entries.size(), g_ui.scroll.first);
-    if (y < bar.buttonHeight) UiScrollBy_(-1);
-    else if (y >= kUiListVisibleRows * UiRowHeight_() - bar.buttonHeight) UiScrollBy_(1);
-    else if (y < bar.thumbTop) UiScrollBy_(-kUiListVisibleRows);
-    else if (y >= bar.thumbTop + bar.thumbHeight) UiScrollBy_(kUiListVisibleRows);
+    const auto bar = hbs_ui::ForList(g_uiLayout, UiEntriesOf_(which).size(), UiScrollOf_(which).first);
+    if (y < bar.buttonHeight) UiScrollBy_(which, -1);
+    else if (y >= kUiListVisibleRows * UiRowHeight_() - bar.buttonHeight) UiScrollBy_(which, 1);
+    else if (y < bar.thumbTop) UiScrollBy_(which, -kUiListVisibleRows);
+    else if (y >= bar.thumbTop + bar.thumbHeight) UiScrollBy_(which, kUiListVisibleRows);
     else {
-        g_ui.scroll.dragging = true;
-        g_ui.scroll.dragStartY = py;
-        g_ui.scroll.dragFirst = g_ui.scroll.first;
+        UiScrollOf_(which).dragging = true;
+        UiScrollOf_(which).dragStartY = py;
+        UiScrollOf_(which).dragFirst = UiScrollOf_(which).first;
     }
 }
-static void UiScrollbarDrag_(int py) {
-    const auto bar = hbs_ui::ForList(g_uiLayout, g_store.entries.size(), g_ui.scroll.first);
-    g_ui.scroll.first = bar.FirstAfterDrag(py - g_ui.scroll.dragStartY,
-        g_ui.scroll.dragFirst, g_ui.scroll.LastFirst(g_store.entries.size()));
-    g_ui.hoverRow = -1;
+static void UiScrollbarDrag_(int which, int py) {
+    hbs_ui::ScrollList& scroll = UiScrollOf_(which);
+    const auto bar = hbs_ui::ForList(g_uiLayout, UiEntriesOf_(which).size(), scroll.first);
+    scroll.first = bar.FirstAfterDrag(py - scroll.dragStartY,
+        scroll.dragFirst, scroll.LastFirst(UiEntriesOf_(which).size()));
+    UiHoverOf_(which) = -1;
 }
 
 static const int GUARD_DRAW = GuardRegisterHook_("BattleStore.Draw");
@@ -140,6 +173,9 @@ static int uiTailY = -1;
 static int uiTailH = -1;
 static int uiTailBlockH = -1;
 static int uiTailListWidth = -1;
+static int uiTailRowHeight = 0;
+static int uiTailColumnRows[2] = {-1, -1};
+static int uiTailColumnWidths[2] = {-1, -1};
 static H3CombatManager* uiTailMgr = nullptr;
 
 // 存读档窗口判定 + 变化 debug 日志（状态灯与提示共用；两类界面一致口径）。
@@ -185,6 +221,8 @@ static bool UiReloadEntries_(const H3CombatManager* mgr)
     ClearBattleInputs_();
     g_ui.scroll = {};
     g_ui.hoverRow = -1;
+    g_ui.autoScroll = {};
+    g_ui.autoHoverRow = -1;
     g_ui.listGesture = {};
     g_ui.listRightHeld = false;
     return StoreReloadList_(mgr);
@@ -617,14 +655,23 @@ static void UiDrawBar_(H3CombatManager* mgr)
         // 固定左上角（2026-10-05 用户定稿：不可拖动，每帧同位置重画）。
         const int x = g_ui.x;
         g_ui.scroll.Clamp(g_store.entries.size());
-        const int rows = UiListRows_();
-        const int listWidth = UiListDrawWidth_();
+        g_ui.autoScroll.Clamp(g_store.autoEntries.size());
+        const int rows = UiListRows_(0);
+        const int autoRows = UiListRows_(1);
+        const int listWidth = UiListDrawWidth_(0);
+        const int autoListWidth = UiListDrawWidth_(1);
+        // 列表区总宽（手动列 + 间隙 + 自动列）：残影跟踪与清底用它。
+        const int listsWidth = kUiAutoListX + autoListWidth;
         const H3POINT cursor = H3POINT::GetCursorPosition();
         g_ui.hoverRow = cursor.x >= x && cursor.x < x + kUiListWidth
             ? g_uiLayout.HitRow(cursor.y - y, rows) : -1;
+        g_ui.autoHoverRow = cursor.x >= x + kUiAutoListX && cursor.x < x + kUiAutoListX + kUiListWidth
+            ? g_uiLayout.HitRow(cursor.y - y, autoRows) : -1;
         // 列表高度随实际行数自适应（2026-10-05 用户实测纠正：固定满高会显示
         // 一堆空行背景板）；成品图行分隔线在每行底部，任意行数展开底边闭合。
-        const int usedH = UiBandHeight_() + UiBandHeight_() + rows * UiRowHeight_();
+        // 双列取较高一列（标题行恒在）。
+        const int listRowsShown = rows > autoRows ? rows : autoRows;
+        const int usedH = g_uiLayout.Height(listRowsShown);
         // 残影跟踪：位置/高度变化时，本帧末尾把上一帧矩形从 screenPcx16 拷回
         // backbuffer（HD 增量呈现不会自动覆盖旧区域，2026-10-05 拖动实测残影）。
         // 跟踪变量为 file scope（uiTail*），供第二套折叠界面收起时清场。
@@ -635,19 +682,26 @@ static void UiDrawBar_(H3CombatManager* mgr)
         // 两行悬浮框矩形恒定，残影跟踪只跟随存档列表行数。
         const int totalH = usedH;
         const bool rectChanged = uiTailX != x || uiTailY != y || uiTailH != totalH
-            || uiTailBlockH != g_uiLayout.ListTop() || uiTailListWidth != listWidth;
-        // 每帧清底；列表区只清列表宽度（列表窄于悬浮条）
+            || uiTailBlockH != g_uiLayout.ListTop() || uiTailListWidth != listsWidth
+            || uiTailColumnRows[0] != rows || uiTailColumnRows[1] != autoRows
+            || uiTailColumnWidths[0] != listWidth || uiTailColumnWidths[1] != autoListWidth;
+        // 每帧清底；列表区只清双列总宽（列表窄于悬浮条）
         c->FillRectangle(0, 0, kUiBarWidth, UiBandHeight_(), 0, 0, 0);
         c->FillRectangle(0, UiBandHeight_(), kUiBarWidth, UiBandHeight_(), 0, 0, 0);
-        c->FillRectangle(0, g_uiLayout.ListTop(), kUiListWidth + hbs_ui::ScrollbarWidth,
+        c->FillRectangle(0, g_uiLayout.ListTop(), listsWidth,
             kUiListVisibleRows * UiRowHeight_(), 0, 0, 0);
         H3LoadedPcx16* bg = UiLoadBarBg_();
         const bool bgOk = bg && bg->buffer
             && bg->width == kUiBarWidth && bg->height == kUiBgHeight;
         if (bgOk) {
-            for (int py = 0; py < g_uiLayout.ListTop(); ++py)
+            for (int py = 0; py < g_uiLayout.TitleTop(); ++py)
                 UiCopyBgRegion_(c, bg, 0, hbs_ui::TextureY(py, UiBandHeight_()),
                     kUiBarWidth, 1, py);
+            // 标题带复用第二行纹理，源图仍为 480x48（不能读取第三行）。
+            for (int py = 0; py < UiRowHeight_(); ++py)
+                UiCopyBgRegion_(c, bg, 0,
+                    hbs_ui::TextureY(UiBandHeight_() + py * UiBandHeight_() / UiRowHeight_(), UiBandHeight_()),
+                    kUiBarWidth, 1, g_uiLayout.TitleTop() + py);
             // 下拉列表底色 = 背景图主色（2026-10-06 用户裁定：选项底色接近背景图，
             // 不要黑蓝对比）。稀疏采样均值做主色，两行图仍仅千余点。
             long sumR = 0, sumG = 0, sumB = 0;
@@ -673,11 +727,27 @@ static void UiDrawBar_(H3CombatManager* mgr)
             c->DrawFrame(0, 0, kUiBarWidth, g_uiLayout.ListTop(), 200, 180, 90);
             g_ui.listR = 20; g_ui.listG = 20; g_ui.listB = 20;
         }
+        // 标题行（docs/02 §4，2026-10-11 21:3x 用户裁定）：左「手动存档」
+        // 右「自动存档」，各对齐其下方列表；行高 = 列表行高。
+        char titleManual[16] = {};
+        UiToGbk_("手动存档", titleManual, sizeof(titleManual));
+        font->TextDraw(c, titleManual, 6, g_uiLayout.TitleTop(), kUiListWidth - 12,
+            UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        char titleAuto[16] = {};
+        UiToGbk_("自动存档", titleAuto, sizeof(titleAuto));
+        font->TextDraw(c, titleAuto, kUiAutoListX + 6, g_uiLayout.TitleTop(),
+            kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
         if (rows > 0) {
             c->FillRectangle(0, g_uiLayout.ListTop(), listWidth, rows * UiRowHeight_(),
                 (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
             c->DrawFrame(0, g_uiLayout.ListTop(), listWidth,
                 rows * UiRowHeight_(), 160, 140, 70);
+        }
+        if (autoRows > 0) {
+            c->FillRectangle(kUiAutoListX, g_uiLayout.ListTop(), autoListWidth,
+                autoRows * UiRowHeight_(), (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
+            c->DrawFrame(kUiAutoListX, g_uiLayout.ListTop(), autoListWidth,
+                autoRows * UiRowHeight_(), 160, 140, 70);
         }
         char label[128] = {};
         eTextColor labelColor = eTextColor::WHITE;
@@ -752,7 +822,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
             UiBandHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
         c->DrawFrame(kUiLogPackX, 3, kUiLogPackWidth, UiBandHeight_() - 6, 220, 200, 110);
         if (rows > 0) {
-            const int listY = UiBandHeight_() + UiBandHeight_();
+            const int listY = g_uiLayout.ListTop();
             for (int row = 0; row < rows; ++row) {
                 if (row == g_ui.hoverRow) {
                     // 2026-10-10 用户反馈悬停高亮不醒目：提亮底色并加金色描边
@@ -768,11 +838,46 @@ static void UiDrawBar_(H3CombatManager* mgr)
                     kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
             }
         }
+        if (autoRows > 0) {
+            const int listY = g_uiLayout.ListTop();
+            for (int row = 0; row < autoRows; ++row) {
+                if (row == g_ui.autoHoverRow) {
+                    c->FillRectangle(kUiAutoListX + 2, listY + row * UiRowHeight_(),
+                        kUiListWidth - 4, UiRowHeight_(), 128, 102, 36);
+                    c->DrawFrame(kUiAutoListX + 2, listY + row * UiRowHeight_(),
+                        kUiListWidth - 4, UiRowHeight_(), 220, 200, 110);
+                }
+                char stamp[40] = {};
+                StoreFormatAutoStamp_(g_store.autoEntries[g_ui.autoScroll.first + row],
+                    stamp, sizeof(stamp));
+                font->TextDraw(c, stamp, kUiAutoListX + 6, listY + row * UiRowHeight_(),
+                    kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+            }
+        }
         if (g_store.entries.size() > kUiListVisibleRows) {
             const auto bar = hbs_ui::ForList(layout, g_store.entries.size(), g_ui.scroll.first);
             const int sx = kUiListWidth;
             const int sy = layout.ListTop();
             const int height = rows * UiRowHeight_();
+            c->FillRectangle(sx, sy, hbs_ui::ScrollbarWidth, height, 45, 45, 36);
+            c->DrawFrame(sx, sy, hbs_ui::ScrollbarWidth, height, 160, 140, 70);
+            c->FillRectangle(sx + 2, sy + bar.thumbTop, hbs_ui::ScrollbarWidth - 4,
+                bar.thumbHeight, 155, 137, 85);
+            c->DrawFrame(sx + 2, sy + bar.thumbTop, hbs_ui::ScrollbarWidth - 4,
+                bar.thumbHeight, 220, 200, 110);
+            c->DrawFrame(sx, sy, hbs_ui::ScrollbarWidth, bar.buttonHeight, 160, 140, 70);
+            c->DrawFrame(sx, sy + height - bar.buttonHeight, hbs_ui::ScrollbarWidth,
+                bar.buttonHeight, 160, 140, 70);
+            for (int i = 0; i < 4; ++i) {
+                c->FillRectangle(sx + 6 - i, sy + 4 + i, 1 + 2 * i, 1, 230, 210, 130);
+                c->FillRectangle(sx + 6 - i, sy + height - 5 - i, 1 + 2 * i, 1, 230, 210, 130);
+            }
+        }
+        if (g_store.autoEntries.size() > kUiListVisibleRows) {
+            const auto bar = hbs_ui::ForList(layout, g_store.autoEntries.size(), g_ui.autoScroll.first);
+            const int sx = kUiAutoListX + kUiListWidth;
+            const int sy = layout.ListTop();
+            const int height = autoRows * UiRowHeight_();
             c->FillRectangle(sx, sy, hbs_ui::ScrollbarWidth, height, 45, 45, 36);
             c->DrawFrame(sx, sy, hbs_ui::ScrollbarWidth, height, 160, 140, 70);
             c->FillRectangle(sx + 2, sy + bar.thumbTop, hbs_ui::ScrollbarWidth - 4,
@@ -808,6 +913,19 @@ static void UiDrawBar_(H3CombatManager* mgr)
             }
         }
         else {
+            // 双列各自缩高/隐藏滚动条也要恢复旧矩形；另一列保持20行时，
+            // 面板总高度不变，不能只靠 max(rows) 的尾区清理。
+            if (rectChanged && uiTailX >= 0 && wnd->screenPcx16) {
+                for (int which = 0; which < 2; ++which) {
+                    const int oldH = uiTailColumnRows[which] * uiTailRowHeight;
+                    const int oldW = uiTailColumnWidths[which];
+                    const int oldX = uiTailX + UiListX_(which);
+                    const int oldY = uiTailY + uiTailBlockH;
+                    if (oldH > 0 && oldW > 0 && UiBltPcx16Region_(wnd->screenPcx16,
+                        oldX, oldY, oldW, oldH, oldX, oldY))
+                        wnd->H3Redraw(oldX, oldY, oldW, oldH);
+                }
+            }
             if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
                 if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
                     uiTailBlockH, uiTailX, uiTailY)) wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
@@ -827,29 +945,39 @@ static void UiDrawBar_(H3CombatManager* mgr)
                 if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, uiTailListWidth,
                     uiTailH - totalH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, uiTailListWidth, uiTailH - totalH);
             }
-            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listWidth && wnd->screenPcx16) {
-                const int stripX = uiTailX + listWidth;
+            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listsWidth && wnd->screenPcx16) {
+                const int stripX = uiTailX + listsWidth;
                 const int stripY = uiTailY + g_uiLayout.ListTop();
                 const int stripH = totalH - g_uiLayout.ListTop();
                 if (stripH > 0 && UiBltPcx16Region_(wnd->screenPcx16, stripX, stripY,
-                    uiTailListWidth - listWidth, stripH, stripX, stripY))
-                    wnd->H3Redraw(stripX, stripY, uiTailListWidth - listWidth, stripH);
+                    uiTailListWidth - listsWidth, stripH, stripX, stripY))
+                    wnd->H3Redraw(stripX, stripY, uiTailListWidth - listsWidth, stripH);
             }
         } // !g_uiFoldLayout：旧界面继续用 screenPcx16 恢复
-        // 两行悬浮框整块呈现，存档列表仅覆盖自身窄矩形。
+        // 悬浮框整块呈现（含标题行），两个列表各覆盖自身窄矩形。
         bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, g_uiLayout.ListTop(), x, y);
         if (rows > 0)
             bltOk = UiBltPcx16Region_(c, 0, g_uiLayout.ListTop(), listWidth,
                 rows * UiRowHeight_(), x, y + g_uiLayout.ListTop()) && bltOk;
+        if (autoRows > 0)
+            bltOk = UiBltPcx16Region_(c, kUiAutoListX, g_uiLayout.ListTop(), autoListWidth,
+                autoRows * UiRowHeight_(), x + kUiAutoListX, y + g_uiLayout.ListTop()) && bltOk;
         wnd->H3Redraw(x, y, kUiBarWidth, g_uiLayout.ListTop());
-        if (rows > 0) wnd->H3Redraw(x, y + UiBandHeight_() + UiBandHeight_(),
+        if (rows > 0) wnd->H3Redraw(x, y + g_uiLayout.ListTop(),
             listWidth, rows * UiRowHeight_());
+        if (autoRows > 0) wnd->H3Redraw(x + kUiAutoListX, y + g_uiLayout.ListTop(),
+            autoListWidth, autoRows * UiRowHeight_());
         redrawing = false;
         uiTailX = x;
         uiTailY = y;
         uiTailH = totalH;
         uiTailBlockH = g_uiLayout.ListTop();
-        uiTailListWidth = listWidth;
+        uiTailListWidth = listsWidth;
+        uiTailColumnRows[0] = rows;
+        uiTailColumnRows[1] = autoRows;
+        uiTailColumnWidths[0] = listWidth;
+        uiTailColumnWidths[1] = autoListWidth;
+        uiTailRowHeight = UiRowHeight_();
         static LogFailureWindow_ bltFailures;
         unsigned skipped = 0;
         const int bltReport = bltFailures.Observe(!bltOk, infoNow, 30000, &skipped);
@@ -897,7 +1025,7 @@ static bool UiPointInBar_(int px, int py)
 static bool UiPointInUiBlock_(int px, int py)
 {
     return px >= g_ui.x && px < g_ui.x + kUiBarWidth
-        && py >= UiOriginY_() && py < UiOriginY_() + UiBandHeight_() + UiBandHeight_();
+        && py >= UiOriginY_() && py < UiOriginY_() + g_uiLayout.ListTop();
 }
 
 static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
@@ -915,11 +1043,12 @@ static bool UiHitBar_(const H3Msg* msg, bool fullBlock = false)
     return hit(dlgX + msg->position.x, dlgY + msg->position.y);
 }
 
-static ptrdiff_t UiHitRow_(int px, int py)
+static ptrdiff_t UiHitRow_(int which, int px, int py)
 {
-    if (px < g_ui.x || px >= g_ui.x + kUiListWidth) return -1;
-    g_ui.scroll.Clamp(g_store.entries.size());
-    return g_ui.scroll.Hit(g_uiLayout, py - UiOriginY_(), g_store.entries.size());
+    const int lx = g_ui.x + UiListX_(which);
+    if (px < lx || px >= lx + kUiListWidth) return -1;
+    UiScrollOf_(which).Clamp(UiEntriesOf_(which).size());
+    return UiScrollOf_(which).Hit(g_uiLayout, py - UiOriginY_(), UiEntriesOf_(which).size());
 }
 
 static int UiHitLogLevelItem_(int px, int py)
@@ -1018,7 +1147,10 @@ static void UiRunRestoreFlow_(H3CombatManager* mgr, const StoreEntry& entry,
     struct BusyReset { ~BusyReset() { ClearBattleInputs_(); g_restoreBusy = false; } } busyReset;
     DiagBegin_("load", "outer-message", mgr);
     char stamp[32] = {};
-    StoreFormatStamp_(entry, stamp, sizeof(stamp));
+    if (entry.slot == hbs::ArchiveSlot::Auto)
+        StoreFormatAutoStamp_(entry, stamp, sizeof(stamp));
+    else
+        StoreFormatStamp_(entry, stamp, sizeof(stamp));
     char text[192] = {}, utf8[192] = {};
     _snprintf(utf8, sizeof(utf8), "读回 %s 这一档？当前未保存的进度会丢掉。", stamp);
     UiToGbk_(utf8, text, sizeof(text));
@@ -1081,8 +1213,11 @@ static void UiHandleMouse_(H3Msg* msg)
     const int px = cursor.x;
     const int py = cursor.y;
     if (msg->command == eMsgCommand::MOUSE_OVER) {
-        g_ui.hoverRow = px >= g_ui.x && px < g_ui.x + kUiListWidth
-            ? g_uiLayout.HitRow(py - UiOriginY_(), UiListRows_()) : -1;
+        for (int which = 0; which < 2; ++which) {
+            const int lx = g_ui.x + UiListX_(which);
+            UiHoverOf_(which) = px >= lx && px < lx + kUiListWidth
+                ? g_uiLayout.HitRow(py - UiOriginY_(), UiListRows_(which)) : -1;
+        }
         g_ui.logLevelHover = UiHitLogLevelItem_(px, py);
         return;
     }
@@ -1165,10 +1300,13 @@ static void UiHandleFrameClick_(int gameX, int gameY)
         }
         return;
     }
-    const ptrdiff_t row = UiHitRow_(gameX, gameY);
-    if (row >= 0 && static_cast<size_t>(row) < g_store.entries.size()) {
-        UiConfirmAndRestore_(g_store.entries[row]);
-        return;
+    if (g_ui.pendingListRevision != g_store.listRevision) return;
+    for (int which = 0; which < 2; ++which) {
+        const ptrdiff_t row = UiHitRow_(which, gameX, gameY);
+        if (row >= 0 && static_cast<size_t>(row) < UiEntriesOf_(which).size()) {
+            UiConfirmAndRestore_(UiEntriesOf_(which)[row]);
+            return;
+        }
     }
     if (g_ui.awaitingRebind) g_ui.awaitingRebind = false;
 }
@@ -1179,9 +1317,11 @@ static void UiHandleFrameClick_(int gameX, int gameY)
 static void UiResetForBattle_()
 {
     g_ui.scroll = {};
+    g_ui.autoScroll = {};
     g_ui.listGesture = {};
     g_ui.listRightHeld = false;
     g_ui.hoverRow = -1;
+    g_ui.autoHoverRow = -1;
     g_ui.logLevelHover = -1;
     UiCancelRebind_("battle reset");
     g_ui.rebindKey = 0;
@@ -1217,42 +1357,49 @@ static bool UiOnSystemMouse_(const UiMouseEvent_& e, bool combatOpen)
 {
     if (!combatOpen) {
         g_ui.scroll.dragging = false;
+        g_ui.autoScroll.dragging = false;
         g_ui.listGesture = {};
         g_ui.listRightHeld = false;
         return false;
     }
     const bool move = e.kind == 0, leftDown = e.kind == 1, leftUp = e.kind == 2,
         rightDown = e.kind == 3, rightUp = e.kind == 4, wheel = e.kind == 5;
-    const bool hitList = UiPointInList_(e.gameX, e.gameY);
-    const bool hitScroll = UiPointInScrollbar_(e.gameX, e.gameY);
+    const int which = UiListAt_(e.gameX, e.gameY);
+    const bool hitList = which >= 0;
+    const bool hitScroll = hitList && UiPointInScrollbar_(which, e.gameX, e.gameY);
     const bool swallow = hitList || UiPointInUiBlock_(e.gameX, e.gameY);
+    if (g_ui.gestureListRevision != g_store.listRevision) g_ui.listGesture.CancelClick();
     if (move || leftDown || rightDown || wheel) UiCancelReleasedPointer_();
-    if (g_ui.scroll.dragging && (move || leftUp)) {
-        UiScrollbarDrag_(e.gameY);
+    const int draggingList = g_ui.scroll.dragging ? 0 : (g_ui.autoScroll.dragging ? 1 : -1);
+    if (draggingList >= 0 && (move || leftUp)) {
+        UiScrollbarDrag_(draggingList, e.gameY);
         if (leftUp) {
-            g_ui.scroll.dragging = false;
+            UiScrollOf_(draggingList).dragging = false;
             g_ui.listGesture = {};
         }
         return true;
     }
     if (wheel) {
-        if (g_ui.scroll.dragging) return true;
+        if (draggingList >= 0) return true;
         if (!hitList) return false;
-        UiScrollWheel_((short)e.wheelDelta);
+        UiScrollWheel_(which, (short)e.wheelDelta);
         g_ui.listGesture.CancelClick();
         InterlockedExchange(&g_pendingClickX, -1);
         InterlockedExchange(&g_pendingClickY, -1);
-        LogDetail_("[List] wheel first=%u count=%u", (unsigned)g_ui.scroll.first, (unsigned)g_store.entries.size());
+        LogDetail_("[List] wheel slot=%d first=%u count=%u", which,
+            (unsigned)UiScrollOf_(which).first, (unsigned)UiEntriesOf_(which).size());
         return true;
     }
     if (move) return hitList;
     if (leftDown) {
         g_ui.listGesture = {};
         g_ui.scroll.dragging = false;
+        g_ui.autoScroll.dragging = false;
         if (!swallow) { UiCancelRebind_("outside mouse click"); return false; }
+        g_ui.gestureListRevision = g_store.listRevision;
         g_ui.listGesture.Begin(hitScroll);
         if (hitScroll) {
-            UiScrollbarDown_(e.gameY);
+            UiScrollbarDown_(which, e.gameY);
             InterlockedExchange(&g_pendingClickX, -1);
             InterlockedExchange(&g_pendingClickY, -1);
         }
@@ -1263,6 +1410,7 @@ static bool UiOnSystemMouse_(const UiMouseEvent_& e, bool combatOpen)
         if (release == BattleUiRelease_::Pass) return false;
         if (release == BattleUiRelease_::Swallow) return true;
         if (hitList && !StorePlayerWindow_(H3CombatManager::Get(), 0, nullptr)) return true;
+        g_ui.pendingListRevision = g_store.listRevision;
         InterlockedExchange(&g_pendingClickX, e.gameX);
         InterlockedExchange(&g_pendingClickY, e.gameY);
         LogDetail_("点击已吞并：game=(%d,%d)", e.gameX, e.gameY);
@@ -1294,8 +1442,8 @@ static bool UiOnGameMouse_(H3Msg* msg)
 {
     if (!msg || !BattleUiMayConsumeMessage_((int)msg->command)) return false;
     const bool onBar = UiHitBar_(msg, true);
-    const bool onList = UiPointInList_(msg->position.x, msg->position.y);
-    if (onBar || onList || g_ui.scroll.dragging) {
+    const bool onList = UiPointInAnyList_(msg->position.x, msg->position.y);
+    if (onBar || onList || g_ui.scroll.dragging || g_ui.autoScroll.dragging) {
         UiHandleMouse_(msg);
         return true;
     }
@@ -1368,6 +1516,7 @@ static void UiOnFaultCleanup_()
     InterlockedExchange(&g_pendingClickY, -1);
     InterlockedExchange(&g_pendingSaveKey, 0);
     g_ui.scroll.dragging = false;
+    g_ui.autoScroll.dragging = false;
     g_ui.listGesture = {};
     g_ui.listRightHeld = false;
 }
@@ -1404,7 +1553,7 @@ public:
     bool OnGameMouse(H3Msg* msg) override { return UiOnGameMouse_(msg); }
     void OnGameKeyAfter(H3CombatManager* mgr, const H3Msg* msg, int result, unsigned now, bool waitBlocked) override { UiOnGameKeyAfter_(mgr, msg, result, now, waitBlocked); }
     void OnFrameKeyPoll(H3CombatManager* mgr, unsigned now, bool waitBlocked) override { UiOnFrameKeyPoll_(mgr, now, waitBlocked); }
-    void OnListReloaded() override { g_ui.hoverRow = -1; }
+    void OnListReloaded() override { g_ui.hoverRow = g_ui.autoHoverRow = -1; }
     void OnFaultCleanup() override { UiOnFaultCleanup_(); }
     bool IsRebindWaiting() const override { return g_ui.awaitingRebind; }
     char RebindLatchKey() const override { return g_ui.rebindKey; }

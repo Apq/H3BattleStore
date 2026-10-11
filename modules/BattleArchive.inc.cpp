@@ -1,10 +1,10 @@
 // ========== BattleArchive.inc.cpp ==========
-// 战斗时刻档的可复用文件层：编码、原子新写入和扫描索引；所有档案存盘保留。
+// 战斗时刻档文件层：手动新写、自动同回合替换/保留30档、编码与扫描索引。
 // 本文件不读取或修改游戏战斗对象；快照内容只作为不透明 section 字节。
 //
 // 2026-10-11 用户裁定（docs/02 §2/§3）：双格式可切换（binary|json）+ 指纹目录
-// 布局。目录：<存档根>\<64hex 指纹>\手动\<回合>_<编号>.hbs|.json；自动\ 预留
-// （首存建齐，本轮只建不写）。旧平铺 .hbs 与一切旧后缀档留盘不删、不进当前
+// 布局。目录：<存档根>\<64hex 指纹>\手动\<回合>_<编号>.hbs|.json；
+// 自动\<回合>.hbs|.json（docs/02 §4）。旧平铺 .hbs 与旧后缀档留盘不删、不进当前
 // 配置的读档视野；两种后缀互不可见；列表按 (回合, 编号) 两段数值倒序，禁止
 // 整串字符串排序；JSON 帧版本从 1 起，不沿用二进制 codec 版本。
 //
@@ -54,6 +54,13 @@ enum class ArchiveFormat {
     Json,
 };
 
+// 存档槽位（2026-10-11 21:3x 用户裁定：手动 G 键存 手动\；每回合首个玩家
+// 等待自动存 自动\，见 docs/02 §4）。
+enum class ArchiveSlot {
+    Manual,
+    Auto,
+};
+
 inline const wchar_t* ArchiveExtension_(ArchiveFormat format)
 {
     return format == ArchiveFormat::Json ? L".json" : L".hbs";
@@ -83,18 +90,24 @@ struct ArchiveRecord {
     uint64_t timestampUtcMs;
     uint32_t sequence;
     int32_t turn = 0;
-    uint64_t number = 0; // 同回合内存档序号，从 1 起，自然位数无上限
+    uint64_t number = 0; // 同回合内存档序号，从 1 起，自然位数无上限（自动档恒 0）
+    ArchiveSlot slot = ArchiveSlot::Manual; // 手动\ / 自动\ 目录归属
 };
+
+// 自动存档保留数（2026-10-11 21:3x 用户裁定：只保留最近 30 个）。
+constexpr size_t kAutoArchiveKeep = 30;
 
 class ArchiveStore {
 public:
     ArchiveStore(std::wstring root, ArchiveFormat format);
 
-    bool Save(const ArchiveDocument& document, std::wstring& error, ArchiveRecord* committed = nullptr);
+    bool Save(const ArchiveDocument& document, std::wstring& error,
+              ArchiveRecord* committed = nullptr, ArchiveSlot slot = ArchiveSlot::Manual);
     bool List(const std::string& battleKey,
               const std::string& targetKey,
               std::vector<ArchiveRecord>& records,
-              std::wstring& error);
+              std::wstring& error,
+              ArchiveSlot slot = ArchiveSlot::Manual);
     bool Load(const ArchiveRecord& record, ArchiveDocument& document, std::wstring& error);
 
 private:
@@ -647,7 +660,7 @@ inline bool EnsureRoot(const std::wstring& root, std::wstring& rootFinal, std::w
 }
 
 // ===== 指纹目录布局（2026-10-11 用户裁定，docs/02 §3）=====
-// <存档根>\<64hex 指纹>\手动\<回合>_<编号>.hbs|.json；自动\ 预留只建不写。
+// <存档根>\<64hex 指纹>\手动\<回合>_<编号>；自动\<回合>（扩展名同配置）。
 // 首次存档创建指纹目录并建齐两个子目录；目录创建中断下次重建，无残留状态。
 
 inline std::wstring KeyToWide(const std::string& key)
@@ -683,6 +696,16 @@ inline std::wstring ManualDirOf(const std::wstring& battleDir)
     return JoinRoot(battleDir, L"手动");
 }
 
+inline std::wstring AutoDirOf(const std::wstring& battleDir)
+{
+    return JoinRoot(battleDir, L"自动");
+}
+
+inline std::wstring SlotDirOf(const std::wstring& battleDir, ArchiveSlot slot)
+{
+    return slot == ArchiveSlot::Auto ? AutoDirOf(battleDir) : ManualDirOf(battleDir);
+}
+
 // 建齐 指纹目录/手动/自动；已存在视为成功（幂等重建）。
 inline bool EnsureBattleTree(const std::wstring& root, const std::string& battleKey, std::wstring& error)
 {
@@ -697,9 +720,8 @@ inline bool EnsureBattleTree(const std::wstring& root, const std::string& battle
 
 // ===== 命名层：<回合>_<编号>.hbs|.json =====
 // 编号 = 同回合内存档序号，从 1 起、取同回合已有最大编号 +1 递增、自然位数
-// 不前补零、无上限；(回合, 编号) 唯一。回合可负（存档侧不校验 turn 值域，
-// 08:0x 裁定），负回合档照写照列。文件名仅作标识与人工辨认，身份与冗余
-// 校验以帧内 battleKey/timestampUtcMs/turn 为准。
+// 不前补零、无上限；(回合, 编号) 唯一。回合非负，文件名规范解析int32。
+// JSON帧内turn与文件名冗余校验；二进制档回合以文件名为准。
 
 inline std::wstring MakeNumberedName(int32_t turn, uint64_t number, ArchiveFormat format)
 {
@@ -773,6 +795,41 @@ inline uint64_t NextNumberInTurn(const std::wstring& manualDir, int32_t turn, Ar
     } while (FindNextFileW(search, &found));
     FindClose(search);
     return maxNumber == 0 ? 1 : maxNumber + 1;
+}
+
+// ===== 自动槽命名（docs/02 §4）：<回合>.hbs|.json；每回合最多一档 =====
+// 同回合再次自动存 = 覆盖旧档（新轨迹替换旧轨迹）；无编号段。
+
+inline std::wstring MakeTurnName(int32_t turn, ArchiveFormat format)
+{
+    wchar_t name[32] = {};
+    _snwprintf_s(name, _TRUNCATE, L"%d%s", turn, ArchiveExtension_(format));
+    return name;
+}
+
+// 严格单段解析：<int32 回合>.<指定后缀>；拒绝前导 '+'、超宽数字与多余段。
+// Save 侧已拒负回合，这里不接受 '-'（自动档名永不出现负号）。
+inline bool ParseTurnName(const std::wstring& name, ArchiveFormat format, int32_t* turn)
+{
+    if (turn) *turn = 0;
+    const wchar_t* ext = ArchiveExtension_(format);
+    const size_t extLen = wcslen(ext);
+    if (name.size() < 1 + extLen) return false;
+    if (_wcsicmp(name.c_str() + name.size() - extLen, ext) != 0) return false;
+    const wchar_t* p = name.c_str();
+    if (*p < L'0' || *p > L'9' || (*p == L'0' && p + 1 != name.c_str() + name.size() - extLen))
+        return false; // 自然位数；0 也可往返（与 Save 的非负门禁一致）
+    long long value = 0;
+    int digits = 0;
+    while (*p >= L'0' && *p <= L'9') {
+        if (++digits > 10) return false;
+        value = value * 10 + (*p - L'0');
+        if (value > 2147483647LL) return false;
+        ++p;
+    }
+    if (p != name.c_str() + name.size() - extLen) return false;
+    if (turn) *turn = static_cast<int32_t>(value);
+    return true;
 }
 
 inline bool ReadWholeFile(const std::wstring& path, std::vector<uint8_t>& bytes, std::wstring& error)
@@ -910,18 +967,20 @@ inline bool FormatNumberedArchiveStamp(uint64_t utcMs, uint64_t number, char* ou
         static_cast<unsigned long long>(number)) >= 0;
 }
 
-// ===== 扫描：按指纹目录枚举 手动\ 下当前后缀档 =====
+// ===== 扫描：按指纹目录枚举对应槽位子目录下当前后缀档 =====
 // battleKey 空 = 枚举存档根下全部 64hex 指纹目录；非空 = 只看该指纹目录。
-// 指纹目录/手动 子目录缺失（尚无存档或玩家删除）= 该指纹无档，不报错。
+// 手动槽解析 <回合>_<编号>；自动槽解析 <回合>（docs/02 §4）。
+// 指纹目录/槽位子目录缺失（尚无存档或玩家删除）= 该指纹无档，不报错。
 // 坏档（解析/校验失败、文件名与身份不符）跳过并写错误聚合，留盘不删。
 inline bool ScanOneBattleDir(const std::wstring& root, const std::string& battleKey,
-                             ArchiveFormat format, std::vector<Scanned>& records,
+                             ArchiveFormat format, ArchiveSlot slot,
+                             std::vector<Scanned>& records,
                              std::wstring& error)
 {
-    const std::wstring manualDir = ManualDirOf(BattleDirOf(root, battleKey));
+    const std::wstring manualDir = SlotDirOf(BattleDirOf(root, battleKey), slot);
     const DWORD dirAttrs = GetFileAttributesW(manualDir.c_str());
     if (dirAttrs == INVALID_FILE_ATTRIBUTES || (dirAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        return true; // 该指纹尚无手动目录：无档
+        return true; // 该指纹尚无此槽位目录：无档
     std::wstring manualFinal;
     {
         HANDLE dirHandle = INVALID_HANDLE_VALUE;
@@ -950,7 +1009,10 @@ inline bool ScanOneBattleDir(const std::wstring& root, const std::string& battle
         if (IsReservedName(name) || !HasArchiveExtension(name, format)) continue;
         int32_t turn = 0;
         uint64_t number = 0;
-        if (!ParseNumberedName(name, format, &turn, &number)) {
+        const bool nameOk = slot == ArchiveSlot::Auto
+            ? ParseTurnName(name, format, &turn)
+            : ParseNumberedName(name, format, &turn, &number);
+        if (!nameOk) {
             AppendError(error, name + L": filename does not match archive identity");
             continue;
         }
@@ -1003,6 +1065,7 @@ inline bool ScanOneBattleDir(const std::wstring& root, const std::string& battle
         item.record.sequence = document.sequence;
         item.record.turn = turn;
         item.record.number = number;
+        item.record.slot = slot;
         item.name = name;
         records.push_back(std::move(item));
     } while (FindNextFileW(search, &found));
@@ -1016,7 +1079,7 @@ inline bool ScanOneBattleDir(const std::wstring& root, const std::string& battle
 }
 
 inline bool Scan(const std::wstring& root, ArchiveFormat format,
-                 const std::string& battleKeyFilter,
+                 const std::string& battleKeyFilter, ArchiveSlot slot,
                  std::vector<Scanned>& records, std::wstring& error)
 {
     records.clear();
@@ -1025,7 +1088,7 @@ inline bool Scan(const std::wstring& root, ArchiveFormat format,
     if (!EnsureRoot(root, rootFinal, error)) return false;
 
     if (!battleKeyFilter.empty())
-        return ScanOneBattleDir(root, battleKeyFilter, format, records, error);
+        return ScanOneBattleDir(root, battleKeyFilter, format, slot, records, error);
 
     // 枚举存档根下的全部 64hex 指纹目录（旧平铺档在根目录，天然不进视野）。
     const std::wstring pattern = JoinRoot(root, L"*");
@@ -1050,7 +1113,7 @@ inline bool Scan(const std::wstring& root, ArchiveFormat format,
         return false;
     }
     for (size_t i = 0; i < battles.size(); ++i) {
-        if (!ScanOneBattleDir(root, battles[i], format, records, error)) return false;
+        if (!ScanOneBattleDir(root, battles[i], format, slot, records, error)) return false;
     }
     // 排序统一在 ArchiveStore::List 出口做（NewerRecord），此处不预排。
     return true;
@@ -1063,6 +1126,36 @@ inline bool KeysMatch(const Scanned& item, const std::string& battleKey, const s
     return true;
 }
 
+// 自动槽保留清理（docs/02 §4）：按帧内 UTC 毫秒倒序（次要键回合倒序）保留
+// 前 keep 个，DeleteFileW 其余。按保存时刻淘汰——读档回退后旧轨迹的高回合
+// 档（保存时刻更旧）会被新轨迹挤出，新轨迹始终有档。坏档（列不出来）留盘
+// 不删。删除失败计入 error 但不中断（调用方只记日志）。
+inline void PruneAutoSlot(const std::wstring& root, const std::string& battleKey,
+                          ArchiveFormat format, size_t keep,
+                          const std::wstring& justCommitted, std::wstring& error)
+{
+    std::vector<Scanned> records;
+    std::wstring scanError;
+    if (!ScanOneBattleDir(root, battleKey, format, ArchiveSlot::Auto, records, scanError)) {
+        AppendError(error, scanError);
+        return;
+    }
+    if (!scanError.empty()) AppendError(error, scanError);
+    if (records.size() <= keep) return;
+    // 系统校时回退或 JSON 中写未来时间也不能立刻淘汰刚提交档，保证回读。
+    std::sort(records.begin(), records.end(), [&justCommitted](const Scanned& a, const Scanned& b) {
+        if ((a.record.path == justCommitted) != (b.record.path == justCommitted))
+            return a.record.path == justCommitted;
+        if (a.record.timestampUtcMs != b.record.timestampUtcMs)
+            return a.record.timestampUtcMs > b.record.timestampUtcMs;
+        return a.record.turn > b.record.turn;
+    });
+    for (size_t i = keep; i < records.size(); ++i) {
+        if (!DeleteFileW(records[i].record.path.c_str()))
+            AppendError(error, FileNameOf(records[i].record.path) + L": prune delete failed");
+    }
+}
+
 } // namespace detail
 
 inline ArchiveStore::ArchiveStore(std::wstring root, ArchiveFormat format)
@@ -1071,7 +1164,8 @@ inline ArchiveStore::ArchiveStore(std::wstring root, ArchiveFormat format)
 {
 }
 
-inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& error, ArchiveRecord* committed)
+inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& error,
+                               ArchiveRecord* committed, ArchiveSlot slot)
 {
     error.clear();
     if (committed) *committed = ArchiveRecord();
@@ -1095,23 +1189,36 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
 
     std::wstring rootFinal;
     if (!detail::EnsureRoot(root_, rootFinal, error)) return false;
-    // 首次存档创建指纹目录并建齐 手动/自动 两个子目录（自动预留只建不写）。
+    // 首次存档创建指纹目录并建齐 手动/自动 两个子目录。
     if (!detail::EnsureBattleTree(root_, document.battleKey, error)) return false;
-    const std::wstring manualDir = detail::ManualDirOf(detail::BattleDirOf(root_, document.battleKey));
+    const std::wstring battleDir = detail::BattleDirOf(root_, document.battleKey);
+    const std::wstring slotDir = detail::SlotDirOf(battleDir, slot);
 
-    // 编号 = 同回合已有最大编号 + 1（无上限自然位数）；(回合, 编号) 唯一。
-    const uint64_t number = detail::NextNumberInTurn(manualDir, document.turn, format_);
-    const std::wstring name = detail::MakeNumberedName(document.turn, number, format_);
+    std::wstring name;
+    uint64_t number = 0;
+    bool replaceExisting = false;
+    if (slot == ArchiveSlot::Auto) {
+        // 自动槽（docs/02 §4）：<回合> 命名，每回合最多一档；同回合再存=原子
+        // 覆盖（新轨迹替换旧轨迹），不做编号分配。
+        name = detail::MakeTurnName(document.turn, format_);
+        replaceExisting = true;
+    } else {
+        // 手动槽：编号 = 同回合已有最大编号 + 1（无上限自然位数）。
+        number = detail::NextNumberInTurn(slotDir, document.turn, format_);
+        name = detail::MakeNumberedName(document.turn, number, format_);
+    }
 
-    const std::wstring finalPath = detail::JoinRoot(manualDir, name);
+    const std::wstring finalPath = detail::JoinRoot(slotDir, name);
     const std::wstring tempPath = finalPath + L".tmp";
-    if (GetFileAttributesW(finalPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (!replaceExisting && GetFileAttributesW(finalPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
         detail::SetError(error, L"archive filename collision");
         return false;
     }
     if (!detail::WriteNewFile(tempPath, encoded, error)) return false;
 
-    if (!MoveFileExW(tempPath.c_str(), finalPath.c_str(), MOVEFILE_WRITE_THROUGH)) {
+    const DWORD moveFlags = MOVEFILE_WRITE_THROUGH
+        | (replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0);
+    if (!MoveFileExW(tempPath.c_str(), finalPath.c_str(), moveFlags)) {
         const DWORD moveError = GetLastError();
         DeleteFileW(tempPath.c_str());
         detail::SetError(error, moveError == ERROR_ALREADY_EXISTS
@@ -1128,6 +1235,11 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
         committed->sequence = document.sequence;
         committed->turn = document.turn;
         committed->number = number;
+        committed->slot = slot;
+    }
+    if (slot == ArchiveSlot::Auto) {
+        // 最近 30 个循环清理；失败只进 error 供调用方记日志，不影响已提交档。
+        detail::PruneAutoSlot(root_, document.battleKey, format_, kAutoArchiveKeep, finalPath, error);
     }
 
     return true;
@@ -1136,7 +1248,8 @@ inline bool ArchiveStore::Save(const ArchiveDocument& document, std::wstring& er
 inline bool ArchiveStore::List(const std::string& battleKey,
                                const std::string& targetKey,
                                std::vector<ArchiveRecord>& records,
-                               std::wstring& error)
+                               std::wstring& error,
+                               ArchiveSlot slot)
 {
     records.clear();
     if (!battleKey.empty() && !detail::IsKey(battleKey)) {
@@ -1148,7 +1261,7 @@ inline bool ArchiveStore::List(const std::string& battleKey,
         return false;
     }
     std::vector<detail::Scanned> scanned;
-    if (!detail::Scan(root_, format_, battleKey, scanned, error)) return false;
+    if (!detail::Scan(root_, format_, battleKey, slot, scanned, error)) return false;
     for (size_t i = 0; i < scanned.size(); ++i) {
         if (detail::KeysMatch(scanned[i], battleKey, targetKey))
             records.push_back(scanned[i].record);
@@ -1168,16 +1281,21 @@ inline bool ArchiveStore::Load(const ArchiveRecord& record, ArchiveDocument& doc
     }
     std::wstring rootFinal;
     if (!detail::EnsureRoot(root_, rootFinal, error)) return false;
-    const std::wstring manualDir = detail::ManualDirOf(detail::BattleDirOf(root_, record.battleKey));
+    // 路径校验按记录槽位：自动档在 自动\，手动档在 手动\（docs/02 §4）。
+    const std::wstring slotDir = detail::SlotDirOf(
+        detail::BattleDirOf(root_, record.battleKey), record.slot);
     const std::wstring name = detail::FileNameOf(record.path);
     if (detail::IsReservedName(name) || !detail::HasArchiveExtension(name, format_)
-        || record.path != detail::JoinRoot(manualDir, name)) {
+        || record.path != detail::JoinRoot(slotDir, name)) {
         detail::SetError(error, L"refusing archive path outside the store root");
         return false;
     }
     int32_t turn = 0;
     uint64_t number = 0;
-    if (!detail::ParseNumberedName(name, format_, &turn, &number)) {
+    const bool nameOk = record.slot == ArchiveSlot::Auto
+        ? detail::ParseTurnName(name, format_, &turn)
+        : detail::ParseNumberedName(name, format_, &turn, &number);
+    if (!nameOk) {
         detail::SetError(error, L"filename does not match archive identity");
         return false;
     }
@@ -1185,7 +1303,7 @@ inline bool ArchiveStore::Load(const ArchiveRecord& record, ArchiveDocument& doc
     {
         HANDLE dirHandle = INVALID_HANDLE_VALUE;
         std::wstring dirError;
-        if (!detail::OpenFinalPath(manualDir, FILE_READ_ATTRIBUTES,
+        if (!detail::OpenFinalPath(slotDir, FILE_READ_ATTRIBUTES,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                    OPEN_EXISTING, manualFinal, dirHandle, error)) {
             return false;

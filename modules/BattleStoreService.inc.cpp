@@ -3,13 +3,16 @@
 // 热键策略、玩家文案目录与保存窗口门禁。仅游戏主线程调用；不绘制、不吞输入。
 // 本步为符号原样搬移（BattleUi/Entry → 此处），行为零变化。
 
+#include "BattleAutoSavePolicy.hpp"
+
 // 列表条目：时间戳、同回合编号与按需读取的档案路径。
 struct StoreEntry
 {
     uint64_t timestampUtcMs;
     uint32_t sequence;
     int32_t turn = 0;
-    uint64_t number = 0; // 同回合编号（List 条目 ≥1；"已存档"戳占位 0=仅时间）
+    uint64_t number = 0; // 同回合编号（手动 List 条目 ≥1；"已存档"戳占位 0=仅时间；自动档恒 0）
+    hbs::ArchiveSlot slot = hbs::ArchiveSlot::Manual; // 列表归属与读档路由
     std::wstring path;
 };
 
@@ -22,6 +25,12 @@ static struct
     bool saveJson = false;
     std::string battleKey;
     std::vector<StoreEntry> entries;
+    // 自动存档（docs/02 §4）：每回合首个玩家等待自动存 自动\；独立列表。
+    std::vector<StoreEntry> autoEntries;
+    unsigned listRevision = 0; // 数据刷新后，旧鼠标手势/挂起点击不得重映射
+    BattleAutoSavePolicy_ autoSave;
+    bool autoSaving = false; // 捕获期间的帧重入不能再次自动存
+    bool saving = false; // 手动/自动捕获期间共享忙态（H3Auto查询）
 } g_store;
 
 // 读档请求：从确认到恢复执行的单飞行状态（执行调度第4步迁入）。
@@ -130,6 +139,21 @@ static void StoreFormatStamp_(const StoreEntry& entry, char* out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }
 
+// 自动档行（docs/02 §4）：回合是身份，时间到分钟（列表宽 168 放不下秒）。
+// 形如 "T25 20261011-2119"。
+static void StoreFormatAutoStamp_(const StoreEntry& entry, char* out, size_t cap)
+{
+    char stamp[32] = {};
+    if (!out || cap == 0) return;
+    if (!hbs::detail::FormatLocalArchiveStamp(entry.timestampUtcMs, stamp, sizeof(stamp), nullptr)
+        || strlen(stamp) < 15) {
+        _snprintf_s(out, cap, _TRUNCATE, "T%d", entry.turn);
+        return;
+    }
+    stamp[13] = 0; // yyyymmdd-hhmmss → yyyymmdd-hhmm（截掉秒）
+    _snprintf_s(out, cap, _TRUNCATE, "T%d %s", entry.turn, stamp);
+}
+
 static LogRepeatGate_ g_storeListFailure;
 static void StoreListFailure_(const char* phase, const std::string& error)
 {
@@ -138,11 +162,14 @@ static void StoreListFailure_(const char* phase, const std::string& error)
         LogWarn("[List op=%ld] phase=%s failed reason=%s suppressed=%u", g_diag.id, phase, error.c_str(), skipped);
 }
 
-// 列表数据扫描：按场次指纹取档、填 entries；成功补记失败限频恢复。
+// 列表数据扫描：按场次指纹取档、填 entries 与 autoEntries（docs/02 §4 双
+// 列表）；成功补记失败限频恢复。
 // （输入管道清理由界面包装 UiReloadEntries_ 负责，服务不触碰输入状态。）
 static bool StoreReloadList_(const H3CombatManager* mgr)
 {
+    ++g_store.listRevision;
     g_store.entries.clear();
+    g_store.autoEntries.clear();
     std::string battleKey;
     std::string error;
     if (!BattleFingerprint_(mgr, &battleKey, &error)) { StoreListFailure_("fingerprint", error); return false; }
@@ -150,14 +177,11 @@ static bool StoreReloadList_(const H3CombatManager* mgr)
     hbs::ArchiveStore store(ArchiveRoot_(), StoreArchiveFormat_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
-    if (!store.List(battleKey, "", records, storeError)) { StoreListFailure_("scan", DiagUtf8_(storeError)); return false; }
-    if (!storeError.empty()) LogWarn("[List op=%ld] scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
-    LogDebug("[List op=%ld] battle=%s format=%s records=%u", g_diag.id, battleKey.c_str(),
-        g_store.saveJson ? "json" : "binary", (unsigned)records.size());
-    if (g_storeListFailure.seen) {
-        LogInfo("[List] recovered suppressed=%u", g_storeListFailure.suppressed);
-        g_storeListFailure = {};
+    if (!store.List(battleKey, "", records, storeError, hbs::ArchiveSlot::Manual)) {
+        StoreListFailure_("scan", DiagUtf8_(storeError)); return false;
     }
+    if (!storeError.empty()) LogWarn("[List op=%ld] manual scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
+    // List 每次清空并重填 records，先搬运手动槽再扫自动槽。
     g_store.entries.reserve(records.size());
     for (size_t i = 0; i < records.size(); ++i) {
         StoreEntry entry;
@@ -165,8 +189,31 @@ static bool StoreReloadList_(const H3CombatManager* mgr)
         entry.sequence = records[i].sequence;
         entry.turn = records[i].turn;
         entry.number = records[i].number;
+        entry.slot = records[i].slot;
         entry.path = records[i].path;
         g_store.entries.push_back(entry);
+    }
+    if (!store.List(battleKey, "", records, storeError, hbs::ArchiveSlot::Auto)) {
+        StoreListFailure_("scan-auto", DiagUtf8_(storeError)); return false;
+    }
+    g_store.autoEntries.reserve(records.size());
+    for (size_t i = 0; i < records.size(); ++i) {
+        StoreEntry entry;
+        entry.timestampUtcMs = records[i].timestampUtcMs;
+        entry.sequence = records[i].sequence;
+        entry.turn = records[i].turn;
+        entry.number = records[i].number;
+        entry.slot = records[i].slot;
+        entry.path = records[i].path;
+        g_store.autoEntries.push_back(entry);
+    }
+    if (!storeError.empty()) LogWarn("[List op=%ld] scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
+    LogDebug("[List op=%ld] battle=%s format=%s manual=%u auto=%u", g_diag.id, battleKey.c_str(),
+        g_store.saveJson ? "json" : "binary",
+        (unsigned)g_store.entries.size(), (unsigned)g_store.autoEntries.size());
+    if (g_storeListFailure.seen) {
+        LogInfo("[List] recovered suppressed=%u", g_storeListFailure.suppressed);
+        g_storeListFailure = {};
     }
     return true;
 }
@@ -425,6 +472,48 @@ static bool StoreRequestSave_(H3CombatManager* mgr, int messageResult, const cha
     return TryCaptureCombat_();
 }
 
+// 每回合首个玩家等待只尝试一次。先记 Attempted 再捕获，失败和SEH异常
+// 都不重试（2026-10-11 22:3x 用户裁定）；读档成功/换场重新武装。
+static void StoreAutoSaveTick_(H3CombatManager* mgr)
+{
+    if (g_store.autoSaving || g_store.saving || !g_battleInitialized
+        || GetCurrentThreadId() != g_battleThread || mgr != H3CombatManager::Get()
+        || !CombatIsReadable_(mgr) || mgr->finished) return;
+    const int turn = mgr->turn;
+    if (!g_store.autoSave.Due(StorePlayerWindow_(mgr, 0, nullptr), turn)) return;
+    g_store.autoSave.Attempted(turn);
+    struct AutoSavingReset { ~AutoSavingReset() { g_store.autoSaving = false; } } reset;
+    g_store.autoSaving = true;
+    if (!TryCaptureCombat_(hbs::ArchiveSlot::Auto, "auto")) {
+        LogWarn("[AutoSave] turn=%d failed; no retry this turn", turn);
+        return;
+    }
+    LogInfo("[AutoSave] turn=%d persisted", turn);
+}
+
+// patcher注册表协作ABI：两插件按加载顺序无关的名字查找，32位stdcall。
+// Busy查询在确认/恢复排队期间同样为真；H3Auto不得推进施法或提交部队命令。
+static BOOL __stdcall StoreAutomationBusy_()
+{
+    return g_store.saving || g_store.autoSaving || g_restoreBusy
+        || g_restoreRequest.pending || g_restoreFatal;
+}
+static Variable* g_storeRestoreEpoch = nullptr;
+static BOOL StoreBeforeAutoActionBody_(void* manager)
+{
+    H3CombatManager* mgr = static_cast<H3CombatManager*>(manager);
+    if (StoreAutomationBusy_()) return FALSE;
+    // 仅本回合首档尚未尝试时等待玩家窗口；已尝试（包括失败）立即放行。
+    // 非手动战斗/战术/尚未初始化不是首档等待，保持H3Auto原行为。
+    if (GetCurrentThreadId() != g_battleThread) return FALSE;
+    if (!g_battleInitialized || !CombatIsReadable_(mgr) || mgr != H3CombatManager::Get()
+        || mgr->finished || mgr->autoCombat || mgr->tacticsPhase
+        || !g_store.autoSave.Due(true, mgr->turn)) return TRUE;
+    if (!StorePlayerWindow_(mgr, 0, nullptr)) return FALSE;
+    StoreAutoSaveTick_(mgr);
+    return !StoreAutomationBusy_();
+}
+
 // ========== 恢复调度（原 BattleUi 第4步迁入）：排队/维护/消费/执行链 ==========
 // 模态交互（确认框、失败弹窗、结果通知）留在界面；决策与写入在此。
 // 仅游戏主线程调用；执行链在消息钩子的 SEH 保护体内运行。
@@ -527,7 +616,8 @@ static StoreRestoreResult_ StoreExecuteRestore_(H3CombatManager* mgr, const Stor
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
     SetLastError(ERROR_SUCCESS);
-    if (!store.List(key, "", records, storeError)) {
+    // 扫描槽位跟随所选条目（docs/02 §4：自动列表点击读 自动\ 下的档）。
+    if (!store.List(key, "", records, storeError, entry.slot)) {
         const DWORD code = GetLastError();
         *rawReason = StoreArchiveReason_(storeError, code);
         return StoreRestoreFail_("failed", rawReason);
@@ -604,5 +694,10 @@ static StoreRestoreResult_ StoreExecuteRestore_(H3CombatManager* mgr, const Stor
     }
     DiagEnd_("serialized-equal", "快照已恢复并通过白名单数据校验；实机轨迹验收仍待验证");
     *turn = capture.turn;
+    // 读档成功后强制清自动存标记（docs/02 §4）：恢复后的首个玩家等待必再
+    // 自动存——新轨迹的同回合自动档覆盖旧轨迹。
+    g_store.autoSave.Reset();
+    if (g_storeRestoreEpoch)
+        g_storeRestoreEpoch->SetValue(g_storeRestoreEpoch->GetValue() + 1);
     return StoreRestoreResult_::Success;
 }

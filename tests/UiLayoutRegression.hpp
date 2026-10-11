@@ -1,30 +1,35 @@
 #pragma once
 #include "../modules/UiLayout.hpp"
 #include "../modules/BattleInputPolicy.hpp"
+#include "../modules/BattleAutoSavePolicy.hpp"
 
 namespace hbs_ui_test {
 constexpr auto normal = hbs_ui::ForFont(16);
 constexpr auto tall = hbs_ui::ForFont(30);
 static_assert(normal.bandHeight == 24 && normal.rowHeight == 18);
-static_assert(normal.ListTop() == 48 && normal.Height(10) == 228);
+static_assert(normal.TitleTop() == 48 && normal.ListTop() == 66 && normal.Height(10) == 246);
 static_assert(tall.bandHeight == 30 && tall.rowHeight == 30);
-static_assert(tall.ListTop() == 60 && tall.Height(10) == 360);
+static_assert(tall.TitleTop() == 60 && tall.ListTop() == 90 && tall.Height(10) == 390);
+static_assert(hbs_ui::AutoListX == 184 && hbs_ui::ListsWidth == 366);
+static_assert(normal.HitRow(normal.TitleTop(), 20) == -1);
+static_assert(normal.HitRow(normal.ListTop() - 1, 20) == -1);
 static_assert(normal.OriginY(8) == 8 && tall.OriginY(8) == 5);
 static_assert(tall.OriginY(8) + tall.bandHeight / 2 == 8 + 24 / 2);
 static_assert(hbs_ui::ForFont(64).OriginY(8) == 0);
 static_assert(hbs_ui::ForFont(22).bandHeight == 24 && hbs_ui::ForFont(22).rowHeight == 22);
 static_assert(hbs_ui::ForFont(0).rowHeight == 18);
 static_assert(hbs_ui::kUiListVisibleRows == 20);
-static_assert(normal.Height(hbs_ui::kUiListVisibleRows) == 408);
+static_assert(normal.Height(hbs_ui::kUiListVisibleRows) == 426);
 constexpr bool ScrollListRegression() {
     hbs_ui::ScrollList list;
     if (list.Rows(0) != 0 || list.Rows(19) != 19 || list.Rows(21) != 20) return false;
-    if (list.Hit(normal, 48, 0) != -1) return false;
+    if (list.Hit(normal, normal.ListTop(), 0) != -1) return false;
     list.Move(3, 100);
-    if (list.first != 3 || list.Hit(normal, 48, 100) != 3
-        || list.Hit(normal, 407, 100) != 22 || list.Hit(normal, 408, 100) != -1) return false;
+    if (list.first != 3 || list.Hit(normal, normal.ListTop(), 100) != 3
+        || list.Hit(normal, normal.Height(20) - 1, 100) != 22
+        || list.Hit(normal, normal.Height(20), 100) != -1) return false;
     list.Move(200, 100);
-    if (list.first != 80 || list.Hit(normal, 407, 100) != 99) return false;
+    if (list.first != 80 || list.Hit(normal, normal.Height(20) - 1, 100) != 99) return false;
     list.Move(-200, 100);
     if (list.first != 0) return false;
     list.Wheel(-60, 100);
@@ -38,7 +43,7 @@ constexpr bool ScrollListRegression() {
     list.Clamp(20);
     if (list.first != 0 || list.dragging) return false;
     list.Move(20, 21);
-    if (list.first != 1 || list.Hit(normal, 407, 21) != 20) return false;
+    if (list.first != 1 || list.Hit(normal, normal.Height(20) - 1, 21) != 20) return false;
     const auto start = hbs_ui::ForList(normal, 100, 0);
     const auto end = hbs_ui::ForList(normal, 100, 80);
     if (start.thumbTop != start.trackTop || end.thumbTop + end.thumbHeight
@@ -97,10 +102,35 @@ constexpr bool ScrollbarDragRegression() {
     return true;
 }
 static_assert(ScrollbarDragRegression());
-static_assert(tall.HitRow(59, 10) == -1 && tall.HitRow(60, 10) == 0);
-static_assert(tall.HitRow(89, 10) == 0 && tall.HitRow(90, 10) == 1);
-static_assert(tall.HitRow(359, 10) == 9 && tall.HitRow(360, 10) == -1);
-static_assert(tall.HitRow(60, 0) == -1 && tall.Height(0) == 60);
+static_assert(tall.HitRow(89, 10) == -1 && tall.HitRow(90, 10) == 0);
+static_assert(tall.HitRow(119, 10) == 0 && tall.HitRow(120, 10) == 1);
+static_assert(tall.HitRow(389, 10) == 9 && tall.HitRow(390, 10) == -1);
+static_assert(tall.HitRow(90, 0) == -1 && tall.Height(0) == 90);
+constexpr bool IndependentLists() {
+    hbs_ui::ScrollList manual, automatic;
+    manual.Move(4, 100);
+    automatic.Wheel(-120, 30);
+    if (manual.first != 4 || automatic.first != 3) return false;
+    automatic.Move(100, 30);
+    return automatic.first == 10 && manual.first == 4
+        && automatic.Hit(normal, normal.Height(20) - 1, 30) == 29;
+}
+static_assert(IndependentLists());
+constexpr bool AutoSaveTurns() {
+    BattleAutoSavePolicy_ autoSave;
+    if (autoSave.Due(false, 1) || !autoSave.Due(true, 1)) return false;
+    // 保存前记尝试：即使保存失败也禁止同回合重试。
+    autoSave.Attempted(1);
+    if (autoSave.Due(true, 1)) return false;
+    if (autoSave.Due(true, 1) || autoSave.Due(false, 2) || !autoSave.Due(true, 2)) return false;
+    autoSave.Attempted(7134);
+    if (autoSave.Due(true, 7134)) return false;
+    autoSave.Reset(); // 换场/读档：即使同回合也重新存。
+    if (!autoSave.Due(true, 7134)) return false;
+    autoSave.Attempted(25);
+    return !autoSave.Due(true, 25) && autoSave.Due(true, 26);
+}
+static_assert(AutoSaveTurns());
 constexpr bool TextureValid(int height) {
     int previous = -1;
     for (int y = 0; y < height * 2; ++y) {

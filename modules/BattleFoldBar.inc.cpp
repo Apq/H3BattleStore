@@ -208,7 +208,7 @@ public:
             g_foldPanelX = g_ui.x;
             g_foldPanelY = UiOriginY_();
             g_foldPanelW = kUiBarWidth;
-            g_foldPanelH = g_uiLayout.Height(UiListRows_());
+            g_foldPanelH = g_uiLayout.Height(UiPanelRows_());
             // 灯在面板之外原位重画：面板右缘与灯左缘之间留间隙，
             // 展开不压灯、收起不跳位（用户 03:1x 纠正）。
             g_foldDrawing = true;
@@ -226,7 +226,7 @@ public:
         // 换场时快照由 UiResetForBattle_ 释放，不跨战斗保留。
         if (UiUnderBufValid_()) {
             const int tailX = g_ui.x, tailY = UiOriginY_();
-            const int tailH = g_uiLayout.Height(UiListRows_());
+            const int tailH = g_uiLayout.Height(UiPanelRows_());
             g_foldDrawing = true;
             const bool ok = UiUnderRestore_();
             g_foldDrawing = false;
@@ -309,7 +309,7 @@ public:
     {
         UiOnFrameKeyPoll_(mgr, now, waitBlocked);
     }
-    void OnListReloaded() override { g_ui.hoverRow = -1; }
+    void OnListReloaded() override { g_ui.hoverRow = g_ui.autoHoverRow = -1; }
     void OnFaultCleanup() override { UiOnFaultCleanup_(); }
     bool IsRebindWaiting() const override { return g_ui.awaitingRebind; }
     char RebindLatchKey() const override { return g_ui.rebindKey; }

@@ -732,6 +732,94 @@ static void TestJsonFrameText()
     RemoveTree(root);
 }
 
+// ===== 自动槽：单回合命名、覆盖、保留最近30、互不可见 =====
+static void TestAutoSlotFor(ArchiveFormat format)
+{
+    printf("auto slot [%s]\n", TagOf(format));
+    const std::wstring root = TempRoot();
+    const std::string battle = Key('a', 'b'), target = Key('c', 'd');
+    ArchiveStore store(root, format);
+    std::wstring error;
+    ArchiveRecord manual, first, replaced;
+    const auto make = [&](int turn, uint64_t stamp, uint8_t byte) {
+        return Doc(battle, target, stamp, 0, 1, byte, turn, format);
+    };
+    Expect(store.Save(make(25, 1, 1), error, &manual), "manual fixture saved");
+    Expect(store.Save(make(25, 2, 2), error, &first, hbs::ArchiveSlot::Auto), "first auto saved");
+    const std::wstring autoDir = root + KeyWide(battle) + L"\\自动\\";
+    Expect(first.path == autoDir + L"25" + ExOf(format)
+        && first.number == 0 && first.slot == hbs::ArchiveSlot::Auto, "auto filename contains only turn");
+    Expect(store.Save(make(25, 3, 3), error, &replaced, hbs::ArchiveSlot::Auto)
+        && replaced.path == first.path && CountFiles(autoDir, ExOf(format).c_str()) == 1,
+        "same turn atomically replaces one auto archive");
+    ArchiveDocument loaded;
+    Expect(store.Load(replaced, loaded, error) && loaded.timestampUtcMs == 3
+        && (format == ArchiveFormat::Json ? loaded.json["sections"]["battle"]["action"] == 3
+                                        : loaded.sections[0].bytes[0] == 3), "auto replacement payload roundtrips");
+    ArchiveRecord wrongSlot = replaced;
+    wrongSlot.slot = hbs::ArchiveSlot::Manual;
+    Expect(!store.Load(wrongSlot, loaded, error), "auto path refused with manual slot");
+    std::vector<ArchiveRecord> records;
+    Expect(store.List(battle, "", records, error) && records.size() == 1
+        && records[0].path == manual.path, "manual list excludes automatic archives");
+    Expect(store.List("", "", records, error, hbs::ArchiveSlot::Auto)
+        && records.size() == 1 && records[0].path == replaced.path,
+        "global auto list excludes manual archives");
+    // 坏档和另一格式留盘；清理只作用当前格式下可校验的自动档。
+    Expect(Touch(autoDir + L"999" + ExOf(format)), "corrupt auto fixture created");
+    ArchiveStore other(root, Flip(format));
+    ArchiveRecord otherRecord;
+    Expect(other.Save(Doc(battle, target, 1, 0, 1, 1, 8, Flip(format)), error,
+        &otherRecord, hbs::ArchiveSlot::Auto), "other format automatic fixture saved");
+    bool savedAll = true;
+    for (int turn = 100; turn < 132; ++turn) {
+        ArchiveRecord committed;
+        savedAll = store.Save(make(turn, 1000 + turn, 4), error,
+            &committed, hbs::ArchiveSlot::Auto) && savedAll;
+    }
+    Expect(savedAll, "32 turns saved with rolling cleanup");
+    Expect(store.List(battle, "", records, error, hbs::ArchiveSlot::Auto)
+        && records.size() == 30 && records.front().turn == 131 && records.back().turn == 102,
+        "only newest 30 valid automatic archives retained");
+    ArchiveRecord rollback;
+    Expect(store.Save(make(25, 5000, 5), error, &rollback, hbs::ArchiveSlot::Auto), "rollback low turn saved");
+    Expect(store.List(battle, "", records, error, hbs::ArchiveSlot::Auto)
+        && records.size() == 30 && records.back().turn == 25
+        && GetFileAttributesW((autoDir + L"102" + ExOf(format)).c_str()) == INVALID_FILE_ATTRIBUTES,
+        "retention uses save time and keeps newly replayed low turn");
+    Expect(GetFileAttributesW(manual.path.c_str()) != INVALID_FILE_ATTRIBUTES
+        && GetFileAttributesW(otherRecord.path.c_str()) != INVALID_FILE_ATTRIBUTES
+        && GetFileAttributesW((autoDir + L"999" + ExOf(format)).c_str()) != INVALID_FILE_ATTRIBUTES,
+        "cleanup preserves manual, other format and corrupt files");
+    // 未完成临时文件不可覆盖，也不可删掉旧的已提交档。
+    Expect(Touch(rollback.path + L".tmp"), "automatic temporary fixture created");
+    Expect(!store.Save(make(25, 6000, 6), error, nullptr, hbs::ArchiveSlot::Auto)
+        && store.Load(rollback, loaded, error) && loaded.timestampUtcMs == 5000
+        && GetFileAttributesW((rollback.path + L".tmp").c_str()) != INVALID_FILE_ATTRIBUTES,
+        "failed automatic write preserves prior archive and existing temp");
+    int32_t parsed = 0;
+    Expect(hbs::detail::ParseTurnName(L"0" + ExOf(format), format, &parsed) && parsed == 0
+        && !hbs::detail::ParseTurnName(L"01" + ExOf(format), format, &parsed)
+        && !hbs::detail::ParseTurnName(L"1_1" + ExOf(format), format, &parsed)
+        && !hbs::detail::ParseTurnName(L"2147483648" + ExOf(format), format, &parsed),
+        "automatic name parser rejects extra parts and overflow");
+    if (format == ArchiveFormat::Json) {
+        const std::wstring mismatched = autoDir + L"26.json";
+        Expect(MoveFileW(rollback.path.c_str(), mismatched.c_str()), "rename auto to mismatched turn");
+        rollback.path = mismatched;
+        Expect(!store.Load(rollback, loaded, error), "automatic frame turn mismatch refused");
+        Expect(store.List(battle, "", records, error, hbs::ArchiveSlot::Auto)
+            && records.size() == 29 && GetFileAttributesW(mismatched.c_str()) != INVALID_FILE_ATTRIBUTES,
+            "mismatched automatic frame hidden and retained");
+    }
+    ArchiveRecord clockBack;
+    Expect(store.Save(make(3, 1, 7), error, &clockBack, hbs::ArchiveSlot::Auto), "clock rollback fixture saved");
+    Expect(store.Save(make(2, 0, 7), error, &clockBack, hbs::ArchiveSlot::Auto)
+        && store.Load(clockBack, loaded, error) && loaded.timestampUtcMs == 0,
+        "clock rollback cannot prune just committed auto archive before readback");
+    RemoveTree(root);
+}
+
 // ===== 本地时间显示 =====
 
 static void TestLocalStamp()
@@ -772,6 +860,8 @@ int main()
     TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Binary);
     TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Json);
     TestJsonFrameText();
+    TestAutoSlotFor(ArchiveFormat::Binary);
+    TestAutoSlotFor(ArchiveFormat::Json);
     TestLocalStamp();
     printf(g_failed ? "FAILED %d\n" : "ALL PASSED\n", g_failed);
     return g_failed ? 1 : 0;

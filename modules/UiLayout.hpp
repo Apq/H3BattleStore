@@ -7,7 +7,10 @@ struct Layout {
     int bandHeight;
     int rowHeight;
     constexpr int OriginY(int designY) const { return Max(0, designY - (bandHeight - 24) / 2); }
-    constexpr int ListTop() const { return 2 * bandHeight; }
+    // 2026-10-11 自动存档：两行控制条下方加一行标题（手动存档/自动存档），
+    // 列表顶随之下移一行；标题行自身不算列表行（HitRow 从 ListTop 起算）。
+    constexpr int TitleTop() const { return 2 * bandHeight; }
+    constexpr int ListTop() const { return 2 * bandHeight + rowHeight; }
     constexpr int Height(int rows) const { return ListTop() + rows * rowHeight; }
     constexpr int HitRow(int y, int rows) const {
         return y < ListTop() || y >= Height(rows) ? -1 : (y - ListTop()) / rowHeight;
@@ -17,6 +20,11 @@ constexpr Layout ForFont(int fontHeight) { return { Max(24, fontHeight), Max(18,
 constexpr int kUiListVisibleRows = 20;
 constexpr int ListWidth = 168;
 constexpr int ScrollbarWidth = 14;
+// 自动列表固定起点：手动列表宽 + 预留滚动条位 + 2px 分隔（固定不随滚动条
+// 出现/消失移动，布局稳定）。
+constexpr int AutoListX = ListWidth + ScrollbarWidth + 2;
+// 列表区总宽（双列固定占位；实际 blt 按各自行数与滚动条裁剪）。
+constexpr int ListsWidth = AutoListX + ListWidth + ScrollbarWidth;
 struct ScrollList {
     size_t first = 0;
     bool dragging = false;

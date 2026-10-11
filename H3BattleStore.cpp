@@ -29,7 +29,6 @@ static bool CombatIsReadable_(const H3CombatManager* mgr);
 static bool CombatCanCapture_(const H3CombatManager* mgr, const char** reason);
 static bool BattleFingerprint_(const H3CombatManager* mgr, std::string* out, std::string* error);
 static std::wstring ArchiveRoot_();
-static bool TryCaptureCombat_();
 
 Patcher*         _P  = nullptr;
 PatcherInstance* _PI = nullptr;
@@ -41,6 +40,9 @@ PatcherInstance* _PI = nullptr;
 #define H3_GUARD_CONTEXT_(reason) LogRecentContext_(reason)
 #include "modules/CrashGuard.hpp"
 #include "modules/BattleArchive.inc.cpp"
+// ArchiveSlot 定义于上：依赖它的跨模块前置声明必须放在 BattleArchive 之后。
+static bool TryCaptureCombat_(hbs::ArchiveSlot slot = hbs::ArchiveSlot::Manual,
+                              const char* origin = "direct");
 #include "modules/BattleCodec.inc.cpp"
 #include "modules/BattleDiagnostics.inc.cpp"
 #include "modules/BattleCapture.inc.cpp"
