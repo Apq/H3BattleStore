@@ -82,8 +82,10 @@ static int AltTailTacticsResolve_(H3CombatManager* mgr, int* clickedOut)
 // 0x476500 void __thiscall(H3CombatManager* mgr, int intent)
 // 战斗阶段：原函数返回后覆盖 actionTarget（移动意图 action=2 已由原函数设定）。
 // 战术阶段：摆位在原函数内同步完成，必须在调用前改写点击格缓存 mgr+0x132D4。
-// 诊断（09:20 实测）：钩子每次被左键点击路径调用打 reach pre/post 各一行，供
-// 核对 clicked/position/orientation 与最终 target。
+// 0x476500 void __thiscall(H3CombatManager* mgr, int intent)
+// 战斗阶段：原函数返回后覆盖 actionTarget（移动意图 action=2 已由原函数设定）。
+// 战术阶段：摆位在原函数内同步完成，必须在调用前改写点击格缓存 mgr+0x132D4。
+// 日志只在命中 ALT 退后场景时打一行（09:31 收窄，未命中=原版行为无痕迹）。
 static void __stdcall Hook_AltTailClick_(HiHook* hook, H3CombatManager* mgr, int intent)
 {
     bool reached = false;
@@ -100,11 +102,6 @@ static void __stdcall Hook_AltTailClick_(HiHook* hook, H3CombatManager* mgr, int
                     preOrient = *(const int32_t*)((const uint8_t*)unit + 0x44);
                 }
             }
-            LogInfo("[AltTail] reach pre intent=%d alt=%d tactics=%d action=%d clicked=%d unit=%d:%d pos=%d orient=%d",
-                intent, (GetAsyncKeyState(VK_MENU) & 0x8000) ? 1 : 0,
-                *(const int32_t*)((const uint8_t*)mgr + 0x13D68), (int)mgr->action,
-                *(const int32_t*)((const uint8_t*)mgr + 0x132D4),
-                side, index, prePos, preOrient);
         }
     }
     __except (GuardCrashFilter_(GUARD_ALTTAIL, GetExceptionInformation())) {}
@@ -124,10 +121,6 @@ static void __stdcall Hook_AltTailClick_(HiHook* hook, H3CombatManager* mgr, int
     __except (GuardCrashFilter_(GUARD_ALTTAIL, GetExceptionInformation())) {}
     // 原函数恰好一次、guarded 块之外；原版异常照常传播。
     THISCALL_2(void, hook->GetDefaultFunc(), mgr, intent);
-    if (reached)
-        LogInfo("[AltTail] reach post action=%d clicked=%d target=%d",
-            (int)mgr->action, *(const int32_t*)((const uint8_t*)mgr + 0x132D4),
-            *(const int32_t*)((const uint8_t*)mgr + 0x44));
     __try {
         // 仅纯移动（攻击 case 3/F 设 action=7 天然排除）。
         if (reached && (int)mgr->action == 2
