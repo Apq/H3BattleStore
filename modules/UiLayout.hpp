@@ -121,11 +121,12 @@ constexpr int LampHalfWidth(int y, int radius) {
     return x;
 }
 // Keep each source texture band's outer borders when extending its interior.
-constexpr int TextureY(int y, int bandHeight) {
-    const int band = y / bandHeight;
-    const int local = y % bandHeight;
-    return band * 24 + (local < 3 ? local :
+constexpr int TextureBandY(int local, int bandHeight, int sourceBand) {
+    return sourceBand * 24 + (local < 3 ? local :
         (local >= bandHeight - 3 ? 24 - (bandHeight - local) :
             3 + (local - 3) * 18 / (bandHeight - 6)));
+}
+constexpr int TextureY(int y, int bandHeight) {
+    return TextureBandY(y % bandHeight, bandHeight, y / bandHeight);
 }
 }

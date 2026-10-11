@@ -38,13 +38,13 @@ static int g_uiBarAnchorY = 8;
 // 折叠版把状态灯移出面板：面板右缘与灯左缘之间留间隙（灯不被面板压住），
 // 灯由 BattleFoldBar 在面板绘制之后单独画在原位，收起/展开同一位置。
 static bool g_uiFoldLayout = false;
-// HB_bg.pcx is one 480x48 image: log controls above, status and hotkey below.
+// HB_bg.pcx is one 480x72 image: log controls, status/hotkey, archive titles.
 static const int kUiLogPackX = 392;
 static const int kUiLogPackWidth = 84;
 static const int kUiLogLevelCellWidth = 76;
 static const int kUiLogLevelPerRow = 5;
 static const int kUiLogLevelRows = 5;
-static const int kUiBgHeight = 48; // Source asset size, not the runtime two-band height.
+static const int kUiBgHeight = 72; // Three 24px source bands, adapted to runtime font heights.
 
 
 static struct
@@ -306,7 +306,7 @@ static WORD UiRgb8888To565_(DWORD c)
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
 
-// 单张两行底图，沿用 RGB 三平面 PCX 解码与游戏位深转换路径。
+// 单张三行底图，沿用 RGB 三平面 PCX 解码与游戏位深转换路径。
 static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached, bool& failed)
 {
     if (cached || failed) return cached;
@@ -406,7 +406,7 @@ static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached,
     return cached;
 }
 
-// HB_bg.pcx: centered HA_bg texture with baked gold border, one 480x48 image.
+// HB_bg.pcx: centered HA_bg texture with baked gold border, one 480x72 image.
 static H3LoadedPcx16* UiLoadBarBg_()
 {
     return UiLoadBg_(L"img\\HB_bg.pcx", g_barBg, g_barBgFailed);
@@ -697,13 +697,13 @@ static void UiDrawBar_(H3CombatManager* mgr)
             for (int py = 0; py < g_uiLayout.TitleTop(); ++py)
                 UiCopyBgRegion_(c, bg, 0, hbs_ui::TextureY(py, UiBandHeight_()),
                     kUiBarWidth, 1, py);
-            // 标题带复用第二行纹理，源图仍为 480x48（不能读取第三行）。
+            // 标题读取独立第三带；内纹理适配行高，金框与分隔线保持原厚度。
             for (int py = 0; py < UiRowHeight_(); ++py)
                 UiCopyBgRegion_(c, bg, 0,
-                    hbs_ui::TextureY(UiBandHeight_() + py * UiBandHeight_() / UiRowHeight_(), UiBandHeight_()),
+                    hbs_ui::TextureBandY(py, UiRowHeight_(), 2),
                     kUiBarWidth, 1, g_uiLayout.TitleTop() + py);
             // 下拉列表底色 = 背景图主色（2026-10-06 用户裁定：选项底色接近背景图，
-            // 不要黑蓝对比）。稀疏采样均值做主色，两行图仍仅千余点。
+            // 不要黑蓝对比）。稀疏采样均值做主色，三行图仍仅千余点。
             long sumR = 0, sumG = 0, sumB = 0;
             long count = 0;
             const bool src32 = H3BitMode::Get() == 4;

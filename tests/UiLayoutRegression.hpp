@@ -144,6 +144,18 @@ constexpr bool TextureValid(int height) {
 static_assert(TextureValid(24) && TextureValid(30) && TextureValid(64));
 static_assert(hbs_ui::TextureY(0, 30) == 0 && hbs_ui::TextureY(29, 30) == 23);
 static_assert(hbs_ui::TextureY(30, 30) == 24 && hbs_ui::TextureY(59, 30) == 47);
+constexpr bool TitleTextureValid(int height) {
+    int previous = 47;
+    for (int y = 0; y < height; ++y) {
+        const int sy = hbs_ui::TextureBandY(y, height, 2);
+        if (sy < 48 || sy >= 72 || sy < previous) return false;
+        previous = sy;
+    }
+    return hbs_ui::TextureBandY(0, height, 2) == 48
+        && hbs_ui::TextureBandY(height - 1, height, 2) == 71;
+}
+static_assert(TitleTextureValid(18) && TitleTextureValid(24)
+    && TitleTextureValid(30) && TitleTextureValid(64));
 static_assert(hbs_ui::StatusLampX + hbs_ui::StatusLampRadius + 1 < hbs_ui::HotkeyX);
 static_assert(6 + hbs_ui::StatusLabelWidth < hbs_ui::StatusLampX - hbs_ui::StatusLampRadius - 1);
 static_assert(hbs_ui::StatusLampY(normal) - hbs_ui::StatusLampRadius - 1 > normal.bandHeight);
