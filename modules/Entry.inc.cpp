@@ -840,6 +840,7 @@ static void StartPlugin()
     _PI->WriteHiHook(0x4786B0, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleExecute_);
     _PI->WriteHiHook(0x5A0140, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleCastSpell_);
     _PI->WriteHiHook(0x473A00, SPLICE_, EXTENDED_, THISCALL_, Hook_CombatMessage_);
+    _PI->WriteHiHook(0x476500, SPLICE_, EXTENDED_, THISCALL_, Hook_AltTailClick_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
     _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
     LogInfo("战斗存档：codec=%u 可逆事务已启用，实机恢复验收尚未完成。", kCodecVersion);

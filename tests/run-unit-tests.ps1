@@ -1,11 +1,11 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out = Join-Path $PSScriptRoot 'unit-tmp'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $vcvars = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars32.bat'
 Push-Location $root
 try {
-    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests')) {
+    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests', 'AltTailTests')) {
         $sources = '"tests\' + $name + '.cpp"'
         $defines = '/D_CRT_SECURE_NO_WARNINGS'
         if ($name -eq 'LogControlsTests') {

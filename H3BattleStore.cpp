@@ -57,4 +57,5 @@ PatcherInstance* _PI = nullptr;
 #include "modules/BattleFoldBar.inc.cpp"
 #endif
 #endif
+#include "modules/BattleAltTail.inc.cpp"
 #include "modules/Entry.inc.cpp"
