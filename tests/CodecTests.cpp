@@ -419,6 +419,140 @@ int main()
     capture.logLines.push_back(std::string(300, 'x'));
     capture.eagleEye[1].push_back(42);
 
+    // ===== JSON 后端往返（2026-10-11 双格式裁定：字段一一对应二进制布局）=====
+    {
+        std::string jsonError;
+        BattleJson jsonRoot;
+        Expect(CodecEncodeJson(capture, &jsonRoot, &jsonError), "json encode");
+        Expect(jsonRoot.is_object() && jsonRoot.contains("turn") && jsonRoot["turn"] == 7
+            && jsonRoot.contains("sections") && jsonRoot["sections"].is_object(),
+            "json root carries turn and sections");
+        {
+            const BattleJson& s = jsonRoot["sections"];
+            Expect(s.contains("battle") && s["battle"].is_object()
+                && s.contains("stacks") && s["stacks"].is_array() && s["stacks"].size() == 42
+                && s.contains("squares") && s["squares"].is_array() && s["squares"].size() == 187
+                && s.contains("obstacles") && s["obstacles"].is_array() && s["obstacles"].size() == 1
+                && s.contains("log") && s["log"].is_object()
+                && s.contains("heroes") && s["heroes"].is_array() && s["heroes"].size() == 2
+                && s.contains("relations") && s["relations"].is_array() && s["relations"].size() == 1
+                && s.contains("spells") && s["spells"].is_array() && s["spells"].size() == 2,
+                "json sections map one-to-one to the eight binary sections");
+            Expect(s["stacks"][2].is_object() && s["stacks"][2]["occupied"] == 1
+                && s["stacks"][2]["numberAlive"] == 18 && s["stacks"][2]["infoFlags"] == 0x1234ABCDu,
+                "json stack entry fields are explicit keys");
+            Expect(s["obstacles"][0]["defName"] == "C17SPE1.DEF"
+                && s["obstacles"][0]["cells"].is_array() && s["obstacles"][0]["cells"].size() == 1,
+                "json obstacle entry keeps resource name and cells explicit");
+            Expect(s["log"].contains("encoding") && s["log"]["encoding"].is_string()
+                && s["log"]["lines"].is_array() && s["log"]["lines"].size() == 2,
+                "json log section carries encoding marker and line array");
+        }
+        const std::string text = jsonRoot.dump(2);
+        const BattleJson parsed = BattleJson::parse(text, nullptr, false, true);
+        Expect(!parsed.is_discarded() && parsed == jsonRoot, "json dump/parse roundtrip is exact");
+        std::unique_ptr<CodecCapture> jsonDecoded(new CodecCapture{});
+        Expect(CodecDecodeJson(parsed, jsonDecoded.get(), &jsonError), "json decode");
+        Expect(jsonDecoded->turn == capture.turn && jsonDecoded->currentMonIndex == capture.currentMonIndex
+            && jsonDecoded->spellPoints[1] == -4 && jsonDecoded->fortWallsHp[17] == 900
+            && jsonDecoded->heroCasted[1] == 0xFFFFFFFFu && jsonDecoded->rngTlsSeed == 0x12345678,
+            "json battle scalars roundtrip");
+        Expect(jsonDecoded->stacks[0][2].occupied && jsonDecoded->stacks[0][2].numberAlive == 18
+            && jsonDecoded->stacks[0][2].infoFlags == 0x1234ABCDu
+            && jsonDecoded->stacks[0][2].infoCombat[7] == 107
+            && jsonDecoded->stacks[0][2].renderOffsetY == -31
+            && jsonDecoded->stacks[0][2].activeSpellDuration[5] == 3
+            && jsonDecoded->stacks[0][2].extraScalars[0] == capture.stacks[0][2].extraScalars[0],
+            "json stack scalars roundtrip");
+        Expect(jsonDecoded->stacks[0][2].spellIds.size() == 2
+            && jsonDecoded->stacks[0][2].spellIds[1] == 80
+            && jsonDecoded->stacks[0][2].relations[2].size() == 1
+            && jsonDecoded->stacks[0][2].relations[2][0].slot == 4,
+            "json spells and relations roundtrip");
+        Expect(jsonDecoded->squares[186].deadStacksNumber == 2
+            && jsonDecoded->squares[186].deadStackIndex[1] == 20,
+            "json square corpses roundtrip");
+        Expect(jsonDecoded->obstacles.size() == 1 && jsonDecoded->obstacles[0].kindId == 100
+            && jsonDecoded->obstacles[0].featureDamage == 50 && jsonDecoded->obstacles[0].cellCount == 1
+            && strcmp(jsonDecoded->obstacles[0].defName, "C17SPE1.DEF") == 0,
+            "json obstacle roundtrip");
+        Expect(jsonDecoded->logLines.size() == 2 && jsonDecoded->logLines[1].size() == 300,
+            "json full log line roundtrip");
+        Expect(jsonDecoded->eagleEye[1].size() == 1 && jsonDecoded->eagleEye[1][0] == 42,
+            "json eagle-eye roundtrip");
+        {
+            // 同模型双序列化后端：JSON 与二进制解码结果一致。
+            std::vector<hbs::ArchiveSection> binarySections;
+            std::unique_ptr<CodecCapture> binaryDecoded(new CodecCapture{});
+            Expect(CodecEncode(capture, &binarySections, &jsonError)
+                && CodecDecode(binarySections, binaryDecoded.get(), &jsonError), "binary decode for parity");
+            Expect(jsonDecoded->turn == binaryDecoded->turn
+                && jsonDecoded->stacks[0][2].numberAlive == binaryDecoded->stacks[0][2].numberAlive
+                && jsonDecoded->stacks[0][2].extraScalars[0] == binaryDecoded->stacks[0][2].extraScalars[0]
+                && jsonDecoded->logLines == binaryDecoded->logLines
+                && jsonDecoded->obstacles.size() == binaryDecoded->obstacles.size(),
+                "json and binary backends decode the same model");
+        }
+        {
+            // 坏档拒绝：缺段、字宽越界、槽位重复、机器装备白名单、编码标记。
+            BattleJson missing = parsed;
+            missing["sections"].erase("heroes");
+            Expect(!CodecDecodeJson(missing, jsonDecoded.get(), &jsonError)
+                && jsonError == "capture is missing a required section", "json missing section rejected");
+            BattleJson badWidth = parsed;
+            badWidth["sections"]["battle"]["landType"] = 3000000000u;
+            Expect(!CodecDecodeJson(badWidth, jsonDecoded.get(), &jsonError),
+                "json i32 field width enforced");
+            BattleJson badSlot = parsed;
+            badSlot["sections"]["stacks"][2]["side"] = 5;
+            Expect(!CodecDecodeJson(badSlot, jsonDecoded.get(), &jsonError),
+                "json stack slot bounds enforced");
+            BattleJson badMachine = parsed;
+            badMachine["sections"]["heroes"][0]["warMachines"][0]["id"] = 4;
+            Expect(!CodecDecodeJson(badMachine, jsonDecoded.get(), &jsonError),
+                "json machine equipment whitelist enforced");
+            BattleJson badLog = parsed;
+            badLog["sections"]["log"]["encoding"] = "utf8";
+            Expect(!CodecDecodeJson(badLog, jsonDecoded.get(), &jsonError),
+                "json unknown log encoding rejected");
+        }
+        {
+            // 非有限浮点：dump 为 null、读回 NaN，RestorePolicy_ 照旧拒绝。
+            const uint32_t nanBits = 0x7FC00000u;
+            float nanValue = 0;
+            memcpy(&nanValue, &nanBits, sizeof(nanValue));
+            CodecCapture nanCapture = capture;
+            nanCapture.stacks[0][2].frenzyMultiplier = nanValue;
+            BattleJson nanRoot;
+            Expect(CodecEncodeJson(nanCapture, &nanRoot, &jsonError), "json encodes non-finite as null");
+            const std::string nanText = nanRoot.dump(2);
+            Expect(nanText.find("null") != std::string::npos, "non-finite float dumps to null");
+            const BattleJson nanParsed = BattleJson::parse(nanText, nullptr, false, true);
+            std::unique_ptr<CodecCapture> nanDecoded(new CodecCapture{});
+            Expect(CodecDecodeJson(nanParsed, nanDecoded.get(), &jsonError), "json null decodes back");
+            uint32_t readBits = 0;
+            memcpy(&readBits, &nanDecoded->stacks[0][2].frenzyMultiplier, sizeof(readBits));
+            Expect((readBits & 0x7F800000u) == 0x7F800000u && (readBits & 0x007FFFFFu) != 0,
+                "null reads back as NaN");
+            Expect(!RestorePolicy_(*nanDecoded, &jsonError), "NaN json snapshot rejected by policy");
+        }
+        {
+            // 本机 ANSI（GBK）日志行经 ACP 编码以真中文存档并无损往返。
+            CodecCapture zhCapture = capture;
+            zhCapture.logLines.clear();
+            zhCapture.logLines.push_back(std::string("\xB5\xD8\xCD\xBC\xD6\xD0\xCE\xC4", 8));
+            BattleJson zhRoot;
+            Expect(CodecEncodeJson(zhCapture, &zhRoot, &jsonError), "json encodes native log");
+            const std::string zhText = zhRoot.dump(2);
+            const BattleJson zhParsed = BattleJson::parse(zhText, nullptr, false, true);
+            std::unique_ptr<CodecCapture> zhDecoded(new CodecCapture{});
+            Expect(CodecDecodeJson(zhParsed, zhDecoded.get(), &jsonError)
+                && zhDecoded->logLines.size() == 1
+                && zhDecoded->logLines[0] == zhCapture.logLines[0],
+                "native log lines roundtrip losslessly");
+        }
+    }
+
     std::vector<hbs::ArchiveSection> sections;
     std::string error;
     Expect(CodecEncode(capture, &sections, &error), "encode");

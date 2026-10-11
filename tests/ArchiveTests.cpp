@@ -1,5 +1,9 @@
 // ArchiveTests.cpp
 // 独立 Win32 控制台：只验证 hbs 存档文件层，不链接插件或游戏。
+// 2026-10-11 双格式改造（用户裁定 docs/02 §2/§3）：binary 与 json 双格式
+// 参数化；指纹目录布局 <根>\<指纹>\手动\<回合>_<编号>；自动\ 预留只建不写；
+// 列表按 (回合, 编号) 两段数值倒序；旧平铺档留盘不删不列举；JSON 帧以
+// 文本断言校验（含"无分隔符伪打包"的结构断言）。
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -17,6 +21,7 @@
 #include "../modules/BattleArchive.inc.cpp"
 
 using hbs::ArchiveDocument;
+using hbs::ArchiveFormat;
 using hbs::ArchiveRecord;
 using hbs::ArchiveSection;
 using hbs::ArchiveStore;
@@ -40,18 +45,49 @@ static std::string Key(char fill, char tail)
     return key;
 }
 
+static std::wstring KeyWide(const std::string& key)
+{
+    return hbs::detail::KeyToWide(key);
+}
+
+static std::wstring ExOf(ArchiveFormat format)
+{
+    return format == ArchiveFormat::Json ? L".json" : L".hbs";
+}
+
+static const char* TagOf(ArchiveFormat format)
+{
+    return format == ArchiveFormat::Json ? "json" : "binary";
+}
+
+static ArchiveFormat Flip(ArchiveFormat format)
+{
+    return format == ArchiveFormat::Json ? ArchiveFormat::Binary : ArchiveFormat::Json;
+}
+
+// 双格式构造器：binary 填段字节；json 填 {"turn","sections"}（Archive 层只
+// 要求 sections 为对象，段完整性由 CodecDecodeJson 在 Codec 测试覆盖）。
 static ArchiveDocument Doc(const std::string& battle, const std::string& target,
-                           uint64_t stamp, uint32_t sequence, uint32_t sectionId, uint8_t byte)
+                           uint64_t stamp, uint32_t sequence, uint32_t sectionId, uint8_t byte,
+                           int32_t turn, ArchiveFormat format)
 {
     ArchiveDocument document;
     document.battleKey = battle;
     document.targetKey = target;
     document.timestampUtcMs = stamp;
     document.sequence = sequence;
-    ArchiveSection section;
-    section.id = sectionId;
-    section.bytes.push_back(byte);
-    document.sections.push_back(section);
+    document.turn = turn;
+    if (format == ArchiveFormat::Json) {
+        BattleJson sections;
+        sections["battle"] = BattleJson{{"action", (int32_t)byte}};
+        document.json["turn"] = turn;
+        document.json["sections"] = sections;
+    } else {
+        ArchiveSection section;
+        section.id = sectionId;
+        section.bytes.push_back(byte);
+        document.sections.push_back(section);
+    }
     return document;
 }
 
@@ -98,17 +134,39 @@ static void RemoveTree(const std::wstring& root)
     RemoveDirectoryW(root.c_str());
 }
 
-static int CountHbs(const std::wstring& root)
+static int CountFiles(const std::wstring& dir, const wchar_t* ext)
 {
     int count = 0;
     WIN32_FIND_DATAW found;
-    HANDLE search = FindFirstFileW((root + L"*.hbs").c_str(), &found);
+    HANDLE search = FindFirstFileW((dir + L"*" + ext).c_str(), &found);
     if (search == INVALID_HANDLE_VALUE) return 0;
     do {
         if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) ++count;
     } while (FindNextFileW(search, &found));
     FindClose(search);
     return count;
+}
+
+static bool DirExists(const std::wstring& path)
+{
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool Touch(const std::wstring& path)
+{
+    std::wstring error;
+    const uint8_t byte = 1;
+    return hbs::detail::WriteNewFile(path, std::vector<uint8_t>(&byte, &byte + 1), error);
+}
+
+static bool ReadText(const std::wstring& path, std::string& text)
+{
+    std::vector<uint8_t> bytes;
+    std::wstring error;
+    if (!hbs::detail::ReadWholeFile(path, bytes, error)) return false;
+    text.assign(bytes.begin(), bytes.end());
+    return true;
 }
 
 static void PutU32(std::vector<uint8_t>& out, uint32_t value)
@@ -119,12 +177,14 @@ static void PutU32(std::vector<uint8_t>& out, uint32_t value)
     out.push_back(static_cast<uint8_t>(value >> 24));
 }
 
+// ===== 二进制帧编解码（原样保留的纯函数回归）=====
+
 static void TestCodec()
 {
     printf("codec\n");
     const std::string battle = Key('a', 'b');
     const std::string target = Key('c', 'd');
-    ArchiveDocument document = Doc(battle, target, 0x1122334455667788ull, 7, 3, 0x5A);
+    ArchiveDocument document = Doc(battle, target, 0x1122334455667788ull, 7, 3, 0x5A, 25, ArchiveFormat::Binary);
     document.sections[0].bytes.push_back(0x00);
     document.sections[0].bytes.push_back(0xFF);
     ArchiveSection second;
@@ -154,7 +214,7 @@ static void TestRejects()
     printf("rejects\n");
     const std::string battle = Key('a', '1');
     const std::string target = Key('b', '2');
-    ArchiveDocument document = Doc(battle, target, 9, 1, 1, 42);
+    ArchiveDocument document = Doc(battle, target, 9, 1, 1, 42, 25, ArchiveFormat::Binary);
     std::vector<uint8_t> encoded;
     std::wstring error;
     Expect(hbs::detail::Encode(document, encoded, error), "base encode");
@@ -214,392 +274,485 @@ static void TestRejects()
     Expect(!hbs::detail::Encode(huge, dupEncoded, error), "over 64MB rejected");
 }
 
-static bool SameRecord(const ArchiveRecord& left, const ArchiveRecord& right)
+// ===== 指纹目录布局（双格式参数化）=====
+
+static bool SameRecord(const ArchiveRecord& left, const ArchiveRecord& right, ArchiveFormat format)
 {
-    return left.path == right.path
-        && left.battleKey == right.battleKey && left.targetKey == right.targetKey
-        && left.timestampUtcMs == right.timestampUtcMs && left.sequence == right.sequence;
+    // JSON 帧不含 sequence/targetKey（读回恒 0 与 64 个 '0'），不参与比较。
+    bool same = left.path == right.path
+        && left.battleKey == right.battleKey
+        && left.timestampUtcMs == right.timestampUtcMs
+        && left.turn == right.turn && left.number == right.number;
+    if (format == ArchiveFormat::Json) return same;
+    return same && left.targetKey == right.targetKey && left.sequence == right.sequence;
 }
 
 static void ExpectLoadedDocument(ArchiveStore& store, const ArchiveRecord& record,
-                                 const ArchiveDocument& expected)
+                                 const ArchiveDocument& expected, ArchiveFormat format)
 {
     ArchiveDocument loaded;
     std::wstring error;
     const bool ok = store.Load(record, loaded, error);
     Expect(ok, "load retained archive");
     if (!ok) return;
-    bool same = loaded.battleKey == expected.battleKey && loaded.targetKey == expected.targetKey
-        && loaded.timestampUtcMs == expected.timestampUtcMs && loaded.sequence == expected.sequence
-        && loaded.sections.size() == expected.sections.size();
-    for (size_t i = 0; same && i < loaded.sections.size(); ++i) {
-        same = loaded.sections[i].id == expected.sections[i].id
-            && loaded.sections[i].bytes == expected.sections[i].bytes;
+    bool same = loaded.battleKey == expected.battleKey
+        && loaded.timestampUtcMs == expected.timestampUtcMs
+        && loaded.turn == expected.turn;
+    if (format == ArchiveFormat::Json) {
+        // JSON 帧不含 sequence/targetKey：读回恒为 0 与 64 个 '0'；负载比文档树。
+        same = same && loaded.sequence == 0
+            && loaded.targetKey == std::string(64, '0')
+            && loaded.json == expected.json;
+    } else {
+        same = same && loaded.targetKey == expected.targetKey
+            && loaded.sequence == expected.sequence
+            && loaded.sections.size() == expected.sections.size();
+        for (size_t i = 0; same && i < loaded.sections.size(); ++i) {
+            same = loaded.sections[i].id == expected.sections[i].id
+                && loaded.sections[i].bytes == expected.sections[i].bytes;
+        }
     }
     Expect(same, "retained identity and payload unchanged");
 }
 
-static void TestStoreKeepsAllArchives()
+static int IndexOf(const std::vector<ArchiveRecord>& records, int32_t turn, uint64_t number)
 {
-    printf("store keeps all archives\n");
+    for (size_t i = 0; i < records.size(); ++i)
+        if (records[i].turn == turn && records[i].number == number) return (int)i;
+    return -1;
+}
+
+static void TestLayoutFor(ArchiveFormat format)
+{
+    printf("layout %s\n", TagOf(format));
     const std::wstring root = TempRoot();
-    ArchiveStore store(root);
+    const std::wstring ext = ExOf(format);
+    ArchiveStore store(root, format);
     const std::string battle = Key('d', 'e');
     const std::string target = Key('f', '0');
     const std::string otherTarget = Key('f', '1');
+    const std::wstring battleDir = root + KeyWide(battle) + L"\\";
+    const std::wstring manualDir = battleDir + L"手动\\";
     std::wstring error;
-    std::vector<ArchiveRecord> savedRecords;
-    std::vector<ArchiveDocument> savedDocuments;
-
-    for (int i = 0; i < 75; ++i) {
-        ArchiveDocument document = Doc(battle, target, 1000 + static_cast<uint64_t>(i), static_cast<uint32_t>(i + 1), 2,
-                                       static_cast<uint8_t>(i));
-        ArchiveRecord committed;
-        if (store.Save(document, error, &committed)) {
-            savedRecords.push_back(committed);
-            savedDocuments.push_back(document);
-        } else {
-            Expect(false, "save all 75 same-battle archives");
-        }
-    }
-    std::vector<ArchiveRecord> records;
-    Expect(store.List(battle, target, records, error), "list 75 archives without trimming");
-    Expect(records.size() == 75 && CountHbs(root) == 75, "all 75 same-battle archives stay on disk");
-    Expect(!records.empty() && records.front().timestampUtcMs == 1074
-        && records.back().timestampUtcMs == 1000, "75 archives sorted newest first with oldest retained");
-
-    ArchiveDocument newest = Doc(battle, target, 5000, 76, 2, 99);
-    ArchiveRecord original;
-    Expect(store.Save(newest, error, &original), "76th save succeeds");
-    savedRecords.push_back(original);
-    savedDocuments.push_back(newest);
-
-    ArchiveDocument collision = Doc(battle, target, 5000, 76, 4, 7);
     ArchiveRecord committed;
-    Expect(store.Save(collision, error, &committed), "same second bumps attempt suffix");
-    savedRecords.push_back(committed);
-    savedDocuments.push_back(collision);
-    const std::wstring committedName = hbs::detail::FileNameOf(committed.path);
-    Expect(committedName == hbs::detail::MakeArchiveName(collision.timestampUtcMs, battle, 2)
-        && committedName.size() == 86
-        && committedName.compare(committedName.size() - 6, 6, L"_2.hbs") == 0
-        && committedName.compare(0, 64, std::wstring(battle.begin(), battle.end())) == 0,
-        "collision filename is <fingerprint>_yyyymmdd_hhmmss_2.hbs");
-    Expect(store.List(battle, target, records, error), "list after collision");
-    Expect(records.size() == 77 && !records.empty() && records[0].sequence == 76
-        && records[0].timestampUtcMs == 5000, "collision retains both archives and document sequence");
-    Expect(!records.empty() && SameRecord(committed, records[0])
-        && committed.battleKey == battle && committed.targetKey == target,
-        "save returns actual committed identity");
-    Expect(original.path != committed.path, "collision never overwrites existing archive path");
-    ExpectLoadedDocument(store, original, newest);
-    ExpectLoadedDocument(store, committed, collision);
 
-    ArchiveDocument other = Doc(battle, otherTarget, 1000, 76, 1, 3);
-    ArchiveRecord otherCommitted;
-    Expect(store.Save(other, error, &otherCommitted), "save older archive for another target");
-    savedRecords.push_back(otherCommitted);
-    savedDocuments.push_back(other);
-    std::vector<ArchiveRecord> battleRecords;
-    Expect(store.List(battle, "", battleRecords, error), "list whole battle");
-    Expect(battleRecords.size() == 78, "all targets retained in one battle");
+    // 首存建树 + 同回合编号从 1 起。
+    Expect(store.Save(Doc(battle, target, 1000, 1, 2, 0x11, 25, format), error, &committed),
+        "first save creates archive");
+    Expect(hbs::detail::FileNameOf(committed.path) == L"25_1" + ext, "first archive named 25_1");
+    Expect(DirExists(battleDir) && DirExists(manualDir) && DirExists(battleDir + L"自动"),
+        "first save builds fingerprint dir with manual and auto subtrees");
+    Expect(committed.turn == 25 && committed.number == 1, "committed identity carries turn and number");
+
+    // 同回合编号递增、跨回合重置。
+    Expect(store.Save(Doc(battle, target, 1001, 2, 2, 0x12, 25, format), error, &committed)
+        && hbs::detail::FileNameOf(committed.path) == L"25_2" + ext, "same turn bumps number");
+    Expect(store.Save(Doc(battle, target, 1002, 3, 2, 0x13, 25, format), error, &committed)
+        && hbs::detail::FileNameOf(committed.path) == L"25_3" + ext, "same turn keeps counting");
+    Expect(store.Save(Doc(battle, target, 1003, 4, 2, 0x14, 26, format), error, &committed)
+        && hbs::detail::FileNameOf(committed.path) == L"26_1" + ext, "next turn restarts at 1");
+
+    // 编号无上限自然位数：占位 9 → 10；999 → 1000（跳过中间名）。
+    Expect(Touch(manualDir + L"25_9" + ext), "place 25_9 fixture");
+    Expect(store.Save(Doc(battle, target, 1004, 5, 2, 0x15, 25, format), error, &committed)
+        && hbs::detail::FileNameOf(committed.path) == L"25_10" + ext, "number 9 rolls to 10");
+    Expect(Touch(manualDir + L"25_998" + ext) && Touch(manualDir + L"25_999" + ext), "place 25_999 fixtures");
+    Expect(store.Save(Doc(battle, target, 1005, 6, 2, 0x16, 25, format), error, &committed)
+        && hbs::detail::FileNameOf(committed.path) == L"25_1000" + ext, "number 999 rolls to 1000");
+
+    // 高回合档参与排序：7134 > 25（字符串序 "25_*" > "7134_*" 会错）。
+    Expect(store.Save(Doc(battle, target, 1006, 7, 2, 0x17, 7134, format), error, &committed),
+        "save turn 7134");
+
+    // 可见档：25_1,25_2,25_3,25_10,25_1000,26_1,7134_1（占位坏档被隐藏）。
+    std::vector<ArchiveRecord> records;
+    Expect(store.List(battle, "", records, error) && records.size() == 7,
+        "list seven visible archives");
+    Expect(!records.empty() && records[0].turn == 7134 && records[0].number == 1,
+        "turn 7134 sorts before turn 25 by numeric order");
+    {
+        // 两段数值倒序：26_1 > 25_1000 > 25_10 > 25_3 > 25_2 > 25_1；
+        // 25_10 在 25_2 之前（字符串序会得到相反结果——字典序陷阱）。
+        const int order[][2] = {{26, 1}, {25, 1000}, {25, 10}, {25, 3}, {25, 2}, {25, 1}};
+        bool ordered = records.size() == 7;
+        for (size_t i = 0; ordered && i < sizeof(order) / sizeof(order[0]); ++i)
+            ordered = records[i + 1].turn == order[i][0] && records[i + 1].number == (uint64_t)order[i][1];
+        Expect(ordered, "descend by turn then number, 25_10 beats 25_2");
+        Expect(IndexOf(records, 25, 10) < IndexOf(records, 25, 2), "numeric beats lexicographic for 10 vs 2");
+    }
+
+    // 旧平铺档（存档根直下，两种旧后缀）留盘不删、不进读档视野。
+    const std::wstring legacyFlat = root + KeyWide(battle) + L"_20261006_192213.hbs";
+    const std::wstring legacyFlatJson = root + KeyWide(battle) + L"_20261011_201500.json";
+    {
+        std::vector<uint8_t> bytes;
+        bytes.push_back('x');
+        std::wstring writeError;
+        Expect(hbs::detail::WriteNewFile(legacyFlat, bytes, writeError)
+            && hbs::detail::WriteNewFile(legacyFlatJson, bytes, writeError),
+            "place legacy flat archives in root");
+    }
+    std::vector<ArchiveRecord> all;
+    Expect(store.List("", "", all, error) && all.size() == 7,
+        "legacy flat archives in root stay invisible");
+    Expect(GetFileAttributesW(legacyFlat.c_str()) != INVALID_FILE_ATTRIBUTES
+        && GetFileAttributesW(legacyFlatJson.c_str()) != INVALID_FILE_ATTRIBUTES,
+        "legacy flat archives stay on disk");
+
+    // 同指纹目录另一格式的档互不可见（后缀分流）。
+    {
+        ArchiveStore otherStore(root, Flip(format));
+        const ArchiveDocument other = Doc(battle, target, 2000, 9, 5, 0x55, 99, Flip(format));
+        ArchiveRecord otherCommitted;
+        Expect(otherStore.Save(other, error, &otherCommitted)
+            && hbs::detail::FileNameOf(otherCommitted.path) == L"99_1" + ExOf(Flip(format)),
+            "save in the other format");
+        std::vector<ArchiveRecord> mine;
+        Expect(store.List(battle, "", mine, error) && IndexOf(mine, 99, 1) < 0,
+            "other-format archives in same manual dir stay invisible");
+        std::vector<ArchiveRecord> theirs;
+        Expect(otherStore.List(battle, "", theirs, error) && theirs.size() == 1,
+            "other format sees only its own suffix");
+        ExpectLoadedDocument(otherStore, otherCommitted, other, Flip(format));
+    }
+
+    // targetKey 过滤与多指纹列举。JSON 帧顶层无 targetKey（读回恒 64 个
+    // '0'），过滤语义按帧内值匹配：非零键在 json 模式下匹配不到任何档。
+    Expect(store.Save(Doc(battle, otherTarget, 3000, 8, 9, 0x19, 25, format), error, &committed),
+        "save other-target archive");
     std::vector<ArchiveRecord> otherRecords;
-    Expect(store.List(battle, otherTarget, otherRecords, error)
-        && otherRecords.size() == 1 && SameRecord(otherRecords[0], otherCommitted),
-        "older other-target archive stays visible");
-    Expect(battleRecords.size() >= 2
-        && battleRecords[battleRecords.size() - 2].timestampUtcMs == 1000
-        && battleRecords[battleRecords.size() - 2].sequence == 76
-        && battleRecords.back().sequence == 1, "equal UTC timestamps sort by descending sequence");
+    if (format == ArchiveFormat::Json) {
+        Expect(store.List(battle, otherTarget, otherRecords, error) && otherRecords.empty(),
+            "json frame carries no target key, foreign filter matches nothing");
+        Expect(store.List(battle, std::string(64, '0'), otherRecords, error) && otherRecords.size() == 8,
+            "json zero-target filter matches every json archive");
+    } else {
+        Expect(store.List(battle, otherTarget, otherRecords, error) && otherRecords.size() == 1,
+            "target filter keeps only other-target archive");
+    }
+    Expect(store.List(battle, target, records, error)
+        && records.size() == (format == ArchiveFormat::Json ? 0u : 7u),
+        "target filter hides other-target archive");
+    {
+        const std::string second = Key('7', '7');
+        Expect(store.Save(Doc(second, target, 4000, 1, 1, 0x21, 3, format), error, &committed),
+            "save another battle");
+        std::vector<ArchiveRecord> global;
+        Expect(store.List("", "", global, error) && global.size() == 9,
+            "global list spans all fingerprint dirs");
+        Expect(!global.empty() && global[0].turn == 7134, "global order still turn-major");
+        // 重启后全局顺序与负载一致。
+        ArchiveStore restarted(root, format);
+        std::vector<ArchiveRecord> again;
+        Expect(restarted.List("", "", again, error) && again.size() == global.size(),
+            "restart lists every archive");
+        bool sameOrder = again.size() == global.size();
+        for (size_t i = 0; sameOrder && i < again.size(); ++i)
+            sameOrder = SameRecord(again[i], global[i], format);
+        Expect(sameOrder, "restart keeps identities and full order");
+    }
 
-    ArchiveDocument invalid = collision;
-    invalid.battleKey = "bad";
-    Expect(!store.Save(invalid, error, &committed), "invalid save rejected");
-    Expect(committed.path.empty() && committed.battleKey.empty() && committed.sequence == 0,
+    // 非法键/负回合拒绝；committed 清空。
+    ArchiveDocument invalid = Doc("bad", target, 1, 1, 1, 1, 1, format);
+    Expect(!store.Save(invalid, error, &committed), "invalid battle key rejected");
+    Expect(committed.path.empty() && committed.battleKey.empty() && committed.number == 0,
         "failed save clears committed identity");
-    Expect(CountHbs(root) == 78, "invalid save leaves all committed archives untouched");
+    ArchiveDocument negativeTurn = Doc(battle, target, 1, 1, 1, 1, -3, format);
+    Expect(!store.Save(negativeTurn, error, &committed), "negative turn rejected");
 
-    ArchiveStore restarted(root);
-    std::vector<ArchiveRecord> again;
-    Expect(restarted.List(battle, target, again, error), "restart list");
-    bool sameOrder = again.size() == records.size();
-    for (size_t i = 0; sameOrder && i < again.size(); ++i)
-        sameOrder = SameRecord(again[i], records[i]);
-    Expect(sameOrder, "restart keeps every identity and full sort order including filename ties");
-
-    std::vector<std::string> battles;
-    for (int i = 0; i < 35; ++i) {
-        const char fill = "0123456789abcdef"[i % 16];
-        const char tail = "0123456789abcdef"[i / 16];
-        battles.push_back(Key(fill, tail));
-        ArchiveDocument battleDoc = Doc(battles.back(), target, 10000 + static_cast<uint64_t>(i), 1, 1,
-                                        static_cast<uint8_t>(i));
-        ArchiveRecord battleCommitted;
-        Expect(store.Save(battleDoc, error, &battleCommitted), "save another battle without eviction");
-        savedRecords.push_back(battleCommitted);
-        savedDocuments.push_back(battleDoc);
-    }
-    Expect(store.List("", "", records, error), "list all 36 battles");
-    Expect(records.size() == 113 && CountHbs(root) == 113,
-        "78 same-battle archives plus 35 other battles all remain on disk");
-    Expect(!records.empty() && records.front().battleKey == battles.back()
-        && records.front().timestampUtcMs == 10034 && records.back().battleKey == battle
-        && records.back().timestampUtcMs == 1000 && records.back().sequence == 1,
-        "global ordering uses header UTC and sequence across every battle");
-    int keptOld = 0;
-    for (size_t i = 0; i < records.size(); ++i) {
-        if (records[i].battleKey == battle) ++keptOld;
-    }
-    Expect(keptOld == 78, "oldest battle retains all archives beyond 30 battles");
-    for (size_t b = 0; b < battles.size(); ++b) {
-        int kept = 0;
-        for (size_t i = 0; i < records.size(); ++i) {
-            if (records[i].battleKey == battles[b]) ++kept;
-        }
-        Expect(kept == 1, "each of the 35 newer battles is retained");
+    // 记录元数据伪造（2026-10-10 裁定）：内容为准。
+    {
+        std::vector<ArchiveRecord> mine;
+        Expect(store.List(battle, "", mine, error) && !mine.empty(), "list for forged record test");
+        ArchiveRecord forged = mine[0];
+        ++forged.sequence;
+        forged.targetKey = Key('9', '9');
+        ArchiveDocument loaded;
+        std::wstring loadError;
+        const bool ok = store.Load(forged, loaded, loadError);
+        Expect(ok, "forged record metadata ignored");
+        if (ok && format == ArchiveFormat::Binary)
+            Expect(loaded.targetKey == mine[0].targetKey && loaded.sequence == mine[0].sequence,
+                "loaded identity comes from file");
+        ArchiveRecord outside = mine[0];
+        outside.path = root + L"..\\not-owned" + ext;
+        Expect(!store.Load(outside, loaded, error), "outside load path refused");
     }
 
-    ArchiveStore restartedAll(root);
-    Expect(restartedAll.List("", "", again, error), "restart lists all retained battles");
-    sameOrder = again.size() == records.size();
-    for (size_t i = 0; sameOrder && i < again.size(); ++i)
-        sameOrder = SameRecord(again[i], records[i]);
-    Expect(sameOrder && again.size() == 113, "restart preserves complete multi-battle order");
-    for (size_t i = 0; i < savedRecords.size(); ++i)
-        ExpectLoadedDocument(restartedAll, savedRecords[i], savedDocuments[i]);
-
+    // 当前后缀档数：7 可见 + 1 other-target + 3 占位坏档 = 11（另一后缀不计）。
+    Expect(CountFiles(manualDir, ext.c_str()) == 11, "all archives of this format stay on disk");
     RemoveTree(root);
 }
 
-static void TestHiddenArchivesStayOnDisk()
+// ===== 坏档隐藏与留盘（双格式参数化）=====
+
+static void TestHiddenArchivesStayOnDiskFor(ArchiveFormat format)
 {
-    printf("hidden archives stay on disk\n");
+    printf("hidden archives stay on disk (%s)\n", TagOf(format));
     const std::wstring root = TempRoot();
-    ArchiveStore store(root);
+    const std::wstring ext = ExOf(format);
+    ArchiveStore store(root, format);
     std::wstring error;
-    ArchiveDocument document = Doc(Key('1', '2'), Key('3', '4'), 42, 1, 8, 9);
+    const std::string battle = Key('1', '2');
+    const std::wstring manualDir = root + KeyWide(battle) + L"\\手动\\";
+    ArchiveDocument document = Doc(battle, Key('3', '4'), 42, 1, 8, 9, 5, format);
     ArchiveRecord original;
     Expect(store.Save(document, error, &original), "save visible archive");
     std::vector<ArchiveRecord> records;
     Expect(store.List("", "", records, error) && records.size() == 1, "one valid record");
 
-    ArchiveDocument loaded;
-    ArchiveRecord outside = original;
-    outside.path = root + L"..\\not-owned.hbs";
-    Expect(!store.Load(outside, loaded, error), "outside load path refused");
-    // 2026-10-10 用户裁定（16 删除）：记录四元组不再参与加载校验——文件名↔内容
-    // 身份与调用方 battleKey 比较是防线；伪造 record 字段（同 path）应加载成功，
-    // 且以文件内容为准。
-    ArchiveRecord forged = original;
-    ++forged.sequence;
-    forged.targetKey = Key('9', '9');
     {
-        std::wstring forgedError;
-        ArchiveDocument forgedDoc;
-        const bool ok = store.Load(forged, forgedDoc, forgedError);
-        Expect(ok, "forged record metadata ignored");
-        if (ok) Expect(forgedDoc.targetKey == document.targetKey
-            && forgedDoc.sequence == document.sequence, "loaded identity comes from file");
-    }
-    {
-        std::vector<ArchiveRecord> relisted;
-        Expect(store.List("", "", relisted, error) && relisted.size() == 1
-            && SameRecord(relisted[0], original), "list unchanged by forged load");
-    }
-    Expect(GetFileAttributesW(original.path.c_str()) != INVALID_FILE_ATTRIBUTES,
-        "loads leave valid archive untouched");
-
-    const std::wstring foreignPath = root + L"foreign.hbs";
-    const std::wstring corruptPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 2);
-    const std::wstring crcPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 3);
-    const std::wstring wrongName = hbs::detail::MakeArchiveName(document.timestampUtcMs, Key('5', '6'), 1);
-    const std::wstring wrongPath = root + wrongName;
-    const uint8_t foreignText[] = { 'n', 'o', 'p', 'e' };
-    const std::vector<uint8_t> foreignBytes(foreignText, foreignText + sizeof(foreignText));
-    Expect(hbs::detail::WriteNewFile(foreignPath, foreignBytes, error), "write foreign hbs fixture");
-    const uint8_t corruptText[] = { 't', 'r', 'u', 'n', 'c', 'a', 't', 'e', 'd' };
-    const std::vector<uint8_t> corruptBytes(corruptText, corruptText + sizeof(corruptText));
-    Expect(hbs::detail::WriteNewFile(corruptPath, corruptBytes, error), "write truncated fixture");
-    std::vector<uint8_t> encoded;
-    Expect(hbs::detail::Encode(document, encoded, error), "encode wrong-name fixture");
-    Expect(hbs::detail::WriteNewFile(wrongPath, encoded, error), "write mismatched fingerprint fixture");
-    std::vector<uint8_t> badCrc = encoded;
-    if (!badCrc.empty()) badCrc.back() ^= 0xFF;
-    Expect(hbs::detail::WriteNewFile(crcPath, badCrc, error), "write bad CRC fixture");
-
-    Expect(store.List("", "", records, error), "bad archives do not abort scan");
-    Expect(records.size() == 1 && SameRecord(records[0], original), "bad and foreign-name archives hidden only");
-    Expect(error.find(L"foreign.hbs") != std::wstring::npos
-        && error.find(hbs::detail::FileNameOf(corruptPath)) != std::wstring::npos
-        && error.find(L"CRC") != std::wstring::npos
-        && error.find(wrongName) != std::wstring::npos
-        && error.find(L"filename does not match") != std::wstring::npos,
-        "scan reports bad bytes and mismatched fingerprint");
-    forged = original;
-    forged.path = wrongPath;
-    Expect(!store.Load(forged, loaded, error), "mismatched filename cannot be loaded");
-    forged.path = corruptPath;
-    Expect(!store.Load(forged, loaded, error), "truncated archive cannot be loaded");
-    forged.path = crcPath;
-    Expect(!store.Load(forged, loaded, error), "bad CRC archive cannot be loaded");
-
-    ArchiveDocument later = Doc(document.battleKey, document.targetKey, 5000, 2, 8, 10);
-    ArchiveRecord laterCommitted;
-    Expect(store.Save(later, error, &laterCommitted) && error.empty(),
-        "save succeeds without rescanning or deleting existing bad archives");
-    Expect(store.List("", "", records, error) && records.size() == 2,
-        "new archive stays visible alongside original");
-    Expect(CountHbs(root) == 6, "all valid and hidden archives remain on disk after save");
-    std::vector<uint8_t> readback;
-    Expect(hbs::detail::ReadWholeFile(foreignPath, readback, error) && readback == foreignBytes,
-        "foreign bytes unchanged");
-    Expect(hbs::detail::ReadWholeFile(corruptPath, readback, error) && readback == corruptBytes,
-        "truncated bytes unchanged");
-    Expect(hbs::detail::ReadWholeFile(crcPath, readback, error) && readback == badCrc,
-        "bad CRC bytes unchanged");
-    Expect(hbs::detail::ReadWholeFile(wrongPath, readback, error) && readback == encoded,
-        "mismatched filename bytes unchanged");
-    ExpectLoadedDocument(store, original, document);
-
-    // Local filename time is not an identity gate: the saving timezone may differ.
-    // Header UTC and CRC remain authoritative.
-    ArchiveDocument honest = Doc(document.battleKey, document.targetKey, 42, 1, 8, 9);
-    ArchiveRecord honestCommitted;
-    Expect(store.Save(honest, error, &honestCommitted), "save for rename");
-    const std::wstring renamed = root
-        + std::wstring(document.battleKey.begin(), document.battleKey.end())
-        + L"_19700102_080001.hbs";
-    if (MoveFileW(honestCommitted.path.c_str(), renamed.c_str())) {
-        std::vector<ArchiveRecord> renamedList;
-        Expect(store.List("", "", renamedList, error), "renamed scan continues");
-        bool found = false;
-        for (size_t i = 0; i < renamedList.size(); ++i)
-            if (renamedList[i].path == renamed) found = true;
-        Expect(found, "valid archive remains visible with different local filename time");
-        for (const ArchiveRecord& record : renamedList) {
-            if (record.path != renamed) continue;
-            ArchiveDocument renamedLoaded;
-            Expect(store.Load(record, renamedLoaded, error) && renamedLoaded.timestampUtcMs == honest.timestampUtcMs,
-                "load uses header UTC rather than current timezone interpretation");
+        // 5_2 名义合法但内容为垃圾字节：List 隐藏、Load 拒绝、字节留盘。
+        const uint8_t corruptText[] = {'t', 'r', 'u', 'n', 'c', 'a', 't', 'e', 'd'};
+        const std::vector<uint8_t> corruptBytes(corruptText, corruptText + sizeof(corruptText));
+        std::wstring writeError;
+        Expect(hbs::detail::WriteNewFile(manualDir + L"5_2" + ext, corruptBytes, writeError),
+            "write truncated fixture");
+        // 5_3：可解析但 battleKey 与指纹目录不符。
+        {
+            ArchiveDocument wrong = document;
+            wrong.battleKey = Key('5', '6');
+            std::vector<uint8_t> wrongBytes;
+            std::wstring wrongError;
+            if (format == ArchiveFormat::Binary)
+                hbs::detail::Encode(wrong, wrongBytes, wrongError);
+            else
+                hbs::detail::EncodeJsonDocument(wrong, wrongBytes, wrongError);
+            Expect(hbs::detail::WriteNewFile(manualDir + L"5_3" + ext, wrongBytes, writeError),
+                "write mismatched fingerprint fixture");
         }
-        std::wstring invalidDate = std::wstring(document.battleKey.begin(), document.battleKey.end())
-            + L"_19700230_080001.hbs";
-        Expect(!hbs::detail::ParseGeneratedName(invalidDate, honest.timestampUtcMs, honest.battleKey),
-            "invalid filename calendar date still rejected");
-    } else {
-        Expect(false, "rename for tamper test");
+        // 5_4：binary 用坏 CRC 尾字节；json 用帧内 turn 与文件名不符。
+        {
+            std::vector<uint8_t> badBytes;
+            if (format == ArchiveFormat::Binary) {
+                std::wstring crcError;
+                hbs::detail::Encode(document, badBytes, crcError);
+                if (!badBytes.empty()) badBytes.back() ^= 0xFF;
+            } else {
+                ArchiveDocument turnBad = document;
+                turnBad.turn = 9; // 帧内 turn 与文件名 5_4 不符
+                std::wstring turnError;
+                hbs::detail::EncodeJsonDocument(turnBad, badBytes, turnError);
+            }
+            Expect(hbs::detail::WriteNewFile(manualDir + L"5_4" + ext, badBytes, writeError),
+                "write bad payload fixture");
+        }
+        Expect(store.List("", "", records, error), "bad archives do not abort scan");
+        Expect(records.size() == 1 && SameRecord(records[0], original, format), "bad archives hidden only");
+        Expect(error.find(L"5_2") != std::wstring::npos
+            && error.find(L"5_3") != std::wstring::npos
+            && error.find(L"5_4") != std::wstring::npos
+            && error.find(L"filename does not match") != std::wstring::npos,
+            "scan reports every bad archive");
+        ArchiveRecord forged = original;
+        ArchiveDocument loaded;
+        forged.path = manualDir + L"5_2" + ext;
+        Expect(!store.Load(forged, loaded, error), "truncated archive cannot be loaded");
+        forged.path = manualDir + L"5_3" + ext;
+        Expect(!store.Load(forged, loaded, error), "mismatched fingerprint cannot be loaded");
+        forged.path = manualDir + L"5_4" + ext;
+        Expect(!store.Load(forged, loaded, error), "bad payload cannot be loaded");
+
+        // 编号分配只看可解析文件名：已有 5_1..5_4，下一次保存取 5_5。
+        ArchiveDocument later = Doc(battle, document.targetKey, 5000, 2, 8, 10, 5, format);
+        ArchiveRecord laterCommitted;
+        Expect(store.Save(later, error, &laterCommitted)
+            && hbs::detail::FileNameOf(laterCommitted.path) == L"5_5" + ext,
+            "next number uses max parsed number in turn");
+        Expect(store.List("", "", records, error) && records.size() == 2,
+            "new archive stays visible alongside original");
+        std::vector<uint8_t> readback;
+        Expect(hbs::detail::ReadWholeFile(manualDir + L"5_2" + ext, readback, error)
+            && readback == corruptBytes, "truncated bytes unchanged");
+    }
+    RemoveTree(root);
+}
+
+// ===== 已存在 tmp 的保留（双格式参数化）=====
+
+static void TestExistingTemporaryFileIsPreservedFor(ArchiveFormat format)
+{
+    printf("existing temporary file is preserved (%s)\n", TagOf(format));
+    const std::wstring root = TempRoot();
+    const std::wstring ext = ExOf(format);
+    ArchiveStore store(root, format);
+    std::wstring error;
+    const std::string battle = Key('a', '9');
+    ArchiveDocument document = Doc(battle, Key('b', '8'), 77, 1, 1, 5, 5, format);
+    ArchiveRecord committed;
+    Expect(store.Save(document, error, &committed), "first save succeeds");
+    const std::wstring finalPath = root + KeyWide(battle) + L"\\手动\\5_2" + ext;
+    const std::wstring tempPath = finalPath + L".tmp";
+    const uint8_t sentinel[] = {'k', 'e', 'e', 'p'};
+    const std::vector<uint8_t> sentinelBytes(sentinel, sentinel + sizeof(sentinel));
+    Expect(hbs::detail::WriteNewFile(tempPath, sentinelBytes, error), "write pre-existing tmp");
+    ArchiveDocument second = Doc(battle, document.targetKey, 78, 2, 1, 6, 5, format);
+    Expect(!store.Save(second, error, &committed), "save into existing tmp fails");
+    Expect(error.find(L"temporary archive already exists") != std::wstring::npos,
+        "tmp collision diagnostic");
+    Expect(committed.path.empty() && committed.sequence == 0 && committed.number == 0,
+        "tmp collision clears committed identity");
+    std::vector<uint8_t> readback;
+    Expect(hbs::detail::ReadWholeFile(tempPath, readback, error) && readback == sentinelBytes,
+        "pre-existing tmp preserved");
+    Expect(GetFileAttributesW(finalPath.c_str()) == INVALID_FILE_ATTRIBUTES,
+        "no final file appears after tmp collision");
+    RemoveTree(root);
+}
+
+// ===== JSON 帧文本断言（含无分隔符伪打包的结构断言）=====
+
+// 深度遍历：任何字符串值不得是多字段分隔符打包（"0,1,15" 一类伪打包）。
+static bool NoPackedStrings(const BattleJson& node, std::string* where)
+{
+    if (node.is_string()) {
+        const std::string text = node.get<std::string>();
+        int groups = 1;
+        bool digits = !text.empty();
+        for (size_t i = 0; i < text.size(); ++i) {
+            const char c = text[i];
+            if (c == ',' || c == ';' || c == '|') ++groups;
+            else if (c < '0' || c > '9') { digits = false; break; }
+        }
+        if (digits && groups >= 2) {
+            if (where) *where = text;
+            return false;
+        }
+        return true;
+    }
+    if (node.is_array()) {
+        for (const BattleJson& item : node)
+            if (!NoPackedStrings(item, where)) return false;
+        return true;
+    }
+    if (node.is_object()) {
+        for (BattleJson::const_iterator it = node.begin(); it != node.end(); ++it) {
+            if (!NoPackedStrings(it.value(), where)) return false;
+        }
+    }
+    return true;
+}
+
+static void TestJsonFrameText()
+{
+    printf("json frame text\n");
+    const std::wstring root = TempRoot();
+    ArchiveStore store(root, ArchiveFormat::Json);
+    const std::string battle = Key('c', '3');
+    const std::string target = Key('d', '4');
+    std::wstring error;
+    ArchiveRecord committed;
+    ArchiveDocument document = Doc(battle, target, 1760000000000ull, 3, 2, 0x42, 25, ArchiveFormat::Json);
+    document.json["sections"]["battle"]["landType"] = 12;
+    Expect(store.Save(document, error, &committed), "save json archive");
+    Expect(hbs::detail::FileNameOf(committed.path) == L"25_1.json", "json archive named by turn and number");
+
+    std::string text;
+    Expect(ReadText(committed.path, text) && !text.empty(), "read json text");
+    Expect(text.find("\n  ") != std::string::npos, "json is indented for humans");
+    const BattleJson frame = BattleJson::parse(text, nullptr, false, true);
+    Expect(!frame.is_discarded() && frame.is_object(), "saved file parses as json");
+    Expect(frame.contains("format") && frame["format"] == "H3BS", "format tag is H3BS");
+    Expect(frame.contains("version") && frame["version"] == 1, "json frame version starts at 1");
+    Expect(frame.contains("battleKey") && frame["battleKey"].get<std::string>() == battle, "battleKey roundtrip");
+    Expect(frame.contains("timestampUtcMs") && frame["timestampUtcMs"].get<uint64_t>() == 1760000000000ull,
+        "timestamp roundtrip");
+    Expect(frame.contains("turn") && frame["turn"].get<int>() == 25, "turn roundtrip");
+    Expect(frame.contains("sections") && frame["sections"].is_object()
+        && frame["sections"].contains("battle") && frame["sections"]["battle"].is_object(),
+        "sections carry battle object");
+    std::string packedWhere;
+    Expect(NoPackedStrings(frame, &packedWhere), "no separator-packed pseudo fields");
+    {
+        // 无分隔符打包断言的负样例：手工伪打包必须被检出。
+        const BattleJson bad = BattleJson::parse("{\"stack\": \"0,1,15,20\"}", nullptr, false, true);
+        std::string hit;
+        Expect(!NoPackedStrings(bad, &hit) && hit == "0,1,15,20", "packed string detector works");
     }
 
-    ArchiveStore restarted(root);
-    Expect(restarted.List("", "", records, error) && records.size() == 3 && CountHbs(root) == 7,
-        "restart hides only invalid archives without deleting them");
-    ExpectLoadedDocument(restarted, original, document);
-    ExpectLoadedDocument(restarted, laterCommitted, later);
+    // 帧级拒绝：坏 JSON、错版本、错 format、缺字段。
+    std::vector<uint8_t> bytes;
+    ArchiveDocument decoded;
+    {
+        const char broken[] = "{ \"format\": \"H3BS\", ";
+        bytes.assign(broken, broken + sizeof(broken) - 1);
+        Expect(!hbs::detail::DecodeJsonDocument(bytes.data(), bytes.size(), decoded, error)
+            && error.find(L"parse failed") != std::wstring::npos, "broken json rejected");
+    }
+    {
+        const std::string payload = "{\"format\":\"H3BS\",\"version\":2,\"battleKey\":\""
+            + std::string(64, 'a') + "\",\"timestampUtcMs\":1,\"turn\":1,\"sections\":{}}";
+        bytes.assign(payload.begin(), payload.end());
+        Expect(!hbs::detail::DecodeJsonDocument(bytes.data(), bytes.size(), decoded, error)
+            && error.find(L"unsupported archive version") != std::wstring::npos,
+            "json version 2 rejected");
+    }
+    {
+        const std::string payload = "{\"format\":\"JSON!\",\"version\":1,\"battleKey\":\""
+            + std::string(64, 'a') + "\",\"timestampUtcMs\":1,\"turn\":1,\"sections\":{}}";
+        bytes.assign(payload.begin(), payload.end());
+        Expect(!hbs::detail::DecodeJsonDocument(bytes.data(), bytes.size(), decoded, error)
+            && error.find(L"magic") != std::wstring::npos, "wrong format tag rejected");
+    }
+    {
+        const std::string payload = "{\"format\":\"H3BS\",\"version\":1,\"battleKey\":\""
+            + std::string(64, 'a') + "\",\"turn\":1,\"sections\":{}}";
+        bytes.assign(payload.begin(), payload.end());
+        Expect(!hbs::detail::DecodeJsonDocument(bytes.data(), bytes.size(), decoded, error)
+            && error.find(L"schema") != std::wstring::npos, "missing timestamp rejected");
+    }
+    {
+        // 文档 turn 与 json 负载 turn 不一致：Save 拒绝。
+        ArchiveDocument mismatch = Doc(battle, target, 5, 1, 1, 1, 26, ArchiveFormat::Json);
+        mismatch.json["turn"] = 27;
+        Expect(!hbs::detail::EncodeJsonDocument(mismatch, bytes, error)
+            && error.find(L"turn") != std::wstring::npos, "payload turn mismatch rejected at encode");
+    }
+    {
+        // json 负载缺 sections：Save 拒绝。
+        ArchiveDocument noSections = Doc(battle, target, 5, 1, 1, 1, 26, ArchiveFormat::Json);
+        noSections.json = BattleJson{{"turn", 26}};
+        Expect(!hbs::detail::EncodeJsonDocument(noSections, bytes, error), "missing sections rejected at encode");
+    }
+    {
+        // 文件名 turn 与帧内 turn 不符：List 隐藏、Load 拒绝（§2 冗余校验）。
+        const std::wstring dir = committed.path.substr(0, committed.path.find_last_of(L"\\/") + 1);
+        const std::wstring renamed = dir + L"26_1.json";
+        Expect(MoveFileW(committed.path.c_str(), renamed.c_str()), "rename to mismatched turn");
+        std::vector<ArchiveRecord> records;
+        std::wstring listError;
+        Expect(store.List(battle, "", records, listError) && records.empty(),
+            "renamed turn mismatch hidden from list");
+        ArchiveRecord renamedRecord;
+        renamedRecord.path = renamed;
+        renamedRecord.battleKey = battle;
+        ArchiveDocument loaded;
+        Expect(!store.Load(renamedRecord, loaded, error), "renamed turn mismatch refused on load");
+    }
     RemoveTree(root);
 }
 
-static void TestExistingTemporaryFileIsPreserved()
-{
-    printf("existing temporary file is preserved\n");
-    const std::wstring root = TempRoot();
-    ArchiveStore store(root);
-    const ArchiveDocument document = Doc(Key('7', '8'), Key('9', 'a'), 1000, 1, 1, 7);
-    const std::wstring finalPath = root + hbs::detail::MakeArchiveName(document.timestampUtcMs, document.battleKey, 1);
-    const std::wstring tempPath = finalPath + L".tmp";
-    const std::vector<uint8_t> sentinel(8, 0x5A);
-    std::wstring error;
-    Expect(hbs::detail::WriteNewFile(tempPath, sentinel, error), "create preexisting tmp fixture");
-    ArchiveRecord committed;
-    committed.path = L"stale";
-    committed.sequence = 42;
-    Expect(!store.Save(document, error, &committed), "save refuses preexisting temporary file");
-    Expect(committed.path.empty() && committed.sequence == 0, "tmp collision clears committed identity");
-    Expect(GetFileAttributesW(finalPath.c_str()) == INVALID_FILE_ATTRIBUTES && CountHbs(root) == 0,
-        "failed tmp creation never commits an archive");
-    std::vector<uint8_t> readback;
-    Expect(hbs::detail::ReadWholeFile(tempPath, readback, error) && readback == sentinel,
-        "failed save neither overwrites nor deletes preexisting tmp");
-    std::vector<ArchiveRecord> records;
-    Expect(store.List("", "", records, error) && records.empty(), "tmp file is not listed as an archive");
-    RemoveTree(root);
-}
-
-static uint64_t UtcStamp_(WORD year, WORD month, WORD day, WORD hour, WORD minute, WORD second)
-{
-    SYSTEMTIME utc = {};
-    utc.wYear = year; utc.wMonth = month; utc.wDay = day;
-    utc.wHour = hour; utc.wMinute = minute; utc.wSecond = second;
-    FILETIME ft = {};
-    Expect(SystemTimeToFileTime(&utc, &ft) != FALSE, "construct UTC fixture");
-    const uint64_t ticks = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-    return (ticks - 116444736000000000ull) / 10000ull;
-}
+// ===== 本地时间显示 =====
 
 static void TestLocalStamp()
 {
-    printf("local display time\n");
-    const uint64_t stamp = UtcStamp_(2026, 10, 7, 16, 15, 26);
+    printf("local stamp\n");
+    const uint64_t stamp = 1760000000000ull;
+    char text[64] = {};
     TIME_ZONE_INFORMATION zone = {};
-    zone.Bias = -480;
-    char text[32] = {};
     Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), &zone)
-        && strcmp(text, "20261008-001526") == 0, "UTC+8 display crosses midnight");
-    zone.Bias = 420;
-    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 1, 1, 2, 3, 4), text, sizeof(text), &zone)
-        && strcmp(text, "20251231-190304") == 0, "UTC-7 display crosses year boundary");
-    zone.Bias = -330;
-    Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), &zone)
-        && strcmp(text, "20261007-214526") == 0, "half-hour timezone is not rounded");
-    zone = {};
-    zone.Bias = 300;
-    zone.DaylightBias = -60;
-    zone.DaylightDate.wMonth = 3; zone.DaylightDate.wDay = 2;
-    zone.DaylightDate.wDayOfWeek = 0; zone.DaylightDate.wHour = 2;
-    zone.StandardDate.wMonth = 11; zone.StandardDate.wDay = 1;
-    zone.StandardDate.wDayOfWeek = 0; zone.StandardDate.wHour = 2;
-    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 7, 1, 12, 0, 0), text, sizeof(text), &zone)
-        && strcmp(text, "20260701-080000") == 0, "summer daylight saving offset");
-    Expect(hbs::detail::FormatLocalArchiveStamp(UtcStamp_(2026, 1, 1, 12, 0, 0), text, sizeof(text), &zone)
-        && strcmp(text, "20260101-070000") == 0, "winter standard offset");
-    SYSTEMTIME expected = {};
-    Expect(hbs::detail::UtcMsToLocalSystemTime(stamp, expected), "system local conversion");
-    char expectedText[32] = {};
-    _snprintf_s(expectedText, sizeof(expectedText), _TRUNCATE, "%04u%02u%02u-%02u%02u%02u",
-        (unsigned)expected.wYear, (unsigned)expected.wMonth, (unsigned)expected.wDay,
-        (unsigned)expected.wHour, (unsigned)expected.wMinute, (unsigned)expected.wSecond);
-    Expect(hbs::detail::FormatLocalArchiveStamp(stamp, text, sizeof(text), nullptr)
-        && strcmp(text, expectedText) == 0, "display uses host timezone when zone is null");
-    const std::string key = Key('a', 'b');
-    std::wstring name = hbs::detail::MakeArchiveName(stamp, key, 1);
-    std::wstring filenameTime = name.substr(65, 15);
-    filenameTime[8] = L'-';
-    Expect(filenameTime == std::wstring(text, text + strlen(text)), "filename and UI share local conversion");
-    uint32_t attempt = 0;
-    Expect(hbs::detail::ParseGeneratedName(name, stamp, key, &attempt) && attempt == 1,
-        "unsuffixed filename displays the original archive without a number");
-    zone = {};
-    zone.Bias = -480;
-    const uint32_t attempts[] = {1, 2, 9, 10, 99, 100, 999};
-    for (const uint32_t number : attempts) {
-        const std::wstring numbered = hbs::detail::MakeArchiveName(stamp, key, number);
-        Expect(hbs::detail::ParseGeneratedName(numbered, stamp, key, &attempt) && attempt == number,
-            "filename collision number parses without using document sequence");
-        char numberedText[32] = {};
-        char expectedNumbered[32] = {};
-        if (number == 1) strcpy_s(expectedNumbered, "20261008-001526");
-        else _snprintf_s(expectedNumbered, sizeof(expectedNumbered), _TRUNCATE,
-            "20261008-001526_%u", (unsigned)number);
-        Expect(hbs::detail::FormatNumberedArchiveStamp(stamp, attempt, numberedText, sizeof(numberedText), &zone)
-            && strcmp(numberedText, expectedNumbered) == 0, "UI timestamp preserves one/two/three-digit filename suffix");
-    }
-    attempt = 123;
-    Expect(!hbs::detail::ParseGeneratedName(hbs::detail::MakeArchiveName(stamp, key, 1000), stamp, key, &attempt)
-        && attempt == 0, "invalid suffix never leaks a valid display number");
-    char shortNumbered[18] = {};
-    Expect(!hbs::detail::FormatNumberedArchiveStamp(stamp, 99, shortNumbered, sizeof(shortNumbered), &zone)
-        && shortNumbered[17] == 0, "numbered label short buffer stays terminated");
-    Expect(!hbs::detail::FormatNumberedArchiveStamp(stamp, 0, text, sizeof(text), &zone)
-        && text[0] == 0, "invalid display number rejected");
+        && strlen(text) == 15 && text[8] == '-', "local stamp shape yyyymmdd-hhmmss");
+    char numbered[80] = {};
+    Expect(hbs::detail::FormatNumberedArchiveStamp(stamp, 1, numbered, sizeof(numbered), &zone)
+        && strncmp(numbered, text, 15) == 0 && strcmp(numbered + 15, "_1") == 0,
+        "numbered stamp appends natural-width number");
+    Expect(hbs::detail::FormatNumberedArchiveStamp(stamp, 1000, numbered, sizeof(numbered), &zone)
+        && strcmp(numbered + 15, "_1000") == 0, "number 1000 has no historical 999 cap");
+    const unsigned long long huge = 18446744073709551615ull;
+    Expect(hbs::detail::FormatNumberedArchiveStamp(stamp, huge, numbered, sizeof(numbered), &zone)
+        && strcmp(numbered + 15, "_18446744073709551615") == 0, "number has no upper bound");
+    Expect(!hbs::detail::FormatNumberedArchiveStamp(stamp, 0, numbered, sizeof(numbered), &zone)
+        && numbered[0] == 0, "number zero rejected");
     char tinyBuffer[4] = {};
     Expect(!hbs::detail::FormatLocalArchiveStamp(stamp, tinyBuffer, sizeof(tinyBuffer), nullptr)
         && tinyBuffer[3] == 0, "short display buffer is terminated");
@@ -610,12 +763,16 @@ static void TestLocalStamp()
 
 int main()
 {
-    TestLocalStamp();
     TestCodec();
     TestRejects();
-    TestStoreKeepsAllArchives();
-    TestHiddenArchivesStayOnDisk();
-    TestExistingTemporaryFileIsPreserved();
+    TestLayoutFor(ArchiveFormat::Binary);
+    TestLayoutFor(ArchiveFormat::Json);
+    TestHiddenArchivesStayOnDiskFor(ArchiveFormat::Binary);
+    TestHiddenArchivesStayOnDiskFor(ArchiveFormat::Json);
+    TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Binary);
+    TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Json);
+    TestJsonFrameText();
+    TestLocalStamp();
     printf(g_failed ? "FAILED %d\n" : "ALL PASSED\n", g_failed);
     return g_failed ? 1 : 0;
 }

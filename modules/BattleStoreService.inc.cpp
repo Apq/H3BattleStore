@@ -3,19 +3,23 @@
 // 热键策略、玩家文案目录与保存窗口门禁。仅游戏主线程调用；不绘制、不吞输入。
 // 本步为符号原样搬移（BattleUi/Entry → 此处），行为零变化。
 
-// 列表条目：时间戳、同秒撞名后缀与按需读取的档案路径。
+// 列表条目：时间戳、同回合编号与按需读取的档案路径。
 struct StoreEntry
 {
     uint64_t timestampUtcMs;
     uint32_t sequence;
-    uint32_t filenameAttempt = 1;
+    int32_t turn = 0;
+    uint64_t number = 0; // 同回合编号（List 条目 ≥1；"已存档"戳占位 0=仅时间）
     std::wstring path;
 };
 
-// 功能状态：热键值、当前场次指纹与存档列表。界面实现只读，写路径在服务函数内。
+// 功能状态：热键值、存档格式、当前场次指纹与存档列表。界面实现只读，写路径在服务函数内。
 static struct
 {
     char saveKey = 'G';
+    // 2026-10-11 用户裁定：user.ini [Store] saveFormat=binary|json（默认
+    // binary）。存档/列举/读档三处同源取此快照；切格式=换后缀，不迁移。
+    bool saveJson = false;
     std::string battleKey;
     std::vector<StoreEntry> entries;
 } g_store;
@@ -48,6 +52,19 @@ static char StoreLoadHotkey_()
     IniReadUtf8(g_user_ini_path, "Hotkeys", "SaveKey", "G", keyText, sizeof(keyText));
     if (StoreKeyIsFree_(keyText[0])) return keyText[0];
     return 'G';
+}
+
+// 存档格式三处同源判定的单一读取点：仅识别 binary|json，其余取值一律 binary。
+static bool StoreLoadSaveFormat_()
+{
+    char formatText[16] = {};
+    IniReadUtf8(g_user_ini_path, "Store", "saveFormat", "binary", formatText, sizeof(formatText));
+    return _stricmp(formatText, "json") == 0;
+}
+
+static hbs::ArchiveFormat StoreArchiveFormat_()
+{
+    return g_store.saveJson ? hbs::ArchiveFormat::Json : hbs::ArchiveFormat::Binary;
 }
 
 static void StoreSaveHotkey_()
@@ -104,8 +121,12 @@ static char StoreKeyLetter_(int virtualKey, bool windowsVk)
 
 static void StoreFormatStamp_(const StoreEntry& entry, char* out, size_t cap)
 {
-    if (!hbs::detail::FormatNumberedArchiveStamp(entry.timestampUtcMs, entry.filenameAttempt, out, cap, nullptr)
-        && out && cap > 0)
+    bool ok = false;
+    if (entry.number == 0)
+        ok = hbs::detail::FormatLocalArchiveStamp(entry.timestampUtcMs, out, cap, nullptr);
+    else
+        ok = hbs::detail::FormatNumberedArchiveStamp(entry.timestampUtcMs, entry.number, out, cap, nullptr);
+    if (!ok && out && cap > 0)
         _snprintf_s(out, cap, _TRUNCATE, "%s", "----");
 }
 
@@ -126,12 +147,13 @@ static bool StoreReloadList_(const H3CombatManager* mgr)
     std::string error;
     if (!BattleFingerprint_(mgr, &battleKey, &error)) { StoreListFailure_("fingerprint", error); return false; }
     g_store.battleKey = battleKey;
-    hbs::ArchiveStore store(ArchiveRoot_());
+    hbs::ArchiveStore store(ArchiveRoot_(), StoreArchiveFormat_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
     if (!store.List(battleKey, "", records, storeError)) { StoreListFailure_("scan", DiagUtf8_(storeError)); return false; }
     if (!storeError.empty()) LogWarn("[List op=%ld] scan warning: %s", g_diag.id, DiagUtf8_(storeError).c_str());
-    LogDebug("[List op=%ld] battle=%s records=%u", g_diag.id, battleKey.c_str(), (unsigned)records.size());
+    LogDebug("[List op=%ld] battle=%s format=%s records=%u", g_diag.id, battleKey.c_str(),
+        g_store.saveJson ? "json" : "binary", (unsigned)records.size());
     if (g_storeListFailure.seen) {
         LogInfo("[List] recovered suppressed=%u", g_storeListFailure.suppressed);
         g_storeListFailure = {};
@@ -141,9 +163,9 @@ static bool StoreReloadList_(const H3CombatManager* mgr)
         StoreEntry entry;
         entry.timestampUtcMs = records[i].timestampUtcMs;
         entry.sequence = records[i].sequence;
+        entry.turn = records[i].turn;
+        entry.number = records[i].number;
         entry.path = records[i].path;
-        hbs::detail::ParseGeneratedName(hbs::detail::FileNameOf(entry.path),
-            entry.timestampUtcMs, records[i].battleKey, &entry.filenameAttempt);
         g_store.entries.push_back(entry);
     }
     return true;
@@ -290,6 +312,12 @@ static std::string StorePlayerTextZh_(const std::string& reason)
         {"提交随机数状态时发生异常，已停止战斗", "提交随机数状态时发生异常，已停止战斗。"},
         {"archive CRC mismatch", "存档文件校验失败，文件已损坏或被修改。"},
         {"section CRC mismatch", "存档数据段校验失败，文件已损坏或被修改。"},
+        {"archive JSON parse failed", "存档文件校验失败，文件已损坏或被修改。"},
+        {"archive JSON schema invalid", "存档文件校验失败，文件已损坏或被修改。"},
+        {"json document payload is missing sections", "存档数据不完整，无法读取。"},
+        {"json turn does not match document turn", "存档数据不完整，无法读取。"},
+        {"battle turn is negative", "无法创建战斗快照，请重新尝试。"},
+        {"archive filename collision", "存档命名冲突，请重新尝试。"},
         {"unsupported archive version", "存档文件版本不兼容，请重新存档。"},
         {"bad archive magic", "所选文件不是有效的战场存档。"},
         {"archive shorter than minimum frame", "存档文件不完整，无法读取。"},
@@ -495,7 +523,7 @@ static StoreRestoreResult_ StoreExecuteRestore_(H3CombatManager* mgr, const Stor
         *rawReason = "battle fingerprint changed";
         return StoreRestoreFail_("rejected", rawReason);
     }
-    hbs::ArchiveStore store(ArchiveRoot_());
+    hbs::ArchiveStore store(ArchiveRoot_(), StoreArchiveFormat_());
     std::vector<hbs::ArchiveRecord> records;
     std::wstring storeError;
     SetLastError(ERROR_SUCCESS);
@@ -554,7 +582,12 @@ static StoreRestoreResult_ StoreExecuteRestore_(H3CombatManager* mgr, const Stor
     }
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
     CodecCapture& capture = *captureStorage;
-    if (!CodecDecode(document.sections, &capture, &error)) {
+    // 双格式同源分流（2026-10-11 用户裁定）：JSON 档按 JSON 后端解码，
+    // 二进制档照旧走段解码；解码后的防线（结构界、RestorePolicy_）两路一致。
+    const bool decoded = g_store.saveJson
+        ? CodecDecodeJson(document.json, &capture, &error)
+        : CodecDecode(document.sections, &capture, &error);
+    if (!decoded) {
         *rawReason = error;
         return StoreRestoreFail_("rejected", rawReason);
     }

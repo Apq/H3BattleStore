@@ -321,11 +321,20 @@ static bool TryCaptureCombat_()
     LogDebug("[Archive op=%ld] battle=%s target=placeholder-zero", g_diag.id, document.battleKey.c_str());
     DiagStage_("save.encode");
     CodecInvalidateHover_(&capture);
-    if (!CodecEncode(capture, &document.sections, &error)) {
-        DiagEnd_("failed", error.c_str());
-        return false;
+    // 双格式分流（2026-10-11 用户裁定）：JSON 档经 CodecEncodeJson 逐字段
+    // 原子展开；二进制档照旧走段编码。段数据模型共用，turn 供目录内命名。
+    if (g_store.saveJson) {
+        if (!CodecEncodeJson(capture, &document.json, &error)) {
+            DiagEnd_("failed", error.c_str());
+            return false;
+        }
+    } else {
+        if (!CodecEncode(capture, &document.sections, &error)) {
+            DiagEnd_("failed", error.c_str());
+            return false;
+        }
+        DiagSections_(document.sections, "encoded");
     }
-    DiagSections_(document.sections, "encoded");
     document.targetKey.assign(64, '0');
     FILETIME now = {};
     GetSystemTimeAsFileTime(&now);
@@ -334,45 +343,62 @@ static bool TryCaptureCombat_()
     value.HighPart = now.dwHighDateTime;
     document.timestampUtcMs = (value.QuadPart - 116444736000000000ull) / 10000ull;
     document.sequence = 0;
+    document.turn = capture.turn;
 
-    hbs::ArchiveStore store(ArchiveRoot_());
+    hbs::ArchiveStore store(ArchiveRoot_(), g_store.saveJson ? hbs::ArchiveFormat::Json : hbs::ArchiveFormat::Binary);
     std::wstring storeError;
     hbs::ArchiveRecord committed;
     DiagStage_("save.write");
-    LogDebug("[Archive op=%ld] root=%s timestamp=%llu", g_diag.id,
-        DiagUtf8_(ArchiveRoot_()).c_str(), document.timestampUtcMs);
+    LogDebug("[Archive op=%ld] root=%s format=%s timestamp=%llu", g_diag.id,
+        DiagUtf8_(ArchiveRoot_()).c_str(), g_store.saveJson ? "json" : "binary",
+        document.timestampUtcMs);
     if (!store.Save(document, storeError, &committed)) {
         DiagEnd_("failed", DiagUtf8_(storeError).c_str());
         return false;
     }
-    LogInfo("[Archive op=%ld] persisted=1 path=%s sequence=%u", g_diag.id,
-        DiagUtf8_(committed.path).c_str(), committed.sequence);
+    LogInfo("[Archive op=%ld] persisted=1 path=%s turn=%d number=%llu sequence=%u", g_diag.id,
+        DiagUtf8_(committed.path).c_str(), committed.turn,
+        static_cast<unsigned long long>(committed.number), committed.sequence);
     DiagStage_("save.readback");
     hbs::ArchiveDocument readback;
     if (!store.Load(committed, readback, storeError)) {
         DiagEnd_("persisted-unverified", DiagUtf8_(storeError).c_str());
         return false;
     }
-    bool equal = readback.sections.size() == document.sections.size();
-    for (size_t i = 0; i < document.sections.size(); ++i) {
-        const hbs::ArchiveSection* actual = FindSection_(readback.sections, document.sections[i].id);
-        equal = equal && actual && CodecSectionEqual_(document.sections[i], *actual, nullptr);
+    // 回读比较按格式分流：二进制比段字节与 CRC；JSON 比解析后的文档树
+    // （dump/parse 对整数、双精度与字符串均精确往返）。
+    bool equal = true;
+    if (g_store.saveJson) {
+        equal = readback.json == document.json;
+    } else {
+        equal = readback.sections.size() == document.sections.size();
+        for (size_t i = 0; i < document.sections.size(); ++i) {
+            const hbs::ArchiveSection* actual = FindSection_(readback.sections, document.sections[i].id);
+            equal = equal && actual && CodecSectionEqual_(document.sections[i], *actual, nullptr);
+        }
     }
-    WriteLogLv(equal ? LOG_INFO : LOG_ERROR, "[Archive op=%ld] readback_crc=ok payload_equal=%d", g_diag.id, equal ? 1 : 0);
+    WriteLogLv(equal ? LOG_INFO : LOG_ERROR, "[Archive op=%ld] readback_%s=ok payload_equal=%d", g_diag.id,
+        g_store.saveJson ? "tree" : "crc", equal ? 1 : 0);
     equal = equal && readback.battleKey == committed.battleKey
         && readback.targetKey == committed.targetKey
         && readback.timestampUtcMs == committed.timestampUtcMs
-        && readback.sequence == committed.sequence;
+        && readback.sequence == committed.sequence
+        && readback.turn == committed.turn;
     if (!equal) { DiagEnd_("persisted-unverified", "readback payload mismatch"); return false; }
     std::unique_ptr<CodecCapture> decodedStorage(new CodecCapture{});
     CodecCapture& decoded = *decodedStorage;
-    if (!CodecDecode(readback.sections, &decoded, &error)) {
-        DiagEnd_("persisted-unverified", error.c_str()); return false;
+    {
+        const bool decodedOk = g_store.saveJson
+            ? CodecDecodeJson(readback.json, &decoded, &error)
+            : CodecDecode(readback.sections, &decoded, &error);
+        if (!decodedOk) {
+            DiagEnd_("persisted-unverified", error.c_str()); return false;
+        }
     }
     DiagSummary_(decoded, "readback");
     g_uiPort->MarkSaved(document.timestampUtcMs);
     // 保存成功后刷新常驻列表，第一项就是刚存的档。
-    //（列表按时间戳倒序，最新必在首位）；提示可有可无，列表不能少。
+    //（列表按 回合/编号 两段数值倒序，刚存的档编号最大必在首位）。
 
     g_uiPort->ReloadEntries(mgr);
     DiagEnd_("ok", "persisted and readback verified; runtime restore not verified");
@@ -834,6 +860,10 @@ static void StartPlugin()
         return;
     }
     g_store.saveKey = StoreLoadHotkey_();
+    // 存档格式启动时读取快照（user.ini [Store] saveFormat=binary|json）；
+    // 存档/列举/读档三处同源取 g_store.saveJson，玩家改配置需重启生效。
+    g_store.saveJson = StoreLoadSaveFormat_();
+    LogInfo("[Config] saveFormat=%s", g_store.saveJson ? "json" : "binary");
     g_uiPort->Initialize();
     _PI->WriteHiHook(0x462600, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStart_);
     _PI->WriteHiHook(0x462E40, SPLICE_, EXTENDED_, THISCALL_, Hook_BattleStop_);
