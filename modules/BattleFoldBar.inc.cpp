@@ -1,5 +1,8 @@
 // ========== BattleFoldBar.inc.cpp ==========
-// 第二套界面：折叠式悬浮框（默认实现；H3BS_UI_NATIVE=1 切回旧的两行常显条）。
+// 战场内界面：折叠式悬浮框（默认选中）。另一套"战场外左上角固定条"实现在
+// BattleUi.inc.cpp 的 HdNativeUi；2026-10-14 用户裁定后两套界面同在一个 DLL
+// 里，由玩家配置 [Ui] OutsideBattlefield（面板第一行的「战场外」复选框）选择，
+// 不再用编译宏切换。
 // 用户裁定（2026-10-11）：锚点移到战场内右上角；收起时只显示状态灯，
 // 光标进入灯上自动向左向下展开完整悬浮框（外观与旧界面一致：两行控制条 +
 // 普通存档列表，非下拉框），光标移出展开区域自动收起。
@@ -41,6 +44,14 @@ static bool g_foldDrawing = false;
 static bool g_foldCursorTaken = false;
 static int g_foldCursorType = 0;
 static int g_foldCursorFrame = 0;
+// 灯区 save-under（2026-10-14）：切到战场外固定条界面时灯必须彻底消失，而灯
+// 画在战场内（screenPcx16 在战内不是干净源，见 BattleUi 的 save-under 注释），
+// 故与面板同法自存一份灯区像素。灯矩形变化（首次进入折叠界面 / 对话框或分辨率
+// 变化）时先擦旧灯、再按新矩形捕获干净场景。
+static UiUnderSlot_ g_lampUnder;
+static int g_lampPaintedX = -1;
+static int g_lampPaintedY = -1;
+static int g_lampPaintedW = 0;
 
 // 灯心：与收起态小图中心同一坐标，展开态也不变（灯独立于面板绘制）。
 static int FoldLampCenterX_() { return g_foldLampX; }
@@ -117,6 +128,35 @@ static void FoldRestoreCursor_()
     g_foldCursorTaken = false;
 }
 
+// 作废灯区快照（不写回）：换场与读档后战场被整体重绘，旧快照写回同一矩形就是
+// 彩条（与面板快照同一条规则）。
+static void FoldLampUnderInvalidate_()
+{
+    UiUnderReleaseSlot_(g_lampUnder);
+    g_lampPaintedX = -1;
+    g_lampPaintedY = -1;
+    g_lampPaintedW = 0;
+}
+
+// 擦除灯（灯矩形变化 / 切到战场外固定条界面）：把灯区像素原样写回并作废快照。
+static void FoldLampErase_()
+{
+    UiUnderRestoreSlot_(g_lampUnder);
+    g_lampPaintedX = -1;
+    g_lampPaintedY = -1;
+    g_lampPaintedW = 0;
+}
+
+// 离开折叠界面（切到战场外左上角固定条）：面板快照写回 + 灯擦除 + 展开态与
+// 光标接管复位。两套界面的像素恢复源不同，必须各清各的，否则会留下残影。
+static void UiFoldLeaveUi_()
+{
+    g_foldExpanded = false;
+    if (UiUnderBufValid_()) UiUnderRestore_();
+    FoldRestoreCursor_();
+    FoldLampErase_();
+}
+
 // 强制收起（读档成功后调用）。读档会 kRefreshField 重绘整个战场，面板
 // 遮挡区的 backbuffer 内容已换成读档后的场景，此时若继续展开，本插件自身
 // 仍留在 backbuffer 上的面板像素会被拍进新快照，之后收起写回 = 彩条
@@ -188,6 +228,16 @@ public:
         if (!wnd || !wnd->screenPcx16) return;
         const int lampX = FoldLampCenterX_() - kFoldLampRadius;
         const int lampY = FoldLampCenterY_() - kFoldLampRadius;
+        // 灯矩形变化即内容切换帧：先擦旧位置的灯，再按新矩形捕获干净场景
+        // （capture 在 blt 之前，拍到的是战场而不是灯自己）。
+        if (lampX != g_lampPaintedX || lampY != g_lampPaintedY || lampW != g_lampPaintedW) {
+            FoldLampErase_();
+            if (!UiUnderCaptureSlot_(g_lampUnder, lampX, lampY, lampW, lampW))
+                LogWarn("[Ui] fold lamp under-capture failed x=%d y=%d w=%d", lampX, lampY, lampW);
+            g_lampPaintedX = lampX;
+            g_lampPaintedY = lampY;
+            g_lampPaintedW = lampW;
+        }
         if (UiBltPcx16Region_(g_foldLamp, 0, 0, lampW, lampW, lampX, lampY)) {
             g_foldDrawing = true;
             wnd->H3Redraw(lampX, lampY, lampW, lampW);
@@ -243,6 +293,7 @@ public:
         if (!g_foldExpanded) return;
         const H3POINT cursor = H3POINT::GetCursorPosition();
         g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
+        g_ui.outsideHover = UiHitOutsideCheck_(cursor.x, cursor.y) ? 0 : -1;
     }
     void FrameClick() override
     {
@@ -275,16 +326,23 @@ public:
     // 收起——否则鼠标刚移出灯就被按回未展开态，再也展不开（06:0x 回归）。
     void ProcessRestore(H3CombatManager* mgr, int result) override
     {
-        if (UiProcessRestore_(mgr, result)) FoldForceCollapse_();
+        if (UiProcessRestore_(mgr, result)) {
+            FoldForceCollapse_();
+            // 读档会 kRefreshField 整体重绘战场：灯区快照与面板快照一样成了
+            // 过期源，必须作废，下一次绘制按新场景重新捕获。
+            FoldLampUnderInvalidate_();
+        }
     }
     void CancelRebind(const char* reason) override { UiCancelRebind_(reason); }
     void MarkSaved(uint64_t timestampUtcMs) override { UiMarkSaved_(timestampUtcMs); }
     void MarkNotice(const char* utf8Text) override { UiMarkNotice_(utf8Text); }
     void OnBattleReset() override
     {
-        // 换场：展开态与光标接管一起复位，避免上一场的光标类型带到下一场。
+        // 换场：展开态与光标接管一起复位，避免上一场的光标类型带到下一场；
+        // 灯区快照只属于上一场，作废（新战场的第一帧会重新捕获）。
         g_foldExpanded = false;
         FoldRestoreCursor_();
+        FoldLampUnderInvalidate_();
         UiResetForBattle_();
     }
 
@@ -316,5 +374,60 @@ public:
 };
 
 static FoldableBarUi g_foldBarUi;
-// 钩子层唯一界面入口；编译期默认即折叠式界面。
-static IBattleStoreUi* const g_uiPort = &g_foldBarUi;
+static IBattleStoreUi* UiFoldPort_() { return &g_foldBarUi; }
+
+// ---- 运行期分发器（2026-10-14 用户裁定：两套界面同 DLL，配置选界面） ----
+// Entry 只认 g_uiPort 一个入口（界面契约不变），本类把每次调用转给当前选中的
+// 界面。复选框点击在帧内切换选择后，本帧余下的调用（含同帧 Draw）即走新界面。
+class UiPortDispatch_ final : public IBattleStoreUi {
+    static IBattleStoreUi* Active_() { return g_uiOutsideBar ? UiNativePort_() : UiFoldPort_(); }
+public:
+    void Initialize() override
+    {
+        // 启动时按 [Ui] OutsideBattlefield 选界面（0=战场内折叠灯，默认；
+        // 1=战场外左上角固定条）；此后由「战场外」复选框即时切换并写回同一键值。
+        const bool outside = IniReadIntUtf8Layered("Ui", "OutsideBattlefield", 0) != 0;
+        UiSelectInterface_(outside);
+        Active_()->Initialize();
+        LogInfo("[Ui] interface=%s OutsideBattlefield=%d",
+            outside ? "outside-battlefield(top-left)" : "in-battle(fold lamp)",
+            outside ? 1 : 0);
+    }
+    void Draw(H3CombatManager* mgr) override { Active_()->Draw(mgr); }
+    void PollHover() override { Active_()->PollHover(); }
+    void FrameClick() override { Active_()->FrameClick(); }
+    void PollRebindKey() override { Active_()->PollRebindKey(); }
+    bool ReloadEntries(const H3CombatManager* mgr) override { return Active_()->ReloadEntries(mgr); }
+    bool HitBar(H3Msg* msg, bool fullBlock) override { return Active_()->HitBar(msg, fullBlock); }
+    void HandleMouse(H3Msg* msg) override { Active_()->HandleMouse(msg); }
+    void MaintainRestore(H3CombatManager* mgr) override { Active_()->MaintainRestore(mgr); }
+    void ProcessRestore(H3CombatManager* mgr, int result) override { Active_()->ProcessRestore(mgr, result); }
+    void CancelRebind(const char* reason) override { Active_()->CancelRebind(reason); }
+    void MarkSaved(uint64_t timestampUtcMs) override { Active_()->MarkSaved(timestampUtcMs); }
+    void MarkNotice(const char* utf8Text) override { Active_()->MarkNotice(utf8Text); }
+    void OnBattleReset() override { Active_()->OnBattleReset(); }
+    bool OnSystemKey(const UiKeyEvent_& e) override { return Active_()->OnSystemKey(e); }
+    bool OnSystemMouse(const UiMouseEvent_& e, bool combatOpen) override
+    {
+        return Active_()->OnSystemMouse(e, combatOpen);
+    }
+    void OnGameKeyBefore(const H3Msg* msg, int level) override { Active_()->OnGameKeyBefore(msg, level); }
+    bool OnGameMouse(H3Msg* msg) override { return Active_()->OnGameMouse(msg); }
+    void OnGameKeyAfter(H3CombatManager* mgr, const H3Msg* msg, int result,
+        unsigned now, bool waitBlocked) override
+    {
+        Active_()->OnGameKeyAfter(mgr, msg, result, now, waitBlocked);
+    }
+    void OnFrameKeyPoll(H3CombatManager* mgr, unsigned now, bool waitBlocked) override
+    {
+        Active_()->OnFrameKeyPoll(mgr, now, waitBlocked);
+    }
+    void OnListReloaded() override { Active_()->OnListReloaded(); }
+    void OnFaultCleanup() override { Active_()->OnFaultCleanup(); }
+    bool IsRebindWaiting() const override { return Active_()->IsRebindWaiting(); }
+    char RebindLatchKey() const override { return Active_()->RebindLatchKey(); }
+};
+
+static UiPortDispatch_ g_uiPortDispatch;
+// 钩子层唯一界面入口；Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
+static IBattleStoreUi* const g_uiPort = &g_uiPortDispatch;

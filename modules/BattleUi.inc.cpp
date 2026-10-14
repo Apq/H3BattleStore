@@ -31,19 +31,28 @@ static int UiRowHeight_() { return g_uiLayout.rowHeight; }
 static const int kUiListVisibleRows = hbs_ui::kUiListVisibleRows;
 static const int kUiDefaultX = 16;
 static const int kUiDefaultY = 4;
-// 悬浮条锚点（左上角游戏坐标）。HdNativeUi 恒 (8,8)（2026-10-05 定稿固定
-// 不可拖动）；第二套折叠式界面经 Initialize() 改为战场内右上角。
-static int g_uiBarAnchorX = 8;
-static int g_uiBarAnchorY = 8;
+// 界面选择（2026-10-14 用户裁定）：两套界面同在一个 DLL 里，由玩家配置
+// [Ui] OutsideBattlefield 决定用哪套——面板第一行的「战场外」复选框即时改写
+// 该键值；不再用编译宏切。false=战场内右上角折叠灯（默认，勾选前的"当前这套"），
+// true=战场外左上角固定悬浮条（旧界面，左上角那套）。
+static bool g_uiOutsideBar = false;
+// 战场外固定条锚点（2026-10-05 定稿：不可拖动，恒左上角）。
+static const int kUiOutsideBarX = 8;
+static const int kUiOutsideBarY = 8;
+// 悬浮条锚点（左上角游戏坐标）。战场外界面恒 (8,8)；战场内折叠界面由
+// FoldSyncAnchor_ 每帧改为战斗对话框内右上角。
+static int g_uiBarAnchorX = kUiOutsideBarX;
+static int g_uiBarAnchorY = kUiOutsideBarY;
 // 折叠版把状态灯移出面板：面板右缘与灯左缘之间留间隙（灯不被面板压住），
 // 灯由 BattleFoldBar 在面板绘制之后单独画在原位，收起/展开同一位置。
 static bool g_uiFoldLayout = false;
+// 第一行（日志等级项 +「战场外」复选框 + 打包日志）布局：项宽按字体实测，
+// 每帧绘制前刷新；命中判定与绘制共用同一份（见 UiUpdateLogRow_）。
+static hbs_ui::LogRow g_logRow = {};
+static int g_logRowFontHeight = -1;
+// 等级项最小宽度：过窄会让点击热区难以命中（正常字体下实测约 48px）。
+static const int kUiLogRowMinLevelWidth = 40;
 // HB_bg.pcx is one 480x72 image: log controls, status/hotkey, archive titles.
-static const int kUiLogPackX = 392;
-static const int kUiLogPackWidth = 84;
-static const int kUiLogLevelCellWidth = 76;
-static const int kUiLogLevelPerRow = 5;
-static const int kUiLogLevelRows = 5;
 static const int kUiBgHeight = 72; // Three 24px source bands, adapted to runtime font heights.
 
 
@@ -71,8 +80,16 @@ static struct
     int autoHoverRow = -1;
     // 日志等级常驻单选列表：值即 g_log_level；点击行选中并写 user.ini。
     int logLevelHover = -1;
+    // 「战场外」复选框悬停（0/-1）：勾选即切到战场外固定条界面并写 user.ini。
+    int outsideHover = -1;
     int listR = 40, listG = 30, listB = 20;   // 下拉底色（背景图主色）
 } g_ui;
+
+// 两套界面实例的访问器与折叠层清场函数：TU 内后置定义（BattleFoldBar.inc.cpp
+// 必须排在 BattleUi.inc.cpp 之后），此处只需声明即可被分发器与切换逻辑引用。
+static IBattleStoreUi* UiNativePort_();
+static IBattleStoreUi* UiFoldPort_();
+static void UiFoldLeaveUi_();
 
 // 输入管道（原 Entry，第3步随键盘/鼠标状态机迁入）：钩子事件写入、帧泵经
 // 接口消费；跨线程可见用 Interlocked，语义与原实现逐行一致。
@@ -239,6 +256,9 @@ static void UiSaveBarPosition_()
 }
 
 // 界面实现必须自己解码 [Ui] BarX/BarY；服务层只负责 [Hotkeys] SaveKey。
+// 2026-10-14：两套界面的位置都由界面自己决定（战场外固定左上角、战场内由战斗
+// 对话框反推），BarX/BarY 自 2026-10-05 起就不再影响绘制，这两个函数保留仅作
+// 历史键值的读写工具，不再被任何绘制路径调用。
 static void UiLoadBarPosition_()
 {
     g_ui.x = IniReadIntUtf8(g_user_ini_path, "Ui", "BarX", kUiDefaultX);
@@ -515,24 +535,34 @@ static bool UiBltPcx16Region_(H3LoadedPcx16* src, int srcX, int srcY,
 // 注意：save-under 只捕获内容切换帧（rectChanged）——capture 位于 blt
 // 之前，连续展开帧的 backbuffer 已被上一帧的面板像素填满，拍到的是面板
 // 自己，写回即一整块彩条（2026-10-11 05:2x 玩家实测）。
-static BYTE* g_underBuf = nullptr;
-static int g_underW = 0;
-static int g_underH = 0;
-static int g_underX = 0;
-static int g_underY = 0;
-static int g_underBpp = 0;      // 记录快照时的位深，位深变化（HD 切换）直接作废
-static int g_underPitch = 0;
+// 2026-10-14 起两份快照共用同一实现：面板覆盖区（折叠界面展开时遮挡的战场）
+// 与状态灯区（切到战场外固定条时擦掉灯，见 BattleFoldBar 的 DrawFoldLamp_）。
+struct UiUnderSlot_
+{
+    BYTE* buf = nullptr;
+    int w = 0;
+    int h = 0;
+    int x = 0;
+    int y = 0;
+    int bpp = 0;     // 记录快照时的位深，位深变化（HD 切换）直接作废
+    int pitch = 0;
+    bool Valid() const { return buf && w > 0 && h > 0; }
+};
+static UiUnderSlot_ g_underPanel;
+static UiUnderSlot_ g_underLamp;
 
 // 释放快照（换场 / 位深变化 / 已写回后）。
-static void UiUnderRelease_()
+static void UiUnderReleaseSlot_(UiUnderSlot_& slot)
 {
-    if (g_underBuf) free(g_underBuf);
-    g_underBuf = nullptr;
-    g_underW = g_underH = g_underX = g_underY = g_underBpp = g_underPitch = 0;
+    if (slot.buf) free(slot.buf);
+    slot = UiUnderSlot_();
 }
 
+// 兼容既有调用名：以下三个作用于面板槽。
+static void UiUnderRelease_() { UiUnderReleaseSlot_(g_underPanel); }
+
 // 供 BattleFoldBar 收起分支查询是否存在可用快照（同 TU 后置定义可见）。
-static bool UiUnderBufValid_() { return g_underBuf && g_underW > 0 && g_underH > 0; }
+static bool UiUnderBufValid_() { return g_underPanel.Valid(); }
 
 // 作废快照（不写回）。读档会 kRefreshField 重绘战场，backbuffer 已换成
 // 读档后的场景；旧快照是读档前的战场像素，写回新战场就是彩条
@@ -545,10 +575,10 @@ static void UiUnderInvalidate_()
     uiTailX = -1;
 }
 
-// 记录 backbuffer 中矩形 (x,y,w,h) 的像素；只存一份（旧快照先释放）。
-static bool UiUnderCapture_(int x, int y, int w, int h)
+// 记录 backbuffer 中矩形 (x,y,w,h) 的像素到指定槽（该槽旧内容先释放）。
+static bool UiUnderCaptureSlot_(UiUnderSlot_& slot, int x, int y, int w, int h)
 {
-    UiUnderRelease_();
+    UiUnderReleaseSlot_(slot);
     if (w <= 0 || h <= 0) return false;
     LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
     if (!bb) return false;
@@ -571,9 +601,9 @@ static bool UiUnderCapture_(int x, int y, int w, int h)
             const BYTE* base = (const BYTE*)desc.lpSurface + (size_t)y * pitch + (size_t)x * px;
             for (int row = 0; row < h; ++row)
                 memcpy(buf + (size_t)row * w * px, base + (size_t)row * pitch, (size_t)w * px);
-            g_underBuf = buf;
-            g_underW = w; g_underH = h; g_underX = x; g_underY = y;
-            g_underBpp = bpp; g_underPitch = pitch;
+            slot.buf = buf;
+            slot.w = w; slot.h = h; slot.x = x; slot.y = y;
+            slot.bpp = bpp; slot.pitch = pitch;
             captured = true;
         } __finally {
             bb->Unlock(nullptr);
@@ -581,15 +611,15 @@ static bool UiUnderCapture_(int x, int y, int w, int h)
     } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
         captured = false;
     }
-    if (!captured) UiUnderRelease_();
+    if (!captured) UiUnderReleaseSlot_(slot);
     return captured;
 }
 
 // 把快照写回 backbuffer 的同一矩形并刷新。快照与当前 backbuffer 位深不一致
 // （切换 HD/窗口模式）时放弃，保留原状让下一帧清理。
-static bool UiUnderRestore_()
+static bool UiUnderRestoreSlot_(UiUnderSlot_& slot)
 {
-    if (!g_underBuf || g_underW <= 0 || g_underH <= 0) return false;
+    if (!slot.Valid()) return false;
     LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
     if (!bb) return false;
     bool restored = false;
@@ -603,12 +633,12 @@ static bool UiUnderRestore_()
             const int bpp = UiBackBufferBpp_(bb);
             const int px = bpp == 32 ? 4 : 2;
             const int pitch = (int)desc.lPitch;
-            if (pitch <= 0 || bpp != g_underBpp) return false;
-            const int x = g_underX, y = g_underY, w = g_underW, h = g_underH;
+            if (pitch <= 0 || bpp != slot.bpp) return false;
+            const int x = slot.x, y = slot.y, w = slot.w, h = slot.h;
             if (x < 0 || y < 0 || x + w > (int)desc.dwWidth || y + h > (int)desc.dwHeight) return false;
             BYTE* base = (BYTE*)desc.lpSurface + (size_t)y * pitch + (size_t)x * px;
             for (int row = 0; row < h; ++row)
-                memcpy(base + (size_t)row * pitch, g_underBuf + (size_t)row * w * px, (size_t)w * px);
+                memcpy(base + (size_t)row * pitch, slot.buf + (size_t)row * w * px, (size_t)w * px);
             restored = true;
         } __finally {
             bb->Unlock(nullptr);
@@ -618,13 +648,114 @@ static bool UiUnderRestore_()
     }
     if (restored) {
         H3WindowManager* wnd = H3WindowManager::Get();
-        if (wnd) wnd->H3Redraw(g_underX, g_underY, g_underW, g_underH);
-        UiUnderRelease_();
+        if (wnd) wnd->H3Redraw(slot.x, slot.y, slot.w, slot.h);
+        UiUnderReleaseSlot_(slot);
     }
     return restored;
 }
 
+static bool UiUnderCapture_(int x, int y, int w, int h)
+{
+    return UiUnderCaptureSlot_(g_underPanel, x, y, w, h);
+}
+
+static bool UiUnderRestore_() { return UiUnderRestoreSlot_(g_underPanel); }
+
+// ---- 界面选择与切换（2026-10-14 用户裁定：两套界面同 DLL，配置/复选框选择） ----
+// 战场外固定条：左上角 (8,8)，不读 BarX/BarY（位置由界面决定，2026-10-05 定稿）。
+static void UiResetOutsideAnchor_()
+{
+    g_uiBarAnchorX = kUiOutsideBarX;
+    g_uiBarAnchorY = kUiOutsideBarY;
+    g_ui.x = kUiOutsideBarX;
+    g_ui.y = kUiOutsideBarY;
+}
+
+// 只切换选择本身（启动时读配置后调用；运行期切换走 UiApplyOutsideBar_）。
+static void UiSelectInterface_(bool outside)
+{
+    g_uiOutsideBar = outside;
+    g_uiFoldLayout = !outside;
+    if (outside) UiResetOutsideAnchor_();
+}
+
+// 离开战场外固定条：整块旧矩形按该界面自己的恢复源（screenPcx16，战场外是
+// 干净源，见 UiClampBarToBattleDlg_ 注释）原样写回，避免切到折叠界面后左上角
+// 留下一条残影。
+static void UiNativeTailErase_()
+{
+    H3WindowManager* wnd = H3WindowManager::Get();
+    if (!wnd || !wnd->screenPcx16 || uiTailX < 0 || uiTailY < 0 || uiTailH <= 0) return;
+    const int w = uiTailListWidth > kUiBarWidth ? uiTailListWidth : kUiBarWidth;
+    if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, w, uiTailH, uiTailX, uiTailY))
+        wnd->H3Redraw(uiTailX, uiTailY, w, uiTailH);
+    LogDebug("[Ui] native bar erased x=%d y=%d w=%d h=%d", uiTailX, uiTailY, w, uiTailH);
+}
+
+// 运行期切换界面：先把旧界面的像素清干净（两套界面的恢复源不同，必须各清各的），
+// 再切换选择并作废两套残影跟踪，使新界面下一帧按新矩形重新呈现。
+static void UiApplyOutsideBar_(bool outside, const char* reason)
+{
+    if (outside == g_uiOutsideBar) return;
+    if (g_uiOutsideBar) UiNativeTailErase_();   // 旧界面=战场外固定条
+    else UiFoldLeaveUi_();                      // 旧界面=战场内折叠灯（面板 + 灯）
+    UiUnderRelease_();                          // 面板快照随界面切换作废
+    uiTailX = -1;
+    g_ui.listGesture = {};
+    g_ui.scroll.dragging = false;
+    g_ui.autoScroll.dragging = false;
+    g_ui.listRightHeld = false;
+    g_ui.hoverRow = -1;
+    g_ui.autoHoverRow = -1;
+    g_ui.logLevelHover = -1;
+    g_ui.outsideHover = -1;
+    ClearBattleInputs_();
+    UiSelectInterface_(outside);
+    LogInfo("[Ui] 界面已切换为%s（%s；配置键 [Ui] OutsideBattlefield=%d）",
+        outside ? "战场外左上角固定条" : "战场内右上角折叠灯",
+        reason ? reason : "unknown", outside ? 1 : 0);
+}
+
 static H3LoadedPcx16* g_barComposite = nullptr;
+
+// ---- 第一行布局：日志等级项 +「战场外」复选框（2026-10-14 紧凑化） ----
+// 项宽 = 字体实测文本宽 + 左右内边距，随字体高度变化重算（同字体只算一次）。
+// 绘制与命中判定共用 g_logRow，点击热区与画面严格一致。
+static int UiMeasureRowText_(H3Font* font, const char* utf8)
+{
+    if (!font || !utf8) return 0;
+    char gbk[48] = {};
+    UiToGbk_(utf8, gbk, sizeof(gbk));
+    const int width = font->GetMaxLineWidth(gbk);
+    return width > 0 ? width : 0;
+}
+
+static void UiUpdateLogRow_(H3Font* font)
+{
+    if (!font || font->height == g_logRowFontHeight) return;
+    const int pad = 2 * hbs_ui::LogRowPadX;
+    int levelsWidth = kUiLogRowMinLevelWidth;
+    for (int i = 0; i < hbs_ui::LogRowLevelCount; ++i) {
+        // 标记槽恒为 1 字符（选中 "*"、未选中空格），按选中形态量宽即所有项的上界。
+        char utf8[24] = {};
+        _snprintf(utf8, sizeof(utf8), "*%s", LogLevelDisplayName_(i));
+        const int width = UiMeasureRowText_(font, utf8) + pad;
+        if (width > levelsWidth) levelsWidth = width;
+    }
+    int outsideWidth = 0;
+    for (int i = 0; i < hbs_ui::LogRowOutsideTagCount; ++i) {
+        const int width = UiMeasureRowText_(font, hbs_ui::LogRowOutsideTag(i)) + pad;
+        if (width > outsideWidth) outsideWidth = width;
+    }
+    g_logRow = hbs_ui::PlaceLogRow(kUiBarWidth, levelsWidth, outsideWidth);
+    g_logRowFontHeight = font->height;
+    LogDebug("[Ui] 第一行布局 font=%d levelW=%d outside=x%d w%d packX=%d spare=%d",
+        font->height, levelsWidth, g_logRow.outside.x, g_logRow.outside.width,
+        g_logRow.packX, g_logRow.spare);
+    if (g_logRow.spare < 0)
+        LogWarn("[Ui] 第一行超出条宽：levelW=%d outsideW=%d tail=%d packX=%d",
+            levelsWidth, outsideWidth, g_logRow.tailX, g_logRow.packX);
+}
 
 static void UiDrawBar_(H3CombatManager* mgr)
 {
@@ -637,6 +768,7 @@ static void UiDrawBar_(H3CombatManager* mgr)
         if (!wnd || !font || !UiDDBackBuffer_()) return;
         const hbs_ui::Layout layout = hbs_ui::ForFont(font->height);
         g_uiLayout = layout;
+        UiUpdateLogRow_(font);   // 第一行项宽随字体实测刷新（绘制与命中共用）
         g_ui.x = g_uiBarAnchorX;
         g_ui.y = g_uiBarAnchorY;
         const int y = UiOriginY_();
@@ -793,34 +925,57 @@ static void UiDrawBar_(H3CombatManager* mgr)
         font->TextDraw(c, key, hbs_ui::HotkeyX, UiBandHeight_(), 52, UiBandHeight_(),
             eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
         c->DrawFrame(hbs_ui::HotkeyX, UiBandHeight_() + 2, 54, UiBandHeight_() - 4, 220, 200, 110);
-        // 固定横排五级，不展开收起；选中与悬停只重绘同一矩形。
+        // 紧凑横排五级（不展开收起）：标记槽 1 字符 + 高亮底/亮绿字标状态，
+        // 项宽按字体实测，省下的空间给右侧「战场外」复选框（2026-10-14 用户要求）。
         const int levelNow = (g_log_level >= LOG_TRACE && g_log_level <= LOG_ERROR)
             ? g_log_level : LOG_DEBUG;
-        for (int i = 0; i < kUiLogLevelRows; ++i) {
-            const int cellX = (i % kUiLogLevelPerRow) * kUiLogLevelCellWidth;
-            const int cellY = (i / kUiLogLevelPerRow) * UiBandHeight_();
+        for (int i = 0; i < hbs_ui::LogRowLevelCount; ++i) {
+            const int cellX = g_logRow.level[i].x;
+            const int cellW = g_logRow.level[i].width;
             if (i == g_ui.logLevelHover || i == levelNow) {
                 const int fillR = i == g_ui.logLevelHover ? 90 : 70;
                 const int fillG = i == g_ui.logLevelHover ? 70 : 55;
                 const int fillB = i == g_ui.logLevelHover ? 20 : 25;
-                c->FillRectangle(cellX + 3, cellY + 3, kUiLogLevelCellWidth - 6,
+                c->FillRectangle(cellX + 1, 3, cellW - 2,
                     UiBandHeight_() - 6, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
             }
             char itemUtf8[24] = {};
-            const char* mark = i == levelNow ? "(*) " : "( ) ";
-            _snprintf(itemUtf8, sizeof(itemUtf8), "%s%s", mark, LogLevelDisplayName_(i));
+            _snprintf(itemUtf8, sizeof(itemUtf8), "%c%s",
+                i == levelNow ? '*' : ' ', LogLevelDisplayName_(i));
             char itemGbk[32] = {};
             UiToGbk_(itemUtf8, itemGbk, sizeof(itemGbk));
-            font->TextDraw(c, itemGbk, cellX + 4, cellY, kUiLogLevelCellWidth - 8,
-                UiBandHeight_(),
+            font->TextDraw(c, itemGbk, cellX + hbs_ui::LogRowPadX, 0,
+                cellW - 2 * hbs_ui::LogRowPadX, UiBandHeight_(),
                 i == levelNow ? eTextColor::LIGHT_GREEN : eTextColor::WHITE,
                 eTextAlignment::MIDDLE_CENTER);
         }
+        {
+            // 「战场外」复选框：勾选=左上角固定条界面（旧界面），默认不勾=
+            // 当前这套战场内折叠灯界面；点击即写 user.ini 并即时切换。
+            const int cellX = g_logRow.outside.x;
+            const int cellW = g_logRow.outside.width;
+            if (g_ui.outsideHover >= 0) {
+                const int fillR = g_uiOutsideBar ? 70 : 90;
+                const int fillG = g_uiOutsideBar ? 55 : 70;
+                const int fillB = g_uiOutsideBar ? 25 : 20;
+                c->FillRectangle(cellX + 1, 3, cellW - 2,
+                    UiBandHeight_() - 6, (BYTE)fillR, (BYTE)fillG, (BYTE)fillB);
+            }
+            char outsideGbk[48] = {};
+            UiToGbk_(hbs_ui::LogRowOutsideTag(g_uiOutsideBar ? 1 : 0), outsideGbk,
+                sizeof(outsideGbk));
+            font->TextDraw(c, outsideGbk, cellX + hbs_ui::LogRowPadX, 0,
+                cellW - 2 * hbs_ui::LogRowPadX, UiBandHeight_(),
+                g_uiOutsideBar ? eTextColor::LIGHT_GREEN : eTextColor::WHITE,
+                eTextAlignment::MIDDLE_CENTER);
+            c->DrawFrame(cellX + 1, 2, cellW - 2, UiBandHeight_() - 4, 160, 140, 70);
+        }
         char packLabel[32] = {};
         UiToGbk_("打包日志", packLabel, sizeof(packLabel));
-        font->TextDraw(c, packLabel, kUiLogPackX + 2, 0, kUiLogPackWidth - 4,
+        font->TextDraw(c, packLabel, g_logRow.packX + 2, 0, g_logRow.packWidth - 4,
             UiBandHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_CENTER);
-        c->DrawFrame(kUiLogPackX, 3, kUiLogPackWidth, UiBandHeight_() - 6, 220, 200, 110);
+        c->DrawFrame(g_logRow.packX, 3, g_logRow.packWidth, UiBandHeight_() - 6,
+            220, 200, 110);
         if (rows > 0) {
             const int listY = g_uiLayout.ListTop();
             for (int row = 0; row < rows; ++row) {
@@ -1053,16 +1208,18 @@ static ptrdiff_t UiHitRow_(int which, int px, int py)
 
 static int UiHitLogLevelItem_(int px, int py)
 {
-    const int dx = px - g_ui.x;
-    const int dy = py - UiOriginY_();
-    if (dx < 0 || dx >= kUiLogLevelRows * kUiLogLevelCellWidth
-        || dy < 0 || dy >= UiBandHeight_()) return -1;
-    return dx / kUiLogLevelCellWidth;
+    return g_logRow.HitLevel(px - g_ui.x, py - UiOriginY_(), UiBandHeight_());
+}
+
+// 「战场外」复选框热区（与绘制共用 g_logRow，画面与热区严格一致）。
+static bool UiHitOutsideCheck_(int px, int py)
+{
+    return g_logRow.HitOutside(px - g_ui.x, py - UiOriginY_(), UiBandHeight_());
 }
 
 static bool UiHitLogPack_(int px, int py)
 {
-    return px >= g_ui.x + kUiLogPackX && px < g_ui.x + kUiLogPackX + kUiLogPackWidth
+    return px >= g_ui.x + g_logRow.packX && px < g_ui.x + g_logRow.packX + g_logRow.packWidth
         && py >= UiOriginY_() && py < UiOriginY_() + UiBandHeight_();
 }
 
@@ -1108,6 +1265,23 @@ static void UiSelectLogLevel_(int level)
     LogInfo("[Config] 日志等级已切换并写入用户配置：%s -> %s",
         LogLevelName_(previous), LogLevelName_(level));
     UiMarkNotice_("日志等级已保存");
+}
+
+// 「战场外」复选框点击：勾选=左上角固定条界面，不勾=战场内折叠灯界面。
+// 写盘失败时保持现状不动（与日志等级同一规矩，2026-10-06 用户裁定），
+// 避免"界面已变但配置没写进去"的下次启动不一致。
+static void UiToggleOutsideBar_()
+{
+    const bool next = !g_uiOutsideBar;
+    if (!IniWriteKeyUtf8(g_user_ini_path, "Ui", "OutsideBattlefield", next ? "1" : "0")) {
+        UiMarkNotice_("界面配置保存失败，界面未改变");
+        LogError("[Config] 保存界面选择失败：target=%d keep=%d",
+            next ? 1 : 0, g_uiOutsideBar ? 1 : 0);
+        return;
+    }
+    LogInfo("[Config] 界面选择已写入用户配置：[Ui] OutsideBattlefield=%d", next ? 1 : 0);
+    UiApplyOutsideBar_(next, "面板复选框");
+    UiMarkNotice_(next ? "已切到战场外界面" : "已切回战场内界面");
 }
 
 static void UiCancelRebind_(const char* reason)
@@ -1216,6 +1390,7 @@ static void UiHandleMouse_(H3Msg* msg)
                 ? g_uiLayout.HitRow(py - UiOriginY_(), UiListRows_(which)) : -1;
         }
         g_ui.logLevelHover = UiHitLogLevelItem_(px, py);
+        g_ui.outsideHover = UiHitOutsideCheck_(px, py) ? 0 : -1;
         return;
     }
     // Do not dispatch 0x200 here: native button hotkeys share that command.
@@ -1282,6 +1457,12 @@ static void UiHandleFrameClick_(int gameX, int gameY)
         LogDebug("点击日志等级行：%d", levelItem);
         return;
     }
+    // 「战场外」复选框：切换界面（勾选=左上角固定条）。
+    if (UiHitOutsideCheck_(gameX, gameY)) {
+        LogDebug("点击战场外复选框：当前=%d", g_uiOutsideBar ? 1 : 0);
+        UiToggleOutsideBar_();
+        return;
+    }
     if (UiPointInUiBlock_(gameX, gameY) && !UiPointInBar_(gameX, gameY)) {
         LogDebug("点击日志等级块空位（无动作）：(%d,%d)", gameX, gameY);
         return;
@@ -1320,6 +1501,7 @@ static void UiResetForBattle_()
     g_ui.hoverRow = -1;
     g_ui.autoHoverRow = -1;
     g_ui.logLevelHover = -1;
+    g_ui.outsideHover = -1;
     UiCancelRebind_("battle reset");
     g_ui.rebindKey = 0;
     g_ui.rebindGuardUntil = 0;
@@ -1520,12 +1702,13 @@ static void UiOnFaultCleanup_()
 
 class HdNativeUi final : public IBattleStoreUi {
 public:
-    void Initialize() override { UiLoadBarPosition_(); }  // BarX/BarY 归界面层（第5步）
+    void Initialize() override { UiResetOutsideAnchor_(); }  // 战场外固定条恒左上角
     void Draw(H3CombatManager* mgr) override { UiDrawBar_(mgr); }
     void PollHover() override
     {
         const H3POINT cursor = H3POINT::GetCursorPosition();
         g_ui.logLevelHover = UiHitLogLevelItem_(cursor.x, cursor.y);
+        g_ui.outsideHover = UiHitOutsideCheck_(cursor.x, cursor.y) ? 0 : -1;
     }
     void FrameClick() override
     {
@@ -1556,9 +1739,7 @@ public:
     char RebindLatchKey() const override { return g_ui.rebindKey; }
 };
 
-#if defined(H3BS_UI_NATIVE)
-// 旧界面装配（编译期宏 H3BS_UI_NATIVE=1 选出；默认走 BattleFoldBar.inc.cpp）。
+// 战场外固定条界面实例：两套界面同在一个 DLL 里（2026-10-14 起不再用编译宏选），
+// 具体用哪套由 UiPortDispatch_（BattleFoldBar.inc.cpp 末尾）按运行期配置分发。
 static HdNativeUi g_hdNativeUi;
-// 钩子层唯一界面入口；Entry 不得再触碰 Ui* 内部符号与 g_ui 字段。
-static IBattleStoreUi* const g_uiPort = &g_hdNativeUi;
-#endif
+static IBattleStoreUi* UiNativePort_() { return &g_hdNativeUi; }

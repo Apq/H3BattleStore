@@ -52,12 +52,13 @@ static bool TryCaptureCombat_(hbs::ArchiveSlot slot = hbs::ArchiveSlot::Manual,
 #include "modules/BattleStoreService.inc.cpp"
 #include "modules/BattleUiPort.hpp"
 #if defined(H3BS_UI_NULL)
+// 无界面诊断变体（编译期宏，供自动化测试/自动化验证用；与玩家可选的两套界面无关）。
 #include "modules/NullUiPort.inc.cpp"
 #else
+// 两套玩家可选界面同在一个 DLL：BattleUi = 战场外左上角固定条（HdNativeUi）+ 共享绘制/交互；
+// BattleFoldBar = 战场内右上角折叠灯（FoldableBarUi）+ 运行期分发器，必须排在其后。
 #include "modules/BattleUi.inc.cpp"
-#ifndef H3BS_UI_NATIVE
 #include "modules/BattleFoldBar.inc.cpp"
-#endif
 #endif
 #include "modules/BattleAltTail.inc.cpp"
 #include "modules/Entry.inc.cpp"

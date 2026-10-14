@@ -258,4 +258,38 @@ constexpr BattleStorageWindowState_ idleHuman = {
 static_assert(BattleStorageAllowed_(idleHuman));
 static_assert([] { auto state = idleHuman; state.casting = true; return !BattleStorageAllowed_(state); }());
 static_assert([] { auto state = idleHuman; state.executing = true; return !BattleStorageAllowed_(state); }());
+// 第一行紧凑布局回归（2026-10-14 用户要求："把日志等级的选项给排得紧凑一点，
+// 留出空间来加新选项"）：等级项等宽自左排列，其后 8px 留白放「战场外」复选框，
+// 「打包日志」按钮贴右缘。宽度来自运行期字体实测（条宽 480 由 HotkeyX 反推），
+// 这里按"旧布局刚好放得下"的实测档位验算：旧等级格 76 = "( ) "+2 CJK+边距，
+// 新等级格 51 = "*"+2 CJK+边距，复选框 85 = "( )"+3 CJK+边距。
+constexpr int kRowBarWidthTest = hbs_ui::HotkeyX + 58;
+static_assert(kRowBarWidthTest == 480);
+constexpr auto rowNow = hbs_ui::PlaceLogRow(kRowBarWidthTest, 51, 85);
+static_assert(rowNow.level[0].x == 0 && rowNow.level[0].width == 51);
+static_assert(rowNow.level[1].x == 55 && rowNow.level[2].x == 110);
+static_assert(rowNow.level[4].x == 220 && rowNow.level[4].x + 51 == 271);
+static_assert(rowNow.outside.x == 279 && rowNow.outside.width == 85);
+static_assert(rowNow.tailX == 364);
+static_assert(rowNow.packX == 392 && rowNow.packWidth == 84);
+static_assert(rowNow.spare == 28);                    // 留给后续新选项的余量
+static_assert(rowNow.tailX <= rowNow.packX);
+// 紧凑化净收益：新布局（含新复选框）比旧布局（5×76，无复选框）右边界更靠左。
+static_assert(rowNow.tailX < 5 * 76);
+// 命中判定与绘制共用同一份布局：项之间/行高之外都不算命中。
+static_assert(rowNow.HitLevel(0, 0, 24) == 0 && rowNow.HitLevel(50, 23, 24) == 0);
+static_assert(rowNow.HitLevel(51, 0, 24) == -1);      // 项间 4px 间隙
+static_assert(rowNow.HitLevel(55, 0, 24) == 1);
+static_assert(rowNow.HitLevel(-1, 0, 24) == -1);
+static_assert(rowNow.HitLevel(0, -1, 24) == -1 && rowNow.HitLevel(0, 24, 24) == -1);
+static_assert(rowNow.HitLevel(279, 0, 24) == -1);     // 复选框不误判为等级项
+static_assert(rowNow.HitOutside(279, 0, 24) && rowNow.HitOutside(363, 23, 24));
+static_assert(!rowNow.HitOutside(278, 0, 24) && !rowNow.HitOutside(364, 0, 24));
+static_assert(!rowNow.HitOutside(279, 24, 24));
+// 字体异常放大（实测宽度超出条宽）：压缩等级项宽度，复选框与按钮仍不重叠。
+constexpr auto rowHuge = hbs_ui::PlaceLogRow(kRowBarWidthTest, 100, 120);
+static_assert(rowHuge.level[0].width == 49);          // (392-8-120-16)/5 = 49
+static_assert(rowHuge.level[4].x + rowHuge.level[0].width == rowHuge.outside.x - 8);
+static_assert(rowHuge.tailX <= rowHuge.packX && rowHuge.spare >= 0);
+static_assert(rowHuge.outside.width == 120);          // 复选框宽度不被压缩
 }

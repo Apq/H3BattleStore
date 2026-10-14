@@ -129,4 +129,64 @@ constexpr int TextureBandY(int local, int bandHeight, int sourceBand) {
 constexpr int TextureY(int y, int bandHeight) {
     return TextureBandY(y % bandHeight, bandHeight, y / bandHeight);
 }
+// ---- 第一行：日志等级项（5 项）+「战场外」复选框 + 打包日志按钮 ----
+// 2026-10-14 用户要求："把日志等级的选项给排得紧凑一点，留出空间来加新选项"。
+// 项宽由运行期字体测量提供（生产用 H3Font::GetMaxLineWidth，含左右内边距），
+// 本处只做纯几何：等宽等级项自左排列，其后留 LogRowFlagGap 放复选框，按钮贴
+// 条右缘。等级项的标记槽恒为 1 字符（选中 "*"、未选中空格），故所有项等宽、
+// 选中不跳位；tagged 状态另用高亮底 + 亮绿字标注（原 "(*) " 前缀太宽，五级
+// 加复选框放不下 480px 条）。
+constexpr int LogRowLevelCount = 5;
+constexpr int LogRowPadX = 4;        // 项内左右内边距
+constexpr int LogRowGap = 4;         // 相邻等级项之间的间隙
+constexpr int LogRowFlagGap = 8;     // 等级项与复选框之间的留白
+constexpr int LogRowPackWidth = 84;  // 「打包日志」按钮宽度
+constexpr int LogRowPackMargin = 4;  // 按钮右缘与条右缘的间距
+// 「战场外」复选框文本：勾选/未勾选两种形态（等宽取较宽者）。
+constexpr int LogRowOutsideTagCount = 2;
+constexpr const char* LogRowOutsideTag(int checked) {
+    return checked ? "(*)战场外" : "( )战场外";
+}
+struct LogRowItem { int x; int width; };
+struct LogRow {
+    LogRowItem level[LogRowLevelCount];
+    LogRowItem outside;
+    int packX;
+    int packWidth;
+    int tailX;   // 等级项 + 复选框占用的右边界（不含按钮）
+    int spare;   // 按钮左侧剩余空间（留给后续新选项；<0 表示超出条宽）
+    constexpr int HitLevel(int dx, int dy, int bandHeight) const {
+        if (dy < 0 || dy >= bandHeight) return -1;
+        for (int i = 0; i < LogRowLevelCount; ++i)
+            if (dx >= level[i].x && dx < level[i].x + level[i].width) return i;
+        return -1;
+    }
+    constexpr bool HitOutside(int dx, int dy, int bandHeight) const {
+        return dy >= 0 && dy < bandHeight
+            && dx >= outside.x && dx < outside.x + outside.width;
+    }
+};
+// levelsWidth/outsideWidth 由运行期字体测量提供（含左右内边距）。放不下时先
+// 压缩等级项宽度（文本居中裁切），保证复选框与打包按钮永不重叠——字体异常
+// 放大时也不会盖住按钮；正常字体下实测宽度留有 spare 余量（见回归测试）。
+constexpr LogRow PlaceLogRow(int barWidth, int levelsWidth, int outsideWidth) {
+    LogRow row = {};
+    const int packX = barWidth - LogRowPackWidth - LogRowPackMargin;
+    const int gaps = LogRowGap * (LogRowLevelCount - 1);
+    const int roomForLevels = packX - LogRowFlagGap - outsideWidth - gaps;
+    int levelWidth = levelsWidth;
+    if (roomForLevels > 0 && LogRowLevelCount * levelWidth > roomForLevels)
+        levelWidth = roomForLevels / LogRowLevelCount;
+    int x = 0;
+    for (int i = 0; i < LogRowLevelCount; ++i) {
+        row.level[i] = LogRowItem{x, levelWidth};
+        x += levelWidth + (i + 1 < LogRowLevelCount ? LogRowGap : 0);
+    }
+    row.outside = LogRowItem{x + LogRowFlagGap, outsideWidth};
+    row.tailX = row.outside.x + outsideWidth;
+    row.packWidth = LogRowPackWidth;
+    row.packX = packX;
+    row.spare = row.packX - row.tailX;
+    return row;
+}
 }
