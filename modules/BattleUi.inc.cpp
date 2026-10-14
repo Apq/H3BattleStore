@@ -550,6 +550,12 @@ struct UiUnderSlot_
 };
 static UiUnderSlot_ g_underPanel;
 static UiUnderSlot_ g_underLamp;
+// 2026-10-14 新增：战场外固定条覆盖区（界面=战场外时使用）。玩家实测"从战场外
+// 切到战场内后左上角那条残影常驻"——老路径拿 screenPcx16 当恢复源，而呈现后
+// 该矩形里已含插件自己的像素（H3Redraw 把呈现区写回合成面），拷回等于把残影
+// 原样写回去。原生 H3CombatMonsterPanel 在战场外的无残影机制就是"覆盖前私有
+// 快照、隐藏时贴回"，这里同上，与 screenPcx16 语义解耦。
+static UiUnderSlot_ g_underBar;
 
 // 释放快照（换场 / 位深变化 / 已写回后）。
 static void UiUnderReleaseSlot_(UiUnderSlot_& slot)
@@ -572,6 +578,7 @@ static bool UiUnderBufValid_() { return g_underPanel.Valid(); }
 static void UiUnderInvalidate_()
 {
     UiUnderRelease_();
+    UiUnderReleaseSlot_(g_underBar);   // 战场外条快照同规则作废（换场/读档后 backbuffer 已换场景）
     uiTailX = -1;
 }
 
@@ -679,17 +686,26 @@ static void UiSelectInterface_(bool outside)
     if (outside) UiResetOutsideAnchor_();
 }
 
-// 离开战场外固定条：整块旧矩形按该界面自己的恢复源（screenPcx16，战场外是
-// 干净源，见 UiClampBarToBattleDlg_ 注释）原样写回，避免切到折叠界面后左上角
-// 留下一条残影。
+// 离开战场外固定条：把该界面自持的覆盖区快照原样写回 backbuffer（覆盖前捕获
+// 的干净像素），HD 增量呈现不会自己清旧区域，不写回就留一条残影。
+// 优先用私有快照；仅当从未捕获成功（例如 backbuffer 尺寸不足）时才退回 2026-10-05
+// 的老路径（screenPcx16→backbuffer），那条路径只是 best-effort：若该矩形已被
+// 呈现写脏，它会把残影写回去（2026-10-14 玩家实测就是这种情形）。
 static void UiNativeTailErase_()
 {
+    if (g_underBar.Valid()) {
+        const int bx = g_underBar.x, by = g_underBar.y, bw = g_underBar.w, bh = g_underBar.h;
+        if (UiUnderRestoreSlot_(g_underBar)) {
+            LogDebug("[Ui] native bar erased source=save-under x=%d y=%d w=%d h=%d", bx, by, bw, bh);
+            return;
+        }
+    }
     H3WindowManager* wnd = H3WindowManager::Get();
     if (!wnd || !wnd->screenPcx16 || uiTailX < 0 || uiTailY < 0 || uiTailH <= 0) return;
     const int w = uiTailListWidth > kUiBarWidth ? uiTailListWidth : kUiBarWidth;
     if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, w, uiTailH, uiTailX, uiTailY))
         wnd->H3Redraw(uiTailX, uiTailY, w, uiTailH);
-    LogDebug("[Ui] native bar erased x=%d y=%d w=%d h=%d", uiTailX, uiTailY, w, uiTailH);
+    LogDebug("[Ui] native bar erased source=screenPcx16 x=%d y=%d w=%d h=%d", uiTailX, uiTailY, w, uiTailH);
 }
 
 // 运行期切换界面：先把旧界面的像素清干净（两套界面的恢复源不同，必须各清各的），
@@ -700,6 +716,7 @@ static void UiApplyOutsideBar_(bool outside, const char* reason)
     if (g_uiOutsideBar) UiNativeTailErase_();   // 旧界面=战场外固定条
     else UiFoldLeaveUi_();                      // 旧界面=战场内折叠灯（面板 + 灯）
     UiUnderRelease_();                          // 面板快照随界面切换作废
+    UiUnderReleaseSlot_(g_underBar);            // 战场外条快照同上（离开时已写回）
     uiTailX = -1;
     g_ui.listGesture = {};
     g_ui.scroll.dragging = false;
@@ -1068,47 +1085,23 @@ static void UiDrawBar_(H3CombatManager* mgr)
             }
         }
         else {
-            // 双列各自缩高/隐藏滚动条也要恢复旧矩形；另一列保持20行时，
-            // 面板总高度不变，不能只靠 max(rows) 的尾区清理。
-            if (rectChanged && uiTailX >= 0 && wnd->screenPcx16) {
-                for (int which = 0; which < 2; ++which) {
-                    const int oldH = uiTailColumnRows[which] * uiTailRowHeight;
-                    const int oldW = uiTailColumnWidths[which];
-                    const int oldX = uiTailX + UiListX_(which);
-                    const int oldY = uiTailY + uiTailBlockH;
-                    if (oldH > 0 && oldW > 0 && UiBltPcx16Region_(wnd->screenPcx16,
-                        oldX, oldY, oldW, oldH, oldX, oldY))
-                        wnd->H3Redraw(oldX, oldY, oldW, oldH);
-                }
+            // 战场外固定条：覆盖前从 backbuffer 自存快照，离开界面时原样写回。
+            // 2026-10-14 玩家实测"切到战场内后左上角那条残影常驻"：老路径（下面
+            // 注释保留的历史做法）拿 screenPcx16 当恢复源，而呈现之后该矩形里已含
+            // 插件自己的像素，拷回等于把残影写回去；且呈现源语义随 HD 版本变化，
+            // 不可依赖。改为与折叠面板同款的私有快照（原生 H3CombatMonsterPanel
+            // 在战场外就是"覆盖前快照、隐藏时贴回"的底图三段式）。
+            // 约束与面板完全一致：只在矩形变化帧捕获，且捕获必须在 blt 之前——
+            // 连续同矩形帧里 backbuffer 已是上一帧的条像素，拍到就是拍到自己。
+            // 整块矩形（含标题行与双列）一次覆盖，不必再按子矩形逐个清。
+            if (rectChanged) {
+                UiUnderRestoreSlot_(g_underBar);      // 旧条矩形先写回干净像素
+                const int coverW = listsWidth > kUiBarWidth ? listsWidth : kUiBarWidth;
+                if (!UiUnderCaptureSlot_(g_underBar, x, y, coverW, totalH))
+                    LogWarn("[Draw] bar under-capture failed x=%d y=%d w=%d h=%d bpp=%d",
+                        x, y, coverW, totalH, UiBackBufferBpp_(UiDDBackBuffer_()));
             }
-            if (rectChanged && uiTailX >= 0 && uiTailY != y && wnd->screenPcx16) {
-                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, uiTailY, kUiBarWidth,
-                    uiTailBlockH, uiTailX, uiTailY)) wnd->H3Redraw(uiTailX, uiTailY, kUiBarWidth, uiTailBlockH);
-                if (uiTailH > uiTailBlockH && UiBltPcx16Region_(wnd->screenPcx16,
-                    uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH,
-                    uiTailX, uiTailY + uiTailBlockH))
-                    wnd->H3Redraw(uiTailX, uiTailY + uiTailBlockH, uiTailListWidth, uiTailH - uiTailBlockH);
-            }
-            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailBlockH > g_uiLayout.ListTop() && wnd->screenPcx16) {
-                const int tailY = uiTailY + g_uiLayout.ListTop();
-                const int tailH = uiTailBlockH - g_uiLayout.ListTop();
-                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, kUiBarWidth,
-                    tailH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, kUiBarWidth, tailH);
-            }
-            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailH > totalH && wnd->screenPcx16) {
-                const int tailY = uiTailY + totalH;
-                if (UiBltPcx16Region_(wnd->screenPcx16, uiTailX, tailY, uiTailListWidth,
-                    uiTailH - totalH, uiTailX, tailY)) wnd->H3Redraw(uiTailX, tailY, uiTailListWidth, uiTailH - totalH);
-            }
-            if (rectChanged && uiTailX >= 0 && uiTailY == y && uiTailListWidth > listsWidth && wnd->screenPcx16) {
-                const int stripX = uiTailX + listsWidth;
-                const int stripY = uiTailY + g_uiLayout.ListTop();
-                const int stripH = totalH - g_uiLayout.ListTop();
-                if (stripH > 0 && UiBltPcx16Region_(wnd->screenPcx16, stripX, stripY,
-                    uiTailListWidth - listsWidth, stripH, stripX, stripY))
-                    wnd->H3Redraw(stripX, stripY, uiTailListWidth - listsWidth, stripH);
-            }
-        } // !g_uiFoldLayout：旧界面继续用 screenPcx16 恢复
+        } // !g_uiFoldLayout：战场外固定条与折叠面板共用 save-under 快照机制
         // 悬浮框整块呈现（含标题行），两个列表各覆盖自身窄矩形。
         bltOk = UiBltPcx16Region_(c, 0, 0, kUiBarWidth, g_uiLayout.ListTop(), x, y);
         if (rows > 0)
