@@ -393,7 +393,13 @@ public:
             outside ? "outside-battlefield(top-left)" : "in-battle(fold lamp)",
             outside ? 1 : 0);
     }
-    void Draw(H3CombatManager* mgr) override { Active_()->Draw(mgr); }
+    void Draw(H3CombatManager* mgr) override
+    {
+        // 离开战场外固定条后的若干帧继续把其覆盖区快照写回：呈现链会把该矩形重新
+        // 合成回来，只写回一帧会被盖掉（2026-10-14 玩家实测残影常驻）。
+        UiNativeEraseTick_();
+        Active_()->Draw(mgr);
+    }
     void PollHover() override { Active_()->PollHover(); }
     void FrameClick() override { Active_()->FrameClick(); }
     void PollRebindKey() override { Active_()->PollRebindKey(); }

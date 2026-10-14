@@ -557,6 +557,16 @@ static UiUnderSlot_ g_underLamp;
 // 快照、隐藏时贴回"，这里同上，与 screenPcx16 语义解耦。
 static UiUnderSlot_ g_underBar;
 
+// 固定条第下一次捕获的指纹诊断状态：捕获帧记"即将写进快照的基线"指纹，
+// 本帧 blt 之后再记一次。两者相同 => 快照里存的就是插件自己画的条（基线脏）；
+// 不同 => 快照是干净画面，残影只能来自"写回没落到画面上"。
+static int g_barSnapX = 0;
+static int g_barSnapY = 0;
+static int g_barSnapW = 0;
+static int g_barSnapH = 0;
+static unsigned g_barSnapFpBefore = 0;
+static bool g_barSnapPending = false;
+
 // 释放快照（换场 / 位深变化 / 已写回后）。
 static void UiUnderReleaseSlot_(UiUnderSlot_& slot)
 {
@@ -624,7 +634,9 @@ static bool UiUnderCaptureSlot_(UiUnderSlot_& slot, int x, int y, int w, int h)
 
 // 把快照写回 backbuffer 的同一矩形并刷新。快照与当前 backbuffer 位深不一致
 // （切换 HD/窗口模式）时放弃，保留原状让下一帧清理。
-static bool UiUnderRestoreSlot_(UiUnderSlot_& slot)
+// release=false 时保留快照，供"离开界面后连续几帧重复写回"使用（战场外固定条：
+// 呈现链会把该矩形重新合成回来，单帧写回可能被盖掉，重复写回才稳）。
+static bool UiUnderRestoreSlotEx_(UiUnderSlot_& slot, bool release)
 {
     if (!slot.Valid()) return false;
     LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
@@ -656,9 +668,89 @@ static bool UiUnderRestoreSlot_(UiUnderSlot_& slot)
     if (restored) {
         H3WindowManager* wnd = H3WindowManager::Get();
         if (wnd) wnd->H3Redraw(slot.x, slot.y, slot.w, slot.h);
-        UiUnderReleaseSlot_(slot);
+        if (release) UiUnderReleaseSlot_(slot);
     }
     return restored;
+}
+
+static bool UiUnderRestoreSlot_(UiUnderSlot_& slot) { return UiUnderRestoreSlotEx_(slot, true); }
+
+// 诊断用：取 backbuffer 中矩形的采样指纹（每 4 像素一次 FNV-1a），失败返回 0。
+// 用途：分清"快照基线本身就是残影"（捕获前后指纹相同）和"写回没落到画面上"
+// （写回后指纹已等于基线、但玩家仍看到残影）。只在矩形变化帧调用，开销可忽略。
+static unsigned UiRectFingerprint_(int x, int y, int w, int h)
+{
+    LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
+    if (!bb || w <= 0 || h <= 0) return 0;
+    unsigned hash = 2166136261u;
+    bool ok = false;
+    __try {
+        DDSURFACEDESC desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.dwSize = sizeof(desc);
+        if (FAILED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))) return 0;
+        __try {
+            if (!desc.lpSurface) return 0;
+            const int bpp = UiBackBufferBpp_(bb);
+            const int px = bpp == 32 ? 4 : 2;
+            const int pitch = (int)desc.lPitch;
+            if (pitch > 0 && x >= 0 && y >= 0
+                && x + w <= (int)desc.dwWidth && y + h <= (int)desc.dwHeight) {
+                const BYTE* base = (const BYTE*)desc.lpSurface + (size_t)y * pitch + (size_t)x * px;
+                for (int row = 0; row < h; ++row) {
+                    const BYTE* line = base + (size_t)row * pitch;
+                    for (int col = 0; col < w; col += 4) {
+                        const unsigned v = px == 4 ? *(const DWORD*)(line + (size_t)col * 4)
+                                                   : (unsigned)*(const WORD*)(line + (size_t)col * 2);
+                        hash = (hash ^ v) * 16777619u;
+                    }
+                }
+                ok = true;
+            }
+        } __finally {
+            bb->Unlock(nullptr);
+        }
+    } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
+        ok = false;
+    }
+    return ok ? hash : 0;
+}
+
+// 一次性记录插件实际写入的 DD 表面尺寸。此前只能从 `画面=1820x900`（合成面）
+// 间接推断 backbuffer 大小，出残影时无法判断写入坐标是否落在同一张图上。
+static void UiLogBackBufferSizeOnce_()
+{
+    static bool logged = false;
+    if (logged) return;
+    LPDIRECTDRAWSURFACE bb = UiDDBackBuffer_();
+    if (!bb) return;
+    DDSURFACEDESC desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.dwSize = sizeof(desc);
+    DWORD width = 0, height = 0;
+    int pitch = 0, bpp = 0;
+    __try {
+        if (SUCCEEDED(bb->Lock(nullptr, &desc, DDLOCK_WAIT | DDLOCK_SURFACEMEMORYPTR, nullptr))) {
+            __try {
+                if (desc.lpSurface) {
+                    width = desc.dwWidth;
+                    height = desc.dwHeight;
+                    pitch = (int)desc.lPitch;
+                    bpp = UiBackBufferBpp_(bb);
+                    logged = true;
+                }
+            } __finally {
+                bb->Unlock(nullptr);
+            }
+        }
+    } __except (GuardCrashFilter_(GUARD_COPY, GetExceptionInformation())) {
+        logged = false;
+    }
+    if (!logged) return;
+    H3WindowManager* wnd = H3WindowManager::Get();
+    const int sw = wnd && wnd->screenPcx16 ? (int)wnd->screenPcx16->width : 0;
+    const int sh = wnd && wnd->screenPcx16 ? (int)wnd->screenPcx16->height : 0;
+    LogInfo("[Ui] DD 表面 %lux%lu bpp=%d pitch=%d 合成面=%dx%d", width, height, bpp, pitch, sw, sh);
 }
 
 static bool UiUnderCapture_(int x, int y, int w, int h)
@@ -691,12 +783,23 @@ static void UiSelectInterface_(bool outside)
 // 优先用私有快照；仅当从未捕获成功（例如 backbuffer 尺寸不足）时才退回 2026-10-05
 // 的老路径（screenPcx16→backbuffer），那条路径只是 best-effort：若该矩形已被
 // 呈现写脏，它会把残影写回去（2026-10-14 玩家实测就是这种情形）。
+// 2026-10-14 二修（玩家实测"整块内容仍残留"）：单帧写回不够——呈现链后续还会把
+// 该矩形重新合成回来（呈现源就是插件写入的那个 DD 表面，见 FUN_00600430），
+// 于是写回被自己盖掉。改为保留快照，交给 UiNativeEraseTick_ 在随后若干帧重复
+// 写回，直到残影不再出现。同时打采样指纹，区分"快照基线本身是脏的"与"写回没生效"。
+static int g_nativeEraseTicks = 0;
+static void UiNativeEraseTick_();
+
 static void UiNativeTailErase_()
 {
     if (g_underBar.Valid()) {
         const int bx = g_underBar.x, by = g_underBar.y, bw = g_underBar.w, bh = g_underBar.h;
-        if (UiUnderRestoreSlot_(g_underBar)) {
-            LogDebug("[Ui] native bar erased source=save-under x=%d y=%d w=%d h=%d", bx, by, bw, bh);
+        const unsigned fpNow = UiRectFingerprint_(bx, by, bw, bh);
+        if (UiUnderRestoreSlotEx_(g_underBar, false)) {
+            const unsigned fpAfter = UiRectFingerprint_(bx, by, bw, bh);
+            g_nativeEraseTicks = 30;   // 随后 30 帧每帧再写回一次
+            LogDebug("[Ui] native bar erased source=save-under x=%d y=%d w=%d h=%d fp_now=%08X fp_after=%08X",
+                bx, by, bw, bh, fpNow, fpAfter);
             return;
         }
     }
@@ -708,6 +811,20 @@ static void UiNativeTailErase_()
     LogDebug("[Ui] native bar erased source=screenPcx16 x=%d y=%d w=%d h=%d", uiTailX, uiTailY, w, uiTailH);
 }
 
+// 每帧调用（分发器 Draw）：把固定条快照重复写回若干帧，写完才释放快照。
+// 玩家切回战场外界面时由 UiApplyOutsideBar_ 取消，避免把新画的条擦掉。
+static void UiNativeEraseTick_()
+{
+    if (g_nativeEraseTicks <= 0) return;
+    --g_nativeEraseTicks;
+    if (!g_underBar.Valid()) { g_nativeEraseTicks = 0; return; }
+    const bool last = g_nativeEraseTicks == 0;
+    UiUnderRestoreSlotEx_(g_underBar, last);
+    if (last)
+        LogDebug("[Ui] native bar erase ticks done x=%d y=%d w=%d h=%d",
+            g_underBar.x, g_underBar.y, g_underBar.w, g_underBar.h);
+}
+
 // 运行期切换界面：先把旧界面的像素清干净（两套界面的恢复源不同，必须各清各的），
 // 再切换选择并作废两套残影跟踪，使新界面下一帧按新矩形重新呈现。
 static void UiApplyOutsideBar_(bool outside, const char* reason)
@@ -716,7 +833,11 @@ static void UiApplyOutsideBar_(bool outside, const char* reason)
     if (g_uiOutsideBar) UiNativeTailErase_();   // 旧界面=战场外固定条
     else UiFoldLeaveUi_();                      // 旧界面=战场内折叠灯（面板 + 灯）
     UiUnderRelease_();                          // 面板快照随界面切换作废
-    UiUnderReleaseSlot_(g_underBar);            // 战场外条快照同上（离开时已写回）
+    // 离开固定条时快照要留着给 UiNativeEraseTick_ 重复写回；进入固定条时作废旧快照。
+    if (!g_uiOutsideBar) {
+        g_nativeEraseTicks = 0;
+        UiUnderReleaseSlot_(g_underBar);
+    }
     uiTailX = -1;
     g_ui.listGesture = {};
     g_ui.scroll.dragging = false;
@@ -1095,11 +1216,21 @@ static void UiDrawBar_(H3CombatManager* mgr)
             // 连续同矩形帧里 backbuffer 已是上一帧的条像素，拍到就是拍到自己。
             // 整块矩形（含标题行与双列）一次覆盖，不必再按子矩形逐个清。
             if (rectChanged) {
+                UiLogBackBufferSizeOnce_();
                 UiUnderRestoreSlot_(g_underBar);      // 旧条矩形先写回干净像素
                 const int coverW = listsWidth > kUiBarWidth ? listsWidth : kUiBarWidth;
+                // 先记"即将被捕获的干净基线"指纹，本帧 blt 之后再记一次：两者相同
+                // 说明捕获到的是插件自己画的条（基线脏），不同说明基线是干净画面。
+                const unsigned fpBefore = UiRectFingerprint_(x, y, coverW, totalH);
                 if (!UiUnderCaptureSlot_(g_underBar, x, y, coverW, totalH))
                     LogWarn("[Draw] bar under-capture failed x=%d y=%d w=%d h=%d bpp=%d",
                         x, y, coverW, totalH, UiBackBufferBpp_(UiDDBackBuffer_()));
+                g_barSnapX = x;
+                g_barSnapY = y;
+                g_barSnapW = coverW;
+                g_barSnapH = totalH;
+                g_barSnapFpBefore = fpBefore;
+                g_barSnapPending = true;
             }
         } // !g_uiFoldLayout：战场外固定条与折叠面板共用 save-under 快照机制
         // 悬浮框整块呈现（含标题行），两个列表各覆盖自身窄矩形。
@@ -1115,6 +1246,14 @@ static void UiDrawBar_(H3CombatManager* mgr)
             listWidth, rows * UiRowHeight_());
         if (autoRows > 0) wnd->H3Redraw(x + kUiAutoListX, y + g_uiLayout.ListTop(),
             autoListWidth, autoRows * UiRowHeight_());
+        if (g_barSnapPending) {
+            g_barSnapPending = false;
+            const unsigned fpAfter = UiRectFingerprint_(
+                g_barSnapX, g_barSnapY, g_barSnapW, g_barSnapH);
+            LogDebug("[Draw] bar snapshot x=%d y=%d w=%d h=%d fp_before=%08X fp_after=%08X 基线脏=%d",
+                g_barSnapX, g_barSnapY, g_barSnapW, g_barSnapH,
+                g_barSnapFpBefore, fpAfter, g_barSnapFpBefore == fpAfter ? 1 : 0);
+        }
         redrawing = false;
         uiTailX = x;
         uiTailY = y;
