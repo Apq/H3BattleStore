@@ -442,6 +442,79 @@ static bool UiGamePointFromScreen_(POINT screenPoint, int* gameX, int* gameY)
     return true;
 }
 
+// 鼠标钩子事件坐标 → 游戏画面坐标。钩子给的是屏幕坐标，必须换算到
+// screenPcx16 坐标系才能与绘制/热区对齐；上面的换算按"游戏画面正好铺满
+// 整个客户区"假设，HD 窗口在客户区内还有边条（或非等比留边）时该假设不成立。
+// 2026-10-14 玩家实测：点击第一行控件（日志等级/「战场外」/打包日志）落在
+// 第二行与标题行——看得见、点不到；而悬停走的是游戏自身光标
+// （H3MouseManager::GetCursorPosition，与绘制同一坐标系）完全正常。
+// 两条路径坐标系不一致就是"悬停正常、点击错位"的直接原因。
+// 因此统一以游戏自身光标为准（战斗中由游戏逐帧刷新，和绘制同源），仅在
+// 光标不可用或与换算值相差过大（> kMousePointTrustGap，说明光标不可信）时
+// 退回换算值；两者不一致时首次打一行 info 供玩家日志核对 HD 窗口几何。
+static const int kMousePointTrustGap = 200;
+static int g_mouseSpaceLogged = 0;
+static int g_mouseSpaceLoggedX = 0;
+static int g_mouseSpaceLoggedY = 0;
+
+static void UiLogMouseSpace_(bool haveScaled, int evX, int evY, int curX, int curY,
+    int screenW, int screenH, int clientW, int clientH)
+{
+    if (!haveScaled || (abs(evX - curX) <= 2 && abs(evY - curY) <= 2)) return;
+    if (g_mouseSpaceLogged >= 5) return;                                  // 只留少量样本
+    if (g_mouseSpaceLogged > 0 && evX == g_mouseSpaceLoggedX && evY == g_mouseSpaceLoggedY) return;
+    ++g_mouseSpaceLogged;
+    g_mouseSpaceLoggedX = evX;
+    g_mouseSpaceLoggedY = evY;
+    LogInfo("[Ui] 鼠标坐标 event=(%d,%d) 游戏光标=(%d,%d) 采用=游戏光标 画面=%dx%d 客户区=%dx%d",
+        evX, evY, curX, curY, screenW, screenH, clientW, clientH);
+}
+
+static bool UiResolveMousePoint_(const POINT& screenPoint, int* gameX, int* gameY)
+{
+    int evX = 0, evY = 0;
+    const bool haveScaled = UiGamePointFromScreen_(screenPoint, &evX, &evY);
+    H3WindowManager* wnd = H3WindowManager::Get();
+    int screenW = 0, screenH = 0, clientW = 0, clientH = 0;
+    HWND gameWindow = *reinterpret_cast<HWND*>(0x699650);
+    RECT client = {};
+    if (gameWindow && GetClientRect(gameWindow, &client)) {
+        clientW = client.right - client.left;
+        clientH = client.bottom - client.top;
+    }
+    if (wnd && wnd->screenPcx16) {
+        screenW = wnd->screenPcx16->width;
+        screenH = wnd->screenPcx16->height;
+    }
+    int curX = 0, curY = 0;
+    bool haveCursor = false;
+    if (screenW > 0 && screenH > 0) {
+        const H3POINT cursor = H3POINT::GetCursorPosition();
+        if (cursor.x >= 0 && cursor.y >= 0 && cursor.x < screenW && cursor.y < screenH) {
+            curX = cursor.x;
+            curY = cursor.y;
+            haveCursor = true;
+        }
+    }
+    if (!haveCursor && !haveScaled) return false;
+    if (!haveCursor) {
+        *gameX = evX;
+        *gameY = evY;
+        return true;
+    }
+    const bool cursorUntrusted = haveScaled
+        && (abs(curX - evX) > kMousePointTrustGap || abs(curY - evY) > kMousePointTrustGap);
+    if (cursorUntrusted) {
+        *gameX = evX;
+        *gameY = evY;
+    } else {
+        *gameX = curX;
+        *gameY = curY;
+    }
+    UiLogMouseSpace_(haveScaled, evX, evY, curX, curY, screenW, screenH, clientW, clientH);
+    return true;
+}
+
 // 翻译层（第3步断直连）：钩子事件转 POD 交界面实现，钩子层只做守卫与翻译。
 static bool CombatKeyboardBody_(int code, WPARAM wParam, LPARAM lParam)
 {
@@ -513,7 +586,7 @@ static bool CombatMouseBody_(int code, WPARAM wParam, LPARAM lParam)
     if (combatOpen) {
         const MOUSEHOOKSTRUCT* mouse = reinterpret_cast<const MOUSEHOOKSTRUCT*>(lParam);
         int gameX = 0, gameY = 0;
-        if (!mouse || !UiGamePointFromScreen_(mouse->pt, &gameX, &gameY)) return false;
+        if (!mouse || !UiResolveMousePoint_(mouse->pt, &gameX, &gameY)) return false;
         e.gameX = gameX;
         e.gameY = gameY;
         if (wheel) {
