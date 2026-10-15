@@ -68,7 +68,8 @@ static void CommitAndCloseSettingsPanel_();
 static void DrawPanelToBuffer_();
 // 帮助与数字阈值录入状态需在键盘钩子前声明。
 static bool s_help_modal_open = false;
-static bool s_help_log_dd_open = false;
+// 2026-10-16：帮助页的日志级别下拉已移除（战场存档界面第一行已有该控件），
+// 原 s_help_log_dd_open 状态随之删除。
 static DWORD s_help_link_flash_tick = 0; // 复制开源地址成功时刻，地址行闪绿 1.2s
 static bool s_stop_turns_editing = false; // 正在录入当前方案的停止回合
 static char s_stop_turns_text[8] = {};     // 最多 3 位 + 结束符
@@ -1395,49 +1396,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
     const int max_row = PanelMaxScrollRow_();
     const int button_size = PanelScrollButtonSize_();
 
-    // 帮助模态框打开时：吞掉所有底层点击，仅允许关闭/日志级别/开源地址行。
+    // 帮助模态框打开时：吞掉所有底层点击，仅允许关闭/开源地址行。
     // 2026-10-15 移植：源插件的「打包日志」按钮已按移植要求移除（宿主已有
     // 打包日志功能，见 docs/11），此处不再有该分支。
+    // 2026-10-16 用户裁定：日志级别下拉也移除——战场存档界面第一行已有
+    // 日志等级单选列表，帮助页不再重复提供（见 docs/11 §7.7）。
     if (s_help_modal_open) {
         if (raw_command == 16) {
-            // 展开的级别列表优先：命中选项即切换级别；点外部收起。
-            if (s_help_log_dd_open) {
-                bool picked = false;
-                for (int i = 0; i < 5; ++i) {
-                    int ix = 0, iy = 0, iw = 0, ih = 0;
-                    GetHelpLogLevelItemRect_(i, &ix, &iy, &iw, &ih);
-                    if (!PointInRect_(px, py, ix, iy, iw, ih)) continue;
-                    picked = true;
-                    s_help_log_dd_open = false;
-                    if (i != g_log_level) {
-                        static const char* const kNames[5] = {
-                            "trace", "debug", "info", "warn", "error",
-                        };
-                        g_log_level = i;
-                        IniWriteKeyUtf8(g_user_ini_path, "Logging", "MinLevel", kNames[i]);
-                        char msg[128];
-                        _snprintf(msg, sizeof(msg) - 1, T("help.log_level_set"),
-                            kNames[i]);
-                        msg[sizeof(msg) - 1] = 0;
-                        SetStatusText_(msg, 4000);
-                        LogInfo("[Config] 日志级别切换为 %s（已写入 user.ini）", kNames[i]);
-                    }
-                    DrawPanelToBuffer_();
-                    break;
-                }
-                if (!picked) s_help_log_dd_open = false;
-                return; // 展开期间吞掉其余点击（含关闭按钮，先收起）
-            }
-            // 日志级别下拉框：开/关。
-            {
-                int dx = 0, dy = 0, dw = 0, dh = 0;
-                GetHelpLogLevelDdRect_(&dx, &dy, &dw, &dh);
-                if (PointInRect_(px, py, dx, dy, dw, dh)) {
-                    s_help_log_dd_open = true;
-                    DrawPanelToBuffer_();
-                    return;
-                }
-            }
             // 开源地址行（纯文本样式）：点击复制到剪贴板，成功后地址行
             // 原位闪绿 1.2 秒（状态栏在帮助模态的遮暗层下，不够醒目）。
             {

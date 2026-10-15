@@ -205,10 +205,18 @@ static void GetHelpButtonRect_(int* out_x, int* out_y, int* out_w, int* out_h)
     if (out_h) *out_h = HELP_BTN_SIZE;
 }
 
+// 说明文字区：9 行 × 行高 28（`help_lines` 与 `line_h` 在 DrawHelpModal_ 内，
+// 这两个常量供绘制与「开源地址行」定位共用，改行数/行高时两处一起改）。
+static const int HELP_TEXT_TOP_    = 50;
+static const int HELP_TEXT_LINES_  = 9;
+static const int HELP_TEXT_LINE_H_ = 28;
+
 static void GetHelpModalRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     const int w = 480;
-    const int h = 440; // 原 336 + 日志级别行 + 打包日志按钮行 + 召唤说明行
+    // 2026-10-16 用户裁定：帮助页不再提供日志级别下拉（战场存档界面第一行
+    // 已有日志等级单选列表），高度随之 440 → 404。
+    const int h = 404;
     if (out_x) *out_x = (PANEL_W - w) / 2;
     if (out_y) *out_y = (PANEL_H - h) / 2;
     if (out_w) *out_w = w;
@@ -227,66 +235,23 @@ static void GetHelpModalCloseRect_(int* out_x, int* out_y, int* out_w, int* out_
     if (out_h) *out_h = bh;
 }
 
-// 帮助模态新增行：日志级别下拉（收起态框体）与打包日志按钮。
-    // 级别序号 → 选项文案键（0..4 = trace..error）。
-static const char* HelpLogLevelOptKey_(int lv)
-{
-    static const char* const k[] = {
-        "help.log_level_opt0", "help.log_level_opt1", "help.log_level_opt2",
-        "help.log_level_opt3", "help.log_level_opt4",
-    };
-    return (lv >= 0 && lv < 5) ? k[lv] : k[2];
-}
-
-static const int HELP_DD_LABEL_W = 80;
-static const int HELP_DD_W  = 120;
-static const int HELP_DD_H  = 22;
-static int HelpDropdownRowHeight_() { return SmallFontRowHeight_(20); }
-
-// 行 A 顶（原 8 行 help_lines 底之下）。
-static void GetHelpLogLevelRowY_(int* out_y)
-{
-    int x = 0, y = 0, w = 0, h = 0;
-    GetHelpModalRect_(&x, &y, &w, &h);
-    if (out_y) *out_y = y + 50 + 9 * 28 + 6; // 9 行说明之后
-}
-
-static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_h)
-{
-    int x = 0, y = 0, w = 0, h = 0;
-    GetHelpModalRect_(&x, &y, &w, &h);
-    int ry = 0;
-    GetHelpLogLevelRowY_(&ry);
-    if (out_x) *out_x = x + 18 + HELP_DD_LABEL_W + 8;
-    if (out_y) *out_y = ry;
-    if (out_w) *out_w = HELP_DD_W;
-    if (out_h) *out_h = HELP_DD_H;
-}
-
-static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
-    int* out_w, int* out_h)
-{
-    int x = 0, y = 0, w = 0, h = 0;
-    GetHelpLogLevelDdRect_(&x, &y, &w, &h);
-    if (out_x) *out_x = x;
-    if (out_y) *out_y = y + HELP_DD_H + item * HelpDropdownRowHeight_();
-    if (out_w) *out_w = w;
-    if (out_h) *out_h = HelpDropdownRowHeight_();
-}
-
 // 2026-10-15 移植：GetHelpPackBtnRect_（打包日志按钮矩形）随该功能移除（见 docs/11）。
+// 2026-10-16 裁定：帮助页的日志级别下拉也移除——原 GetHelpLogLevelRowY_/
+// GetHelpLogLevelDdRect_/GetHelpLogLevelItemRect_、HELP_DD_* 常量、
+// HelpDropdownRowHeight_ 与 HelpLogLevelOptKey_ 一起删掉，因为战场存档界面
+// 第一行已有日志等级单选列表，帮助页不再重复提供该控件。
 
-// 开源地址行（纯文本样式，点击复制）：日志级别下拉下方、关闭按钮上方。
+// 开源地址行（纯文本样式，点击复制）：说明文字下方、关闭按钮上方。
 // 2026-10-15 移植：源插件此处原本还有「打包日志」按钮，移除后本行上移到
-// 原按钮位置（原来还要再让出 HELP_PACK_BTN_H + 4）。
+// 原按钮位置（原来还要再让出 HELP_PACK_BTN_H + 4）；2026-10-16 再上移到原
+// 日志级别下拉行的位置。
 static void GetHelpLinkRect_(int* out_x, int* out_y, int* out_w, int* out_h)
 {
     int x = 0, y = 0, w = 0, h = 0;
     GetHelpModalRect_(&x, &y, &w, &h);
-    int ry = 0;
-    GetHelpLogLevelRowY_(&ry);
     if (out_x) *out_x = x + 18;
-    if (out_y) *out_y = ry + HELP_DD_H + 10 + 4;
+    if (out_y) *out_y =
+        y + HELP_TEXT_TOP_ + HELP_TEXT_LINES_ * HELP_TEXT_LINE_H_ + 6;
     if (out_w) *out_w = w - 36;
     if (out_h) *out_h = 18;
 }
@@ -435,8 +400,8 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         hotkey_line,
         T("help.line6"),
     };
-    const int line_h = 28;
-    int ty = y + 50;
+    const int line_h = HELP_TEXT_LINE_H_;
+    int ty = y + HELP_TEXT_TOP_;
     for (int i = 0; i < (int)(sizeof(help_lines) / sizeof(help_lines[0])); ++i) {
         DrawTxt(scr, small_font, help_lines[i],
             x + 18, ty, w - 36, line_h,
@@ -444,29 +409,13 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         ty += line_h;
     }
 
-// 行 A：日志级别下拉（选项 = 全部/调试/信息/警告/错误，对应 trace..error）。
-    {
-        int ry = 0;
-        GetHelpLogLevelRowY_(&ry);
-        DrawTxt(scr, small_font, T("help.log_level_label"),
-            x + 18, ry, HELP_DD_LABEL_W, HELP_DD_H,
-            (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
-        int dx = 0, dy = 0, dw = 0, dh = 0;
-        GetHelpLogLevelDdRect_(&dx, &dy, &dw, &dh);
-        Fill(scr, dx, dy, dw, dh, s_help_log_dd_open ? 104 : 74,
-            s_help_log_dd_open ? 70 : 52, s_help_log_dd_open ? 28 : 24);
-        scr->DrawFrame(dx, dy, dw, dh, (BYTE)210, (BYTE)170, (BYTE)72);
-        DrawTxt(scr, small_font, T(HelpLogLevelOptKey_(g_log_level)),
-            dx + 6, dy, dw - 20, dh,
-            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
-        CellControl_DrawArrow(scr, dx + dw - 14, dy + dh / 2 - 2,
-            !s_help_log_dd_open);
-    }
-    // 行 B：2026-10-15 移植：源插件的「打包日志」按钮已移除（宿主已有打包
-    // 日志功能，见 docs/11），此处不再绘制；开源地址行上移到该位置。
-    // 行 C：开源地址（纯文本样式，不做按钮框；点击复制到剪贴板）。
-    // 游戏只有 bigfont/smalfont 两档字体，用 smalfont + 紧凑行高 + 灰色
-    // 富文本呈现「小一号」的低调观感。复制成功后 1.2 秒内整行变绿。
+    // 2026-10-15 移植：源插件的「打包日志」按钮已移除（宿主已有打包日志
+    // 功能，见 docs/11），此处不再绘制。
+    // 2026-10-16 用户裁定：日志级别下拉也移除（战场存档界面第一行已有日志
+    // 等级单选列表，不再重复提供），开源地址行上移到原下拉行的位置。
+    // 开源地址（纯文本样式，不做按钮框；点击复制到剪贴板）。游戏只有
+    // bigfont/smalfont 两档字体，用 smalfont + 紧凑行高 + 灰色富文本呈现
+    // 「小一号」的低调观感。复制成功后 1.2 秒内整行变绿。
     {
         int lx = 0, ly = 0, lw = 0, lh = 0;
         GetHelpLinkRect_(&lx, &ly, &lw, &lh);
@@ -475,25 +424,6 @@ static void DrawHelpModal_(H3LoadedPcx16* scr)
         DrawRichTxt(scr, small_font,
             T(dt < 1200 ? "help.link_flash" : "help.link"),
             lx, ly, lw, lh, (INT32)eTextColor::GRAY);
-    }
-    // 展开的级别列表（最后绘制，盖在按钮上层）。
-    if (s_help_log_dd_open) {
-        static const char* const kKeys[] = {
-            "help.log_level_opt0", "help.log_level_opt1", "help.log_level_opt2",
-            "help.log_level_opt3", "help.log_level_opt4",
-        };
-        for (int i = 0; i < 5; ++i) {
-            int ix = 0, iy = 0, iw = 0, ih = 0;
-            GetHelpLogLevelItemRect_(i, &ix, &iy, &iw, &ih);
-            const bool cur = (i == g_log_level);
-            Fill(scr, ix, iy, iw, ih,
-                cur ? 136 : 68, cur ? 88 : 42, cur ? 24 : 18);
-            scr->DrawFrame(ix, iy, iw, ih,
-                (BYTE)(cur ? 232 : 166), (BYTE)(cur ? 184 : 112), (BYTE)(cur ? 76 : 40));
-            DrawTxt(scr, small_font, T(kKeys[i]),
-                ix + 6, iy, iw - 12, ih,
-                (INT32)eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
-        }
     }
 
     int bx = 0, by = 0, bw = 0, bh = 0;

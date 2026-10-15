@@ -74,22 +74,18 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.line_summon", "召唤：召唤页勾「启用自动召唤」后，保活无人可救且兵力不足时召唤元素补位" },
     { "help.line_hotkey", "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置" },
     { "help.line6", "设置有效期：同一场战斗，包括取消重打；重打/重开后开面板即见上次方案" },
-    { "help.link", "{灰}开源地址（点击复制）：{白}https://github.com/Apq/H3Auto" },
-    { "help.link_flash", "{绿}开源地址（点击复制）：https://github.com/Apq/H3Auto" },
-    { "help.link_url", "https://github.com/Apq/H3Auto" },
+    { "help.link", "{灰}开源地址（点击复制）：{白}https://github.com/Apq/H3BattleStore.git" },
+    { "help.link_flash", "{绿}开源地址（点击复制）：https://github.com/Apq/H3BattleStore.git" },
+    { "help.link_url", "https://github.com/Apq/H3BattleStore.git" },
     { "help.link_copied", "{绿}开源地址已复制到剪贴板" },
     { "help.link_fail", "{红}复制失败：剪贴板被占用，请重试" },
     { "help.close", "关闭" },
-    { "help.log_level_label", "日志级别:" },
-    { "help.log_level_opt0", "全部" },
-    { "help.log_level_opt1", "调试" },
-    { "help.log_level_opt2", "信息" },
-    { "help.log_level_opt3", "警告" },
-    { "help.log_level_opt4", "错误" },
     // 2026-10-15 移植：源插件的打包日志按钮及其文案（help.pack_btn/pack_title/
     // pack_ok/pack_note/pack_fail/pack_no_logs/pack_clipboard_fail）已移除——
     // 宿主自带打包日志功能，合并版不再重复提供（见 docs/11）。
-    { "help.log_level_set", "{绿}日志级别已设为 %s（已写入 user.ini）" },
+    // 2026-10-16 用户裁定：帮助页的日志级别下拉也移除，其文案键
+    // （help.log_level_label / opt0..opt4 / help.log_level_set）一并删除——
+    // 日志等级单选列表在战场存档界面第一行，不再重复提供。
     // ---- tips：状态栏悬停提示 ----
     { "tips.color_wrap", "{金}%s" },
     { "tips.titlebar", "热键：%s 启停打铁 · %s 单次接管 · %s 打开设置 · 右键“自动战斗”按钮也可打开" },

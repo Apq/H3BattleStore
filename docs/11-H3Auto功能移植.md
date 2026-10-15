@@ -330,7 +330,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 **机制事实（本次定案）**：施法四通道（力盾由 `EnsureForceFieldBeforeAction_` 承担；保活/保持状态/召唤走 `TryProtectCast_`；智能攻击走 `TryAttackMagicCast_`）原先只在 `0x4744D0` 的 **`orig == 0`（控制权交给玩家）** 时刻判——`HH_ShouldAutoExecute` 里 `TryProtectCast_(This)` 是全局唯一调用点，其后才是 `TryAutoStop_` 与 `TryAttackMagicCast_`。战斗消息入口 `TryAutoExecuteActiveStack`（`0x4746B0` 段与每帧段调用）只做力盾、接管判定与动作提交，**不判施法**。而启停热键是在消息入口轮询的（`PollControlHotkeys_`）——因此**按下 F9 切到全自动时，当前部队的交权判定已经过去，当回合不会补施**；玩家要手动按一次「等待」让该部队本回合再次行动，才会走新的一次交权而施法（玩家实测现象与代码路径完全吻合）。
 
-**日志可见性**：施法成功的留痕是 info 级（`[Protect] cast done`、`[Status] cast done`、`[Summon] 召唤成功`、`[AttackMagic] submit`），而判定的中间过程（逐队 `[Protect] queue/cand`）与 `heroCasted` 挡板是 debug 级；`g_control != CM_AUTO`（非全自动不判）这条分支**没有任何日志**。所以玩家默认的 info 级日志只能证明「没施法」，不能说明原因——排查此类反馈必须让玩家临时把日志级别切到 debug（面板帮助说明 → `[Config] 日志级别切换为 debug`）。
+**日志可见性**：施法成功的留痕是 info 级（`[Protect] cast done`、`[Status] cast done`、`[Summon] 召唤成功`、`[AttackMagic] submit`），而判定的中间过程（逐队 `[Protect] queue/cand`）与 `heroCasted` 挡板是 debug 级；`g_control != CM_AUTO`（非全自动不判）这条分支**没有任何日志**。所以玩家默认的 info 级日志只能证明「没施法」，不能说明原因——排查此类反馈必须让玩家临时把日志级别切到 debug：**战场存档界面悬浮条第一行**的日志等级单选列表点「调试」即写入 `H3BattleStore.user.ini` 的 `[Logging] MinLevel` 并立即生效（留痕 `[Config] 日志等级已切换并写入用户配置：…`）。打铁帮助页自 2026-10-16 起不再提供该下拉（见 §7.7）。
 
 **修法（A + B，均在消息入口，且必须在提交动作之前执行）**：
 
@@ -451,6 +451,17 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 **测试**：`tests\PolicyCoreTests.cpp` 覆盖 `CreatureCanReceiveStatusSpell(62, …)`（亡灵 / 心智免疫拒绝、普通生物接受）与 `ChooseBlindTarget` 的选择序（同剩余取威胁最大且 `mass == 0`、阈值 0 忽略未到期、还够的不动、单体无整体覆盖规则、`-1` 不参与、空指针容错、无敌人不施放）。策略层为生产与单测共用文件，故两侧同源。
 
 **已知边界（待游戏内验收）**：失明的实际命中与"醒来"由原版处理，插件只按 `active_spell_duration` 记剩余；被抵抗时按上面的整场跳过机制处理，不做逐次重试。
+
+### 7.7 打铁帮助模态（右上角「?」）的现行内容（2026-10-16）
+
+帮助模态 = 遮暗整面板的模态层，内容自上而下：**9 行说明文字**（打开方法/方案 1-5/智能攻击/停止/本场存档/删除/召唤/热键/有效期，文案键 `help.line_*`）→ **开源地址行**（纯文本样式、不做按钮框，点击复制到剪贴板，成功时整行闪绿 1.2 秒）→ **关闭按钮**。模态矩形 `GetHelpModalRect_` 宽 480、高 **404**；说明区 9 行 × 行高 28 抽成 `HELP_TEXT_TOP_` / `HELP_TEXT_LINES_` / `HELP_TEXT_LINE_H_` 三个常量，绘制与「开源地址行」定位共用同一组常量，开源地址行紧接说明区之后（`y + 50 + 9 × 28 + 6`）。
+
+**不在帮助页里的控件**（均为用户裁定，避免与宿主已有界面重复）：
+
+- 「打包日志」按钮：2026-10-15 合并时移除（宿主悬浮条第一行自带该功能，见 §3.4、§7.5）。
+- **日志级别下拉：2026-10-16 用户裁定移除** —— 战场存档界面悬浮条第一行的日志等级单选列表已经提供该设置（点选即写 `H3BattleStore.user.ini` 的 `[Logging] MinLevel` 并立即生效），帮助页不再重复提供。随之删除的代码：`PanelDraw.inc.cpp` 的 `HelpLogLevelOptKey_`、`HELP_DD_LABEL_W/HELP_DD_W/HELP_DD_H`、`HelpDropdownRowHeight_`、`GetHelpLogLevelRowY_`、`GetHelpLogLevelDdRect_`、`GetHelpLogLevelItemRect_` 及「行 A」下拉与展开列表两处绘制；`PanelDraw.hpp` 的两条声明；`SettingsDlg.inc.cpp` 的 `s_help_log_dd_open` 状态与「展开列表点选」「下拉开合」两个点击分支（帮助模态的点击处理只剩开源地址行与关闭按钮）。**功能没有减少**，只是不再有两个入口。模态高度由 440 缩到 404。
+
+**开源地址**：`help.link`（显示行）/ `help.link_url`（点击复制的载荷）/ `help.link_flash`（复制成功的闪绿副本）三键都指向 **`https://github.com/Apq/H3BattleStore.git`**（2026-10-16 用户裁定，原为 `https://github.com/Apq/H3Auto`）。改地址只需同时改 `modules\UiTexts.inc.cpp` 与 `lang\zh-CN.ini` 两侧的这三个键（键名不变）。
 
 ## 8. 分批实施与验收状态
 

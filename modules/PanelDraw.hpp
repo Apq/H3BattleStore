@@ -8,11 +8,10 @@
 static void DrawMeleePickMarker_();
 static void GetHelpModalCloseRect_(int* out_x, int* out_y, int* out_w, int* out_h);
 static void GetHelpLinkRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void GetHelpLogLevelDdRect_(int* out_x, int* out_y, int* out_w, int* out_h);
-static void GetHelpLogLevelItemRect_(int item, int* out_x, int* out_y,
-    int* out_w, int* out_h);
 // 2026-10-15 移植：源插件的 GetHelpPackBtnRect_（打包日志按钮矩形）已随
 // 「打包日志」功能一并移除（宿主已有该功能，见 docs/11）。
+// 2026-10-16：GetHelpLogLevelDdRect_/GetHelpLogLevelItemRect_（帮助页的
+// 日志级别下拉）同批移除——战场存档界面第一行已有日志等级单选列表。
 static void StatusSlotRect_(int index, int* x, int* y);
 static void GetSummonSpellDdItemRect_(int item, int* out_x, int* out_y,
     int* out_w, int* out_h);
