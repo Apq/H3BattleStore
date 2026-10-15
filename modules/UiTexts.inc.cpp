@@ -4,7 +4,7 @@
 // lang\<语言>.ini 覆盖命中键；缺文件/缺键回落内置默认（删光配置不崩）。
 // 键 = "节.键名"；值支持富文本颜色标记（{金} {#RRGGBB} 等）与 %s/%d
 // 格式串。行内注释只认 ';'，'#' 只在行首当注释（保护 {#RRGGBB}）。
-// 仅状态栏键（panel.status_* / help.pack_*）走富文本绘制，其他位置的
+// 仅状态栏键（panel.status_*）走富文本绘制，其他位置的
 // 键带标记会原样显示。
 
 #include "PanelLayout.hpp"
@@ -86,13 +86,9 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "help.log_level_opt2", "信息" },
     { "help.log_level_opt3", "警告" },
     { "help.log_level_opt4", "错误" },
-    { "help.pack_btn", "打包日志" },
-    { "help.pack_title", "日志已打包" },
-    { "help.pack_ok", "日志已打包成 .7z 并复制为文件，直接到 QQ 聊天框粘贴发送即可。|QQ群：1042362808 / 740338251，或加 QQ：712999712 私发。|（QQ号已同时写在压缩包内的 00_说明.txt 里，解压即可复制）" },
-    { "help.pack_note", "请把同目录的日志文件发送到：|QQ群：1042362808 / 740338251|或加 QQ：712999712 私发|" },
-    { "help.pack_fail", "{红}打包日志失败：%s" },
-    { "help.pack_no_logs", "没有找到日志文件" },
-    { "help.pack_clipboard_fail", "zip 已生成但复制路径失败（剪贴板被占用），请手动复制" },
+    // 2026-10-15 移植：源插件的打包日志按钮及其文案（help.pack_btn/pack_title/
+    // pack_ok/pack_note/pack_fail/pack_no_logs/pack_clipboard_fail）已移除——
+    // 宿主自带打包日志功能，合并版不再重复提供（见 docs/11）。
     { "help.log_level_set", "{绿}日志级别已设为 %s（已写入 user.ini）" },
     // ---- tips：状态栏悬停提示 ----
     { "tips.color_wrap", "{金}%s" },

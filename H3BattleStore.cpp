@@ -68,12 +68,27 @@ namespace autoassist {
 #include "modules/PanelLayout.hpp"       // 面板布局常量（UiTexts/界面层共用）
 #include "modules/UiTexts.inc.cpp"       // i18n 文本表 + lang\*.ini 覆盖
 #include "modules/Compat.inc.cpp"        // 游戏全局对象访问垫片（窗口管理器等）
+#if !defined(H3BS_UI_NULL)
+// 界面层（批次三）：宿主诊断变体（H3BS_UI_NULL）与源插件 H3AUTO_UI_NULL 同口径——
+// 不包含界面实现时 g_uiPort 保持 UiPortHost 的兜底空实现，面板/拾取/悬浮物不存在，
+// 自动化与生命周期层照常运行。PanelGfx 须排在 SpellRules 之前（沿用源插件顺序）。
+#include "modules/PanelGfx.inc.cpp"      // 面板绘制原语 + 字体/PCX 资源加载
+#endif
 #include "modules/SpellRules.inc.cpp"    // 施法规则（群体/熟练度）
 #include "modules/AutoExecute.inc.cpp"   // 自动战斗决策与执行（含两个 HiHook 回调）
 #include "modules/ForceField.inc.cpp"    // 力盾选点
 #include "modules/AttackMagic.inc.cpp"   // 攻击魔法规则
 #include "modules/BattleState.inc.cpp"   // 战斗状态机
 #include "modules/BattleLifecycle.inc.cpp" // 战斗生命周期事件源
+#if !defined(H3BS_UI_NULL)
+// 界面层主体（批次三）：控件 → 设置面板（内含 MagicChannelUi）→ 输入捕获 → 绘制
+// （内含 MagicChannelDraw）。SettingsDlg 尾部的 PanelUiPort 适配器在静态初始化期
+// 把 g_uiPort 从兜底实现接管为真实面板实现。
+#include "modules/CellControl.inc.cpp"   // 面板控件（下拉/列表/按钮/滚动）
+#include "modules/SettingsDlg.inc.cpp"   // 设置面板（模态帮助页已移除打包日志按钮）
+#include "modules/PanelInput.inc.cpp"    // 面板输入捕获（WH_KEYBOARD/WH_MOUSE）
+#include "modules/PanelDraw.inc.cpp"     // 面板内容绘制
+#endif
 } // namespace autoassist
 
 #include "modules/BattleUiPort.hpp"
