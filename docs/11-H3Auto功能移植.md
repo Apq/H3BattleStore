@@ -326,6 +326,24 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 - `DLL_PROCESS_DETACH`（`Entry.inc.cpp:1023-1029`）需要补 `autoassist::ShutdownCombatHotkeys()`（`AutoExecute.inc.cpp:514-520`）与 `autoassist::ResetAutoState()`（源侧 DETACH 两者都调）；宿主自己的 `g_combatKeyboardHook/g_combatMouseHook` 卸载与 `GuardShutdown()` 保持原样。
 - 面板的 `WH_KEYBOARD/WH_MOUSE` 由面板关闭路径卸载（`SettingsDlg.inc.cpp:1166-1172`），不需要额外补。
 
+### 5.7 施法通道的判定时机，与消息入口补判（2026-10-15 玩家反馈修复）
+
+**机制事实（本次定案）**：施法四通道（力盾由 `EnsureForceFieldBeforeAction_` 承担；保活/保持状态/召唤走 `TryProtectCast_`；智能攻击走 `TryAttackMagicCast_`）原先只在 `0x4744D0` 的 **`orig == 0`（控制权交给玩家）** 时刻判——`HH_ShouldAutoExecute` 里 `TryProtectCast_(This)` 是全局唯一调用点，其后才是 `TryAutoStop_` 与 `TryAttackMagicCast_`。战斗消息入口 `TryAutoExecuteActiveStack`（`0x4746B0` 段与每帧段调用）只做力盾、接管判定与动作提交，**不判施法**。而启停热键是在消息入口轮询的（`PollControlHotkeys_`）——因此**按下 F9 切到全自动时，当前部队的交权判定已经过去，当回合不会补施**；玩家要手动按一次「等待」让该部队本回合再次行动，才会走新的一次交权而施法（玩家实测现象与代码路径完全吻合）。
+
+**日志可见性**：施法成功的留痕是 info 级（`[Protect] cast done`、`[Status] cast done`、`[Summon] 召唤成功`、`[AttackMagic] submit`），而判定的中间过程（逐队 `[Protect] queue/cand`）与 `heroCasted` 挡板是 debug 级；`g_control != CM_AUTO`（非全自动不判）这条分支**没有任何日志**。所以玩家默认的 info 级日志只能证明「没施法」，不能说明原因——排查此类反馈必须让玩家临时把日志级别切到 debug（面板帮助说明 → `[Config] 日志级别切换为 debug`）。
+
+**修法（A + B，均在消息入口，且必须在提交动作之前执行）**：
+
+- `TryProbeCastChannelFromMsg_(_BattleMgr_* mgr, bool force)`（`AutoExecute.inc.cpp`，`TryAutoExecuteActiveStack` 上方）：门槛＝`mgr->action == 0`（动作未落地）＋ 与 `TrySubmitConfiguredAction_` 同口径的「自动战斗/隐藏战斗/战术期」排除；随后按交权路径同序调 `TryProtectCast_` 与 `TryAttackMagicCast_`。施放与否仍由通道内部静默判定（已施法/无法施法/方式不保活/阈值未达/无尸体格），本函数只负责「补上错过的判定」。
+  - **A**（`force=false`）：判为 `CD_EXECUTE_H3AUTO` 时补判，闸门＝**每回合最多一次**（静态 `s_gate_turn`），只补错过的时刻，不改变交权路径既有的「每次行动都判」节奏。
+  - **B**（`force=true`）：全局 `g_cast_probe_pending` 由 `ToggleBattleManual_()` 在**切到全自动**时置位，消息入口当帧强制补判一次——不看当前部队是否已配置规则，覆盖「当前部队是手动规则/等待中，`DecideTakeover` 不返回代发」的情形。交权路径在 `TryProtectCast_(This)` 之后消费该标志（避免下一帧重复补判）。
+- 顺序约束：补判发生在 `DecideTakeover` 之后、`TrySubmitConfiguredAction_` **之前**（此刻 `action` 仍为 0）；这与交权路径「先施法、钩子返回 0、消息入口再提交动作」的实际时序一致。
+- 铠甲：补判函数在 `TryAutoExecuteActiveStack` 既有的 `__try` 内被调用（与交权路径把 `TryProtectCast_` 放在 `__try` 内同规），不新增钩子、不改钩子入口结构、原版函数调用次数不变。
+
+**同批修掉的日志缺陷**：`UpdateStackTracking_` 的 `[Track] identity lost slot=%d expect=0x%X got=0x%X` 两个实参都取 `creature_id`（常打出同一个数，无法判断是哪个身份分量不等），改为打印完整身份元组的「期望/当前」对照 + 代次 + 生物 id：`id(k=kind s=side v=value o=occurrence)`。判等口径（`H3AutoPolicy::StableStackIdentityEquals`：kind/side/value/occurrence 全等，任一侧 `STACK_ID_NONE` 即不等）未改。
+
+**验证边界**：两变体 0 错 0 警、七组单测全绿、部署哈希一致；「按 F9 后当回合是否立即补施、『等待』不再是必须步骤」属游戏内行为，**由用户实机验收**。
+
 ## 6. 协作机制直连化改造
 
 两插件时代的协作 ABI（[协作与防冲突](<10-H3Auto协作与防冲突.md>) §2）靠 patcher 注册表 + 名字查询；合并成同 TU 后，移植侧不再需要「动态查询、加载顺序无关」，改为直接调用宿主实现。

@@ -50,6 +50,12 @@ static ControlMode g_control = CM_MANUAL;
 // J 单次接管结束后的返回模式：按 J 时记录（AUTO 中按 J 完成回 AUTO 继续，
 // MANUAL 中按 J 完成回 MANUAL；不再固定回 AUTO）。
 static ControlMode g_oneshot_return = CM_MANUAL;
+// A/B（2026-10-15 玩家反馈修复）：切到全自动时置一次「补判施法通道」探针。
+// 背景：施法通道只在 0x4744D0「控制权交给玩家」时刻判，而启停热键是在消息
+// 入口轮询的——按下 F9 切全自动那一刻的交权判定已经过去，当回合不补施，
+// 玩家要手动按一次「等待」让该部队再次行动才看到施法。探针由消息入口当帧
+// 消费（见 TryProbeCastChannelFromMsg_）。
+static bool g_cast_probe_pending = false;
 
 // ===== 单位管线子状态（重构步骤 §1.2；锚定 g_pipeline_stack 活动单位）=====
 // PS_SPELL_* 仅兼容 ForceField/BattleState 的既有清理接口。
@@ -347,8 +353,18 @@ static void UpdateStackTracking_()
                 t.identity, current_identities[i])) {
             // 槽位被复用/清空：本绑定失效。
             if (t.alive) {
-                LogWarn("[Track] identity lost slot=%d expect=0x%X got=0x%X",
-                    i, t.creature_id, s->creature_id);
+                // E（2026-10-15 修复）：原日志 expect/got 两个值都取 creature_id，
+                // 常打出同一个数（如 expect=0x38 got=0x38），看不出究竟哪个身份
+                // 分量不等。改为完整身份元组的「期望/当前」对照 + 代次 + 生物 id：
+                // k=kind s=side v=value o=occurrence。
+                LogWarn("[Track] identity lost slot=%d attempt=%d/%d cid=0x%X/0x%X id(k=%d/%d s=%d/%d v=%d/%d o=%d/%d)",
+                    i, t.attempt_id, g_battle_attempt_id,
+                    t.creature_id, s->creature_id,
+                    (int)t.identity.kind, (int)current_identities[i].kind,
+                    (int)t.identity.side, (int)current_identities[i].side,
+                    (int)t.identity.value, (int)current_identities[i].value,
+                    (int)t.identity.occurrence,
+                    (int)current_identities[i].occurrence);
             }
             t.alive = false;
             t.count_alive = 0;
@@ -677,7 +693,12 @@ static void ToggleBattleManual_()
 {
     // 切到全手动时，单次接管无意义；切回自动时也清掉未完成的单次锁定。
     ClearOneShotManual_();
-    SetControlMode_(g_control == CM_MANUAL ? CM_AUTO : CM_MANUAL);
+    const bool to_auto = (g_control == CM_MANUAL);
+    SetControlMode_(to_auto ? CM_AUTO : CM_MANUAL);
+    // B（2026-10-15 玩家反馈修复）：切到全自动时置一次补判探针，让消息入口
+    // 当帧补判施法通道（保活→保持状态→召唤、智能攻击），不必等下一次交权
+    // ——否则就是玩家观察到的「按 F9 后不施法，手动等待一次才施法」。
+    if (to_auto) g_cast_probe_pending = true;
 }
 
 // 回合控制权判定/消息入口调用：消费钩子记录的热键按下 + 处理待命单次接管。
@@ -2891,6 +2912,41 @@ static bool BattleStoreAllowsAutomation_(_BattleMgr_* mgr)
         });
 }
 
+// A（2026-10-15 玩家反馈修复）：消息入口补判施法通道（保活→保持状态→召唤、智能攻击）。
+//
+// 为什么需要：施法四通道原先只在 HiHook 0x4744D0「控制权交给玩家」时刻判
+// （HH_ShouldAutoExecute 里 TryProtectCast_ 的唯一调用点），而启停热键是在消息
+// 入口轮询的——按下 F9 切到全自动时，当前部队的交权判定已经过去，当回合不会补施；
+// 玩家要手动按一次「等待」让该部队本回合再次行动，才会走新的一次交权而施法。
+//
+// force=true（F9 切自动那一帧，B）：不看当前部队是否已配置规则，强制补判一次，
+// 覆盖「当前部队是手动规则/等待中」的情形；
+// force=false（判为代发动作时，A）：走每回合一次的闸门，只补上错过的判定，
+// 不改变交权路径既有的「每次行动都判」节奏。
+// 施放与否仍由通道内部静默判定（已施法/无法施法/方式不保活/阈值未达/无尸体格）。
+// 返回 true 表示本帧确实做了补判。
+static bool TryProbeCastChannelFromMsg_(_BattleMgr_* mgr, bool force)
+{
+    if (!mgr) return false;
+    // 动作已落地时不补判：施法必须在提交动作之前（此时 action 仍为 0）。
+    if (mgr->action != 0) return false;
+    // 与 TrySubmitConfiguredAction_ 同口径的门槛：自动战斗/隐藏战斗/战术期不施放。
+    if (mgr->auto_combat || IsHiddenBattle(mgr) || IsTacticsPhase_(mgr))
+        return false;
+    const int turn = GetCurrentBattleTurn_(mgr);
+    if (!force) {
+        if (turn < 0) return false;
+        static int s_gate_turn = -2;
+        if (s_gate_turn == turn) return false;   // 本回合已补判过
+        s_gate_turn = turn;
+    }
+    LogDebug("[Protect] msg-entry cast probe turn=%d force=%d control=%d action=%d",
+        turn, force ? 1 : 0, (int)g_control, mgr->action);
+    TryProtectCast_(mgr);
+    TryAttackMagicCast_(mgr);     // 智能攻击同序补判（与 0x4744D0 路径一致）
+    return true;
+}
+
 // 供战斗消息入口调用：若当前单位应由 H3Auto 主动执行，则提交动作。
 // 返回 true 表示已写入 action，原版输入可继续走默认路径处理后续。
 bool TryAutoExecuteActiveStack(bool allow_unit_action)
@@ -2902,7 +2958,15 @@ bool TryAutoExecuteActiveStack(bool allow_unit_action)
         PollControlHotkeys_(mgr);
         if (!BattleStoreAllowsAutomation_(mgr)) return false;
         if (!EnsureForceFieldBeforeAction_(mgr)) return false;
+        // B：F9 切到全自动那一帧置的探针（不看当前部队是否有配置）。
+        const bool cast_probe_forced = g_cast_probe_pending;
+        if (cast_probe_forced) g_cast_probe_pending = false;
         const int decision = DecideTakeover(mgr);
+        // A/B：补判施法通道，必须在本帧提交动作之前做。
+        if (cast_probe_forced)
+            TryProbeCastChannelFromMsg_(mgr, true);
+        else if (decision == CD_EXECUTE_H3AUTO)
+            TryProbeCastChannelFromMsg_(mgr, false);
         if (decision != CD_EXECUTE_H3AUTO)
             return false;
         // info 留痕：判定为「插件执行」后，确认消息入口确实被调用、
@@ -2951,6 +3015,9 @@ int __stdcall HH_ShouldAutoExecute(HiHook* h, _BattleMgr_* This)
         // 复活按各队方式（剩余数量≤/损失量大于恢复量），召唤按阈值，
         // 已施法/无法施法时内部静默跳过。仅 orig==0 路径判。
         TryProtectCast_(This);
+        // B：交权路径本身已经判过施法通道了，F9 探针到此消费（避免下一帧消息
+        // 入口再强制补判一次；即便重复也只会被 heroCasted 静默挡下）。
+        g_cast_probe_pending = false;
         TryAutoStop_(This);
         if (!TryAttackMagicCast_(This)) return 0;
         // 统一使用 current_mon_side/index 对应的 CurrentTurnStack_：自动模式下
