@@ -147,6 +147,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "cell.wait_every", "每回合" },
     { "cell.wait_siege", "不反兵攻城" },
     { "cell.siege_safe_lbl", "安全位置" },
+    { "cell.siege_hint", "退避步走此格，右键清空" },
     { "cell.protect_mode_lbl", "保活:" },
     { "cell.protect_mode_none", "不保活" },
     { "cell.protect_mode_count", "剩余数量≤" },
@@ -178,12 +179,27 @@ static const int kUiTextCount = (int)(sizeof(kUiTextDefaults) / sizeof(kUiTextDe
 // 192 会在多行说明中途截断。
 static char s_ui_overrides[kUiTextCount][512];
 
-// 取界面文案。键不存在返回 "!!键!!"（开发期立即可见）。
+// 取界面文案。键不存在返回 "!!键不存在!!"（开发期立即可见），并**在日志里记一次**：
+// 缺键以前只在画面上显形，玩家日志查不到，只能靠肉眼看屏（cell.siege_hint 就是这么漏的）。
 static const char* T(const char* key)
 {
     for (int i = 0; i < kUiTextCount; ++i)
         if (strcmp(kUiTextDefaults[i].key, key) == 0)
             return s_ui_overrides[i][0] ? s_ui_overrides[i] : kUiTextDefaults[i].text;
+
+    static char s_missing_logged[16][64] = {};
+    static int s_missing_count = 0;
+    const int logged_max = (int)(sizeof(s_missing_logged) / sizeof(s_missing_logged[0]));
+    bool seen = false;
+    for (int i = 0; i < s_missing_count; ++i) {
+        if (strcmp(s_missing_logged[i], key) == 0) { seen = true; break; }
+    }
+    if (!seen && s_missing_count < logged_max) {
+        strncpy(s_missing_logged[s_missing_count], key, sizeof(s_missing_logged[0]) - 1);
+        s_missing_logged[s_missing_count][sizeof(s_missing_logged[0]) - 1] = 0;
+        ++s_missing_count;
+        LogWarn("[UiText] 文案键不存在：%s（该处画面显示 !!键不存在!!）", key);
+    }
     return "!!键不存在!!";
 }
 

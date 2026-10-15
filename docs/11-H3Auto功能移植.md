@@ -377,7 +377,9 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 - 加载链（`UiTexts.inc.cpp:2-5`、:197-268）：`[General] Language`（默认 `zh-CN`）→ `<DLL目录>\lang\<语言>.ini`（键名＝内置表的 `section.key`，如 `panel.title`、`actions.*`、`selectors.*`，读法由 `IniReadUtf8` 完成）→ 命中即写入覆盖缓冲（512 B/键）；缺文件或缺键回落内置默认表（`UiTexts.inc.cpp:21` 起，与 `lang\zh-CN.ini` 镜像，改文案要两处同步）。
 - 语言名做字符集校验（只允许字母、数字、`-`、`_`），非法回退 `zh-CN`（:201-210）。
-- `lang\zh-CN.ini` 现 **11720 B、UTF-8 无 BOM**（删 7 个 `pack_*` 键后由 12122 B 变更；读侧无 BOM 亦兼容，故不影响加载），与内置默认表的键集合一致；改动文案时两侧都要改。BOM 的得失另注：`edit` 工具重写文件时不保留原 BOM，属工具行为，不是手工转码。
+- `lang\zh-CN.ini` 现 **11768 B、UTF-8 无 BOM**（删 7 个 `pack_*` 键后由 12122 B → 11720 B，2026-10-15 补 `cell.siege_hint` 后 → 11768 B；读侧无 BOM 亦兼容，故不影响加载），与内置默认表的键集合一致；改动文案时两侧都要改。BOM 的得失另注：`edit` 工具重写文件时不保留原 BOM，属工具行为，不是手工转码。
+- **缺键会直接显形在画面上**：`T(key)` 查不到键返回字面量 `!!键不存在!!`（打铁面板「安全位置」下面那行曾显示该串——键 `cell.siege_hint` 内置表与 lang 双侧都漏了，H3Auto 源插件同样漏，属移植带过来的上游缺陷）。现在 `T()` 命中缺键时另记一条 `LogWarn("[UiText] 文案键不存在：…")`（同一键只记一次，不随每帧刷屏），便于玩家日志定位。
+- **离线门禁**：`scripts\check-ui-text-keys.ps1` 比对三处——代码里 `T("…")` 的引用、内置表 `kUiTextDefaults`、`lang\<语言>.ini`；有「引用键未定义」即 exit 1（那等于画面上出现 `!!键不存在!!`），并提示「ini 有、表没有」的可疑拼写与表内未被直接引用的键。改文案后先跑它再编译。
 
 ### 7.4 资源清单（`pcx\`，2026-10-15 由 `img\` 改名，与 H3MegaDesc 同规）
 
