@@ -50,6 +50,32 @@ static bool TryCaptureCombat_(hbs::ArchiveSlot slot = hbs::ArchiveSlot::Manual,
 #include "modules/BattleFingerprint.hpp"
 #include "modules/BattleRestore.inc.cpp"
 #include "modules/BattleStoreService.inc.cpp"
+
+// ===== 2026-10-15 H3Auto 功能移植（批次二：纯逻辑核心 + 功能层）=====
+// 命名空间隔离由本包含点承担：被包含文件自身都不再开命名空间
+// （技能 h3-plugin-multi-merge-port 记录的 MSVC 坑：包含进 namespace 的文件
+// 若再开同名 namespace 会 C2065）。源插件的日志/分层 ini/铠甲基建已丢弃，
+// AutoStore.inc.cpp 里未定义的名字向外解析到宿主 ConfigLog/IniUtf8 的同名实现。
+// nlohmann/json 必须在进入本命名空间之前于全局作用域先包含，否则它会在
+// autoassist 内首次展开，与宿主的 nlohmann::json 形成类型分裂。
+#include "third_party/nlohmann/json.hpp"
+namespace autoassist {
+#include "modules/AutoGuardIds.inc.cpp"  // GHID_* → 宿主字符串键铠甲 id（须先于功能层）
+#include "modules/AutoUiPort.hpp"        // 界面契约（功能层只经它感知面板）
+#include "modules/UiPortHost.inc.cpp"    // g_uiPort 宿主 + 兜底空实现
+#include "modules/PolicyCore.hpp"        // 纯策略核心（自带 H3AutoPolicy 与 using 提升）
+#include "modules/AutoStore.inc.cpp"     // 方案存档（Games\<地图名>\Auto\*.json v7）+ 自动战斗配置
+#include "modules/PanelLayout.hpp"       // 面板布局常量（UiTexts/界面层共用）
+#include "modules/UiTexts.inc.cpp"       // i18n 文本表 + lang\*.ini 覆盖
+#include "modules/Compat.inc.cpp"        // 游戏全局对象访问垫片（窗口管理器等）
+#include "modules/SpellRules.inc.cpp"    // 施法规则（群体/熟练度）
+#include "modules/AutoExecute.inc.cpp"   // 自动战斗决策与执行（含两个 HiHook 回调）
+#include "modules/ForceField.inc.cpp"    // 力盾选点
+#include "modules/AttackMagic.inc.cpp"   // 攻击魔法规则
+#include "modules/BattleState.inc.cpp"   // 战斗状态机
+#include "modules/BattleLifecycle.inc.cpp" // 战斗生命周期事件源
+} // namespace autoassist
+
 #include "modules/BattleUiPort.hpp"
 #if defined(H3BS_UI_NULL)
 // 无界面诊断变体（编译期宏，供自动化测试/自动化验证用；与玩家可选的两套界面无关）。

@@ -53,7 +53,9 @@
 using namespace H3AutoGuard;
 
 // ---- 钩子注册表（DllMain 单线程注册，无并发）----
-enum { kMaxGuardHooks = 16 };
+// 2026-10-15：并入 H3Auto 功能移植后新增 8 个 AutoAssist.* 钩子 id（宿主自用 14 个），
+// 上限由 16 提到 32；注册发生在静态初始化期（DllMain 之前），同为单线程。
+enum { kMaxGuardHooks = 32 };
 
 struct GuardHookInfo_ {
     const char*    name;

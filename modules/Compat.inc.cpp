@@ -1,0 +1,187 @@
+// ========== 兼容性层：战斗结构体占位 ==========
+// 参考 H3BattleValueInfo 的 Compat.inc.cpp + HoMM3 反编译结果
+// TODO: Hook 地址实测验证后补充字段偏移
+
+using _bool8_  = char;
+
+#define CALL_1(return_type, calling_convention, address, arg1) THISCALL_1(return_type, address, arg1)
+#define CALL_2(return_type, calling_convention, address, arg1, arg2) THISCALL_2(return_type, address, arg1, arg2)
+#define CALL_3(return_type, calling_convention, address, arg1, arg2, arg3) THISCALL_3(return_type, address, arg1, arg2, arg3)
+
+// ===== 游戏全局对象访问垫片（自 PanelGfx 迁入，批次2/docs/13）=====
+// 原定义在 PanelGfx.inc.cpp（界面层），但 BattleLifecycle 等功能层也需要
+// 窗口管理器；无界面编译变体（H3AUTO_UI_NULL）不含 PanelGfx，宏必须常驻。
+#define o_WndMgr (*reinterpret_cast<H3WindowManager**>(0x6992D0))
+#define o_DDSurfaceBackBuffer (*reinterpret_cast<LPDIRECTDRAWSURFACE*>(0x6AAD28))
+
+// ===== 战斗相关结构体 =====
+
+// 远程/近战判定（从 CreatureInfo 中取 is_ranged）
+struct _CreatureInfoCompat {
+    char _pad0[0x4C];
+    int hit_points;     // 0x4C
+    int speed;          // 0x50
+    int attack;         // 0x54
+    int defence;        // 0x58
+    int damage_min;     // 0x5C
+    int damage_max;     // 0x60
+    int shots;          // 0x64
+};
+
+struct _BattleStack_ {
+    char _pad0[0x28];
+    int  clone_id;            // 0x28 = H3CombatCreature::cloneId；>0 视为克隆/镜像体
+    char _pad2C[0x34 - 0x2C];
+    int  creature_id;
+    int  hex_ix;
+    int  animation_ix;
+    int  animation_frame_ix;
+    char _pad44[0x4C - 0x44];
+    int  count_current;     // 当前数量
+    int  count_before_attack;
+    char _pad54[0x58 - 0x54];
+    int  lost_hp;
+    int  source_army_slot;  // 原英雄军队槽 0..6；不是战场 stack[side][21] 下标
+    int  count_at_start;    // 战斗开始时数量
+    char _pad64[0x74 - 0x64];
+    _CreatureInfoCompat creature;
+    char _padDC[0xF4 - 0xDC];
+    int  def_group_ix;      // 0xF4：真实所属侧，0=攻击方，1=防守方
+    int  army_slot_ix;      // 0xF8：在 battle.stack[side][21] 中的下标
+    char _padFC[0x194 - 0xFC];
+    int  active_spell_count;
+    int  active_spell_duration[81];
+    int  active_spell_level[81];
+    char _pad420[0x454 - 0x420];
+    int  retaliations;
+    int  bless_damage;
+    int  curse_damage;
+    int  anti_magic;
+    int  bloodlust_effect;
+    int  precision_effect;
+    int  weakness_effect;
+    int  stone_skin_effect;
+    int  _unknown_474;
+    int  prayer_effect;
+    int  mirth_effect;
+    int  sorrow_effect;
+    int  fortune_effect;
+    int  misfortune_effect;
+    int  slayer_type;
+    int  hexes_traveled;
+    int  counterstrike_effect;
+    float frenzy_multiplier;
+    float blind_effect;
+    float fire_shield_effect;
+    int  _unknown_4A4;
+    float protection_air_effect;
+    float protection_fire_effect;
+    float protection_water_effect;
+    float protection_earth_effect;
+    float shield_effect;
+    float air_shield_effect;
+    unsigned char blinded;
+    unsigned char paralyzed;
+    char _pad4C2[0x4C4 - 0x4C2];
+    int  forgetfulness_level;
+    float slow_effect;
+    int  haste_effect;
+    int  disease_attack_effect;
+    int  disease_defense_effect;
+    char _pad4D8[0x4E8 - 0x4D8];
+    int  morale;
+    int  luck;
+    unsigned char is_done;
+    char _pad4F1[0x548 - 0x4F1];
+    bool CanShoot(_BattleStack_* target) { return THISCALL_2(bool, 0x442610, this, target); }
+    int Calc_Damage_Bonuses(_BattleStack_* target, int base_damage, int a4, int a5, int a6, int* fireshield_damage) { return THISCALL_7(int, 0x443C60, this, target, base_damage, a4, a5, a6, fireshield_damage); }
+};
+
+typedef char _BattleStack_size_check[(sizeof(_BattleStack_) == 0x548) ? 1 : -1];
+
+// H3Artifact 原版是 8 字节：{INT32 id; INT32 mod}
+struct _Artifact_ { int id; int mod; };
+
+#pragma pack(push, 1)
+struct _Hero_ {
+    // 官方 H3Hero 布局：[0]x [2]y [4]z（INT16，z: 0 地上 / 1 地下）；
+    // [35]/[39]/[3D] 计划移动目的地 dest_x/y/z（INT32）——发起攻击时
+    // dest=被攻击对象格（战斗指纹触发点推导用，§12）。
+    short x;
+    short y;
+    short z;
+    char _pad6[0x18 - 0x06];
+    short spell_points;
+    int   id;
+    int   id_wtf;
+    char _pad22[0x35 - 0x22];
+    int   dest_x;
+    int   dest_y;
+    int   dest_z;
+    char _pad41[0x55 - 0x41];
+    short level;
+    char _pad57[0x91 - 0x57];
+    // H3Hero::army 位于 0x91：英雄头像 Alt+右键显示的战前军队数量。
+    // 战斗中不会写回，作为损失量方式的唯一开战基准。
+    int   army_type[7];
+    int   army_count[7];
+    unsigned char second_skill[28];
+    char _padE5[0x12D - 0xE5];
+    _Artifact_ doll_art[19];
+    char _pad1C5[0x3EA - 0x1C5];
+    unsigned char spell[70];
+    unsigned char spell_level[70];
+    char _pad478[0x47A - 0x478];
+    unsigned char power;
+    unsigned char knowledge;
+    int GetLandModifierUnder() { return THISCALL_1(int, 0x4E5210, this); }
+    bool DoesWearArtifact(int art_id) { return THISCALL_2(BOOL, 0x4D9460, this, art_id) != FALSE; }
+    int GetSpell_Specialisation_Bonuses(int spell_id, int skill_level, int damage) { return THISCALL_4(int, 0x4E6260, this, spell_id, skill_level, damage); }
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct _BattleMgr_ {
+    char _pad0[0x3C];
+    // 动作提交字段（官方 H3CombatManager 布局）：原版回合调度
+    // FUN_00473a00 读取 action，非 0 时转交执行器 FUN_004786b0 落地。
+    int  action;               // 0x3C eCombatAction：3=防御, 7=射击/远程攻击, 0=未设置
+    int  action_parameter;     // 0x40
+    int  action_target;        // 0x44 目标格子(position)
+    int  action_parameter2;    // 0x48
+    char _pad4C[0x5394 - 0x4C];
+    int  land_type;            // 0x5394 官方 landType（战斗地形，指纹分量）
+    char _pad5398[0x53A4 - 0x5398];
+    int  siege_kind;           // 0x53A4 官方 siegeKind（0=野战，指纹分量）
+    char _pad53A8[0x53C0 - 0x53A8];
+    int  spec_terr_type;       // 0x53C0
+    char _pad53C4[0x53CC - 0x53C4];
+    _Hero_* hero[2];           // [0]=下方玩家, [1]=上方敌方
+    char _pad53D4[0x54B4 - 0x53D4];
+    int  hero_casted[2];
+    int  stacks_count[2];
+    char _pad54C4[0x54CC - 0x54C4];
+    // 注：heroOwner[2]（官方 0x54A8，两侧英雄归属的玩家色 0..7/-1）落在上面
+    // 这个 pad 里（0x54A8..0x54B0）。不在此显式声明——0x54B4 起的 hero_casted
+    // 已按绝对偏移锚定，插字段会整体错位。读取走 H3CombatManager::heroOwner。
+    _BattleStack_ stack[2][21];
+    char _pad1329C[0x132A0 - 0x1329C];
+    int  turns_since_last_enchanter_cast[2];
+    char _pad132A8[0x132B8 - 0x132A8];
+    int  current_mon_side;
+    int  current_mon_index;
+    int  current_active_side;  // 0=下方, 1=上方
+    int  auto_combat;          // 非0=AI自动战斗模式
+    _BattleStack_* active_stack;
+    char _pad132CC[0x132D4 - 0x132CC]; // blueHighlight + creatureAtMousePos 等
+    int  mouse_coord;          // 0x132D4 悬停/点击目标格
+    int  attacker_coord;       // 0x132D8 近战攻击站立格/方向参数
+    int  move_type;            // 0x132DC 悬停动作类型（7=近战等）
+    char _pad132E0[0x132F8 - 0x132E0];
+    int  finished;
+    void* dlg;                 // 战斗对话框指针
+};
+#pragma pack(pop)
+
+// 全局对象指针
+#define o_BattleMgr (*reinterpret_cast<_BattleMgr_**>(0x699420))
