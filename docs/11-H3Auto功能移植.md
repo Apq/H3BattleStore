@@ -422,6 +422,36 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 - 版本号由用户手动维护（AGENTS.md 口径），agent 不自动 bump。
 - `README.md` 已同步为新口径（`Packs\热血插件\`、`D:\Heroes3\Heroes3_2026.10.09`，并列出 `pcx\HA_*.pcx` 与 `lang\zh-CN.ini`）；`使用说明.txt` 的安装节同批更新，并新增「不要再同时加载 H3Auto.dll」提示。
 
+### 7.6 保持状态通道：配置字段、优先级与敌方失明（2026-10-16）
+
+「保持状态」页的配置随方案存档（`Games\<地图>\Auto\*.json`），字段落在 `StatusProfileFields`（`PolicyCore.hpp`）：
+
+| 字段 | 含义 | 取值 |
+|---|---|---|
+| `buffs[]`（容量 8） | 保持的法术列表，空槽 = 0 | 法术 id 1..80 |
+| `slow` | 敌方减速开关（历史保留字段） | 0/1 |
+| `refresh_turns` | 补状态阈值：剩余回合 ≤ 此值就补 | 1..9，默认 1 |
+
+**下拉候选（`BuildStatusCandidates_`，`SettingsDlg.inc.cpp`）**三个来源：英雄已学的群体增益（`kBuffSpellIds`，要求法术表带群体版 —— `friendlyMass` 或专家级 `expertMassVersion`）、专家级群体减速（54）、**已学会的敌方失明（62，单体，2026-10-16 新增）**。候选统一过 `hero->GetSpellExpertise(spell, cm->specialTerrain)`：增益与失明只要 `> 0`（也就是"已学会"），减速要 `>= 3`（专家级才有群体版）；同一法术已占用其它槽则不再出现。
+**槽位文案**：`StatusSpellLabel_` 对所有对敌法术追加「（敌方）」后缀，减速（54）与失明（62）都显示为「xxx（敌方）」。
+
+**每回合最多补一个法术，优先级 = 友方增益 → 敌方失明 → 敌方减速**（`TryMaintainStatus_`）。失明排在减速之前是有意为之：失明通常只约一回合时长（被攻击即醒、到期就得续），减速是长时效群体法术；两者同时到期时先补失明。
+
+**失明的目标选择（`GatherBlindCandidates_` + `ChooseBlindTarget`）**，按 2026-10-16 用户口径「自动判断所有可被失明的敌方部队，发现有该补的了就补给它」：
+
+1. 遍历敌方 21 个槽位，剔除死亡、`position` 越界、`TargetMagicAllowed_` 不通过、`CreatureCanReceiveStatusSpell` 不接受的部队 —— 亡灵（`undead 0x40000`）与心智免疫位（`mindImmunity 0x400`，NH3API `CF_IMMUNE_TO_MIND_SPELLS`）自动排除，箭塔（149）同现有规则排除。
+2. 候选按「剩余回合 ≤ `refresh_turns`」过滤：还够的不动它；`-1` = 不存在/不可接受，不参与判定。
+3. 取剩余最少者；并列时取威胁最大者：`单位价值 = aiValue > 0 ? aiValue : (fightValue > 0 ? fightValue : hitPoints)`，`威胁 = 单位价值 × 当前数量`（原版军队价值口径，见 H3Note）。
+4. 单体法术**不适用**减速那套「敌方任一队已覆盖即整体达标」的语义 A：一队到期、另一队还够时，仍然补到期的那队。无候选则不施放。
+
+**施放路径**：门槛 = `HeroMagicAllowed_`（魔法书 / 驻地 / 双方禁魔球 / 诅咒地 / 披风 / `hero->HasSpell` / 法力 / 本回合未施法）+ 学校等级 `> 0`。单体必须带目标格：先 `cm->CanCastSpellAtCoord(62, exp, hex)` 预检，再 `cm->CastSpell(62, hex, 0, -1, exp, spell_power)`（其余状态法术仍传 `-1` = 无目标群体施放）。施后验证**只看被选中那一队**的 `active_spell_duration[62]`：拿到即留 info，没拿到即认定全免疫/全抵抗，`g_status_immune_mask` 置位、本场跳过。
+
+**日志**（排查玩家反馈直接可用）：`[Status] 失明目标 slot=… cid=… count=… remain=… th=… value=… hex=… turn=…`（info，含"为什么是它"）、`[Status] cast done spell=62 …`（info）、`[Status] blind branch want=… exp=… pick=… th=… turn=… cand=… living=… masked=…`（debug）、无候选时一次性 info「`[Status] spell=62 当前没有可接受失明的存活敌军，不施放`」。
+
+**测试**：`tests\PolicyCoreTests.cpp` 覆盖 `CreatureCanReceiveStatusSpell(62, …)`（亡灵 / 心智免疫拒绝、普通生物接受）与 `ChooseBlindTarget` 的选择序（同剩余取威胁最大且 `mass == 0`、阈值 0 忽略未到期、还够的不动、单体无整体覆盖规则、`-1` 不参与、空指针容错、无敌人不施放）。策略层为生产与单测共用文件，故两侧同源。
+
+**已知边界（待游戏内验收）**：失明的实际命中与"醒来"由原版处理，插件只按 `active_spell_duration` 记剩余；被抵抗时按上面的整场跳过机制处理，不做逐次重试。
+
 ## 8. 分批实施与验收状态
 
 ### 8.1 每批验收口径（四件套）

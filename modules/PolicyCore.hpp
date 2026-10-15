@@ -169,6 +169,9 @@ inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
         || (spell_flags & kSpellFlagExpertMass) != 0;
 }
 static constexpr int kSlowSpellId = 54;
+// 敌方失明（法术 62，单体、心智类，H3CstSpells.hpp:111 BLIND=62）：
+// 保持状态里唯一的单体对敌选项，前提同样是英雄已学会（学校等级 > 0）。
+static constexpr int kBlindSpellId = 62;
 static constexpr int kBlessSpellId = 41;
 static constexpr int kPrecisionSpellId = 44;
 static constexpr int kMirthSpellId = 49;
@@ -182,6 +185,10 @@ static constexpr unsigned kCreatureFlagShooter = 0x4u;
 static constexpr unsigned kCreatureFlagSiegeWeapon = 0x40u;
 static constexpr unsigned kCreatureFlagNoMorale = 0x20000u;
 static constexpr unsigned kCreatureFlagUndead = 0x40000u;
+// 原版心智免疫位（H3CreatureInformation::mindImmunity = 0x400，
+// NH3API CF_IMMUNE_TO_MIND_SPELLS）：免疫失明/发狂/遗忘/催眠/悲痛等
+// 心智法术。亡灵另有 undead 位，失明在两边都拒绝。
+static constexpr unsigned kCreatureFlagMindImmune = 0x400u;
 static constexpr unsigned kSpellFlagCannotTargetSiege = 0x1000u;
 // 补状态阈值默认值：剩余回合 ≤ 该值才补（阈值本体在
 // StatusProfileFields.refresh_turns，玩家可改）。
@@ -377,6 +384,11 @@ inline bool CreatureCanReceiveStatusSpell(int spell_id, unsigned spell_flags,
         return (creature_flags & kCreatureFlagNoMorale) == 0;
     case kPrecisionSpellId:
         return (creature_flags & kCreatureFlagShooter) != 0;
+    case kBlindSpellId:
+        // 失明（62，心智类单体）：亡灵与带心智免疫位的生物不接受
+        // （元素、石像/铁人/金人/钻石人、傀儡龙等）。
+        return (creature_flags & (kCreatureFlagMindImmune | kCreatureFlagUndead))
+            == 0;
     default:
         return true;
     }
@@ -435,6 +447,45 @@ inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
     choice.spell_id = kSlowSpellId;
     choice.target_hex = enemy_hexes[best];
     choice.mass = 1;
+    return choice;
+}
+
+// 敌方失明（法术 62，单体）。与减速共用「剩余回合 ≤ refresh_turns 就补」的
+// 补状态阈值语义，但单体法术是逐队判定——不存在减速那套「敌方任意一队已
+// 覆盖即达标、不施放」的整体规则：一队到期就补它，其余队不受影响。
+// enemy_durations/enemy_hexes/enemy_threat 覆盖全部存活敌方（21 槽）：
+// durations < 0 = 该队不存在/不可接受失明（免疫、战争机器、没有可施法位置），
+// 不参与判定；threat 由调用方按原版口径算好（单位价值 aiValue → fightValue
+// → hitPoints，再乘当前数量，见 Heroes3Src/docs/ARMY_VALUE_ALGORITHM_DETAILED.md）。
+// 候选排序：剩余回合越少越急（已经醒来 0 排在还带着 1 的前面），同剩余取
+// 威胁最大的；一个候选都没有时不施放（spell_id = -1）。
+inline StatusMaintainChoice ChooseBlindTarget(const int* enemy_durations,
+    const int* enemy_hexes, const int64_t* enemy_threat, int enemy_count,
+    int refresh_turns)
+{
+    StatusMaintainChoice choice = {-1, -1, 0};
+    if (!enemy_durations || !enemy_hexes || enemy_count <= 0) return choice;
+    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
+    int best = -1;
+    for (int i = 0; i < enemy_count; ++i) {
+        if (enemy_durations[i] < 0) continue;              // 不存在/不可接受
+        if (enemy_durations[i] > refresh_turns) continue;  // 还够，不动它
+        if (best < 0) {
+            best = i;
+            continue;
+        }
+        if (enemy_durations[i] != enemy_durations[best]) {
+            if (enemy_durations[i] < enemy_durations[best]) best = i;
+            continue;
+        }
+        const int64_t threat_i = enemy_threat ? enemy_threat[i] : 0;
+        const int64_t threat_best = enemy_threat ? enemy_threat[best] : 0;
+        if (threat_i > threat_best) best = i;
+    }
+    if (best < 0) return choice;
+    choice.spell_id = kBlindSpellId;
+    choice.target_hex = enemy_hexes[best];
+    choice.mass = 0; // 单体：必须带目标格
     return choice;
 }
 

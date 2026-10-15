@@ -506,8 +506,9 @@ static void CloseSummonDropdowns_()
     CloseAttackMagicUi_();
 }
 
-// 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速；
-// skip_slot 以外的槽位已用的法术排除（避免重复）。结果进 s_status_dd_ids。
+// 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速 + 已学失明
+// （单体对敌）；skip_slot 以外的槽位已用的法术排除（避免重复）。
+// 结果进 s_status_dd_ids。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
 {
     s_status_dd_count = 0;
@@ -520,11 +521,12 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
     }
     const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
     if (!hero || !table || !cm) return 0;
-    int candidates[H3AutoPolicy::kBuffSpellCount + 1] = {};
+    int candidates[H3AutoPolicy::kBuffSpellCount + 2] = {};
     int candidate_count = 0;
     for (int spell : H3AutoPolicy::kBuffSpellIds)
         candidates[candidate_count++] = spell;
     candidates[candidate_count++] = H3AutoPolicy::kSlowSpellId;
+    candidates[candidate_count++] = H3AutoPolicy::kBlindSpellId;
     for (int n = 0; n < candidate_count; ++n) {
         const int spell = candidates[n];
         bool used = false;
@@ -535,10 +537,14 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         const unsigned flags = *reinterpret_cast<const unsigned*>(
             table + spell * 0x88 + 0x0C);
         const bool slow = spell == H3AutoPolicy::kSlowSpellId;
-        if (!slow && !H3AutoPolicy::IsMassBuffSpell(spell, flags))
+        const bool blind = spell == H3AutoPolicy::kBlindSpellId;
+        // 减速与失明都是对敌法术，不要求法术表带群体版；其余候选必须是
+        // 原版群体增益（friendlyMass / expertMassVersion）。
+        if (!slow && !blind && !H3AutoPolicy::IsMassBuffSpell(spell, flags))
             continue;
         const int expertise = hero->GetSpellExpertise(
             spell, cm->specialTerrain);
+        // 减速要专家级群体版；失明与增益同门槛：英雄已学会（学校等级 > 0）。
         if (expertise <= 0 || (slow && expertise < 3)) continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
     }

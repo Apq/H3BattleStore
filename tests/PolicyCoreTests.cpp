@@ -1116,6 +1116,52 @@ void TestStatusAndAutoStop()
         "slow: two turns left above threshold one counts covered");
     Check(ChooseSlowTarget(true, covered2, enemy_hexes, 2, 3).spell_id == 54,
         "slow: wider threshold recasts at two turns left");
+    // ---- 敌方失明（62，单体对敌；2026-10-16 用户提出）----
+    // 接受判定：亡灵与带心智免疫位（0x400）的生物不吃失明，普通生物吃。
+    Check(!CreatureCanReceiveStatusSpell(62, 0, 0x400u, 50, 13),
+        "blind: mind-immune creatures cannot receive blind");
+    Check(!CreatureCanReceiveStatusSpell(62, 0, 0x40000u, 50, 56),
+        "blind: undead cannot receive blind");
+    Check(CreatureCanReceiveStatusSpell(62, 0, 0, 50, 13),
+        "blind: ordinary living creatures can receive blind");
+    const int64_t threat[] = {100, 900, 50};
+    const int blind_durations[] = {0, 0, 1};
+    // 同为 0 回合（都醒了）时取威胁最大的那一队，而不是槽位靠前的。
+    const StatusMaintainChoice b_same =
+        ChooseBlindTarget(blind_durations, enemy_hexes, threat, 3, 1);
+    Check(b_same.spell_id == 62 && b_same.target_hex == 20 && b_same.mass == 0,
+        "blind: equal remaining picks the most valuable enemy, single target");
+    // 阈值 0：还带着 2 回合的不算候选（不抢在还没到期时重施）。
+    const int blind_dur_th0[] = {0, 2, 0};
+    const StatusMaintainChoice b_th0 =
+        ChooseBlindTarget(blind_dur_th0, enemy_hexes, threat, 3, 0);
+    Check(b_th0.spell_id == 62 && b_th0.target_hex == 10,
+        "blind: threshold zero ignores still-covered enemies");
+    const int blind_dur_covered[] = {3, 4};
+    Check(ChooseBlindTarget(blind_dur_covered, enemy_hexes, threat, 2, 1).spell_id == -1,
+        "blind: enemies still covered are left alone");
+    // 单体法术没有减速那套「敌方任意一队已覆盖即整体达标」的规则：
+    // 一队到期、另一队还够时，仍然补到期的那一队。
+    const int blind_dur_mixed[] = {1, 3};
+    const StatusMaintainChoice b_mixed =
+        ChooseBlindTarget(blind_dur_mixed, enemy_hexes, threat, 2, 1);
+    Check(b_mixed.spell_id == 62 && b_mixed.target_hex == 10,
+        "blind: single-target refresh ignores enemies still covered");
+    // -1 = 不存在/不可接受失明（免疫、战争机器、没有可施法位置），不参与判定。
+    const int blind_dur_immune[] = {-1, -1};
+    Check(ChooseBlindTarget(blind_dur_immune, enemy_hexes, threat, 2, 1).spell_id == -1,
+        "blind: immune enemies are not candidates");
+    Check(ChooseBlindTarget(nullptr, enemy_hexes, threat, 3, 1).spell_id == -1,
+        "blind: no durations means no cast");
+    Check(ChooseBlindTarget(blind_durations, enemy_hexes, nullptr, 3, 1).spell_id == 62,
+        "blind: missing threat table still picks by remaining turns");
+    Check(ChooseBlindTarget(blind_durations, enemy_hexes, threat, 0, 1).spell_id == -1,
+        "blind: no enemies means no cast");
+    const int blind_dur_two[] = {2, 2};
+    Check(ChooseBlindTarget(blind_dur_two, enemy_hexes, threat, 2, 1).spell_id == -1,
+        "blind: two turns left above threshold one is left alone");
+    Check(ChooseBlindTarget(blind_dur_two, enemy_hexes, threat, 2, 3).spell_id == 62,
+        "blind: wider threshold recasts at two turns left");
 }
 
 void TestSummonChannel()

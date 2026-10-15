@@ -1020,7 +1020,10 @@ static const char* StatusSpellLabel_(int spell_id, char* buf, int cap)
 {
     char name[256] = {};
     StatusSpellName_(spell_id, name, sizeof(name));
-    if (spell_id == H3AutoPolicy::kSlowSpellId)
+    // 对敌法术统一带「（敌方）」后缀：减速（54）是群体对敌，
+    // 失明（62）是单体对敌。
+    if (spell_id == H3AutoPolicy::kSlowSpellId
+            || spell_id == H3AutoPolicy::kBlindSpellId)
         _snprintf(buf, cap, "%s（敌方）", name);
     else
         _snprintf(buf, cap, "%s", name);
