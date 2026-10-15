@@ -21,7 +21,7 @@ try {
         cmd /d /c ('call "' + $vcvars + '" >nul && cl ' + $common + ' /c third_party\catch2\catch_amalgamated.cpp /Fo"' + $catchObj + '" > "' + $log + '" 2>&1')
         if ($LASTEXITCODE -ne 0) { throw "catch2 compile failed; see $log" }
     }
-    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests', 'AltTailTests')) {
+    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests', 'AltTailTests', 'PolicyCoreTests')) {
         $sources = '"tests\' + $name + '.cpp" "' + $catchObj + '"'
         if ($name -eq 'LogControlsTests') {
             $sources += ' lzma\LzmaEnc.c lzma\LzFind.c lzma\CpuArch.c'
