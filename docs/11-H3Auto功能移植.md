@@ -1,6 +1,6 @@
 # 专题：H3Auto 功能移植（打铁助手 → 战场存档）
 
-> 状态（2026-10-15）：批次一、二、三已完成并提交（`7446d10`、`a08c5c6`、`9a41bc0`），三批都过了 build.bat + 六组单测 + DLL 字节证据（批次三另含 `H3BS_UI_NULL` 变体构建）；批次四（`Entry.inc.cpp` 钩子合并 + 协作直连化）与批次五（配置/素材/部署/文案）待做。
+> 状态（2026-10-15）：**批次一~四全部完成并提交**（`7446d10`、`a08c5c6`、`9a41bc0`、`eb3ed19`），另有配套提交 `cdc1d21`（配置键/资源/脚本清单）与 `b4e2804`（本文件）；四批都过了 build.bat + 六组 Catch2 单测 + DLL 字节证据，批次三、四另含 `H3BS_UI_NULL` 变体构建；批次五（配置、素材、部署、文案）亦已完成并 `deploy.bat` 部署到 `Packs\热血插件\`（部署副本与构建产物 SHA256 一致）。**剩余只有实机验收，归用户执行**（§9 第 1 项）。
 > 前提裁定：用户已决定**移除独立 H3Auto 插件**，只保留合并版，因此本次移植不做共存检测；但**不要同时加载 H3Auto**（见 §1.4）。
 > 相关文档：[H3Auto 协作与防冲突](<10-H3Auto协作与防冲突.md>)（两插件并存时代的可选协作 ABI v1，其「经 patcher 注册表查询」的形态在合并版里改为同 TU 直连，见 §6）、[界面与功能分离](<09-界面与功能分离.md>)（宿主既有 UiPort 分层的同构做法）、[文件格式与兼容](<06-文件格式与兼容.md>)（宿主战场档格式，与本次移植的方案档无关）。
 
@@ -31,15 +31,15 @@
 | `SettingsDlg` 帮助页「打包日志」按钮（源 `SettingsDlg.inc.cpp:1433-1466`，调 `PackRecentLogs_` 与 `help.pack_ok/pack_title/pack_fail`） | **已删** | 批次三 diff `-38/+6`；宿主 `modules\SettingsDlg.inc.cpp:1392-1395` 为说明注释 |
 | `PanelDraw` 的 `HELP_PACK_BTN_W/H`、`GetHelpPackBtnRect_`、帮助页第 B 行绘制 | **已删** | 批次三 diff `-25/+7`；宿主 `modules\PanelDraw.inc.cpp:244-279`、`:465` 处为说明注释；声明同步从 `PanelDraw.hpp:13-15` 删除（该文件 diff `-1/+3`） |
 | `UiTexts` 的 `help.pack_btn/pack_title/pack_ok/pack_note/pack_fail/pack_no_logs/pack_clipboard_fail` | **已删** | 批次三 diff `-8/+4`；宿主 `modules\UiTexts.inc.cpp:88-95` 现在只剩一段移除说明注释 |
-| `lang\zh-CN.ini` 的同名 7 键 | **仍在（待删）** | `lang\zh-CN.ini:69-75` 七键齐全，`:3` 注释仍写「status_\*/pack_\*」；删键后需与 `UiTexts` 的说明注释一起收尾 |
-| 使用说明里的「打包日志」段落 | **待改** | 批次五维护 `使用说明.txt` |
+| `lang\zh-CN.ini` 的同名 7 键 | **已删** | 批次五：7 键已删、`:3` 注释改为移除说明（文件 12122 B → 11720 B；`edit` 工具落盘后该文件不再带 BOM，读侧本就兼容无 BOM；内置默认表仍镜像同一批键，改文案要两处同步——本批只删备忘式死键，两侧键集合一致） |
+| 使用说明里的「打包日志」段落 | **无需改** | 批次五核对后确认：`使用说明.txt` 全文只描述**宿主悬浮条第一行**那个打包日志按钮（本项目 2026-10-12 起自带），从未写打铁帮助页的按钮，故无需删改；改为在安装节新增「打铁助手已合并、不要再加载 H3Auto.dll」提示 |
 
 「打包日志」功能在合并版里**仍然有，由宿主提供**（控制条按钮 → 宿主 `PackRecentLogs_`，见 `README.md:16-18` 与 [界面与功能分离](<09-界面与功能分离.md>) §2 第 1 条）；被移除的只是移植过来的第二份入口。
 
 ### 1.4 加载纪律（必须遵守）
 
 - **不要再同时加载 H3Auto**。合并版与独立版会各自注册同址钩子（0x600430、0x4746B0、0x4744D0、0x4786B0）、各自安装 WH_KEYBOARD/WH_MOUSE、各自画自己的面板，结果是面板重叠、输入被吞两次、资源重复占用；协作 ABI 也不再是设计约束（§6）。
-- 部署目录里若还留着旧 `H3Auto.dll`，HD Mod 会照样加载它。源侧 `H3Auto\deploy.ps1:43-47` 就有「部署新包后移除旧包 DLL」的先例；合并版部署同样要把 `H3Auto.dll` 从 `Packs\热血插件\` 移除（批次五）。
+- 部署目录里若还留着旧 `H3Auto.dll`，HD Mod 会照样加载它。源侧 `H3Auto\deploy.ps1:43-47` 就有「部署新包后移除旧包 DLL」的先例；合并版部署同样要把 `H3Auto.dll` 从 `Packs\热血插件\` 移除。**2026-10-15 部署前实测：用户已自行删除 `H3Auto.dll` 与旧版 `H3BattleStore.dll`，该目录现只有合并版一个本插件 DLL，不存在同址双挂。** 该目录另存有历史 `H3Auto_*.log`/`H3BattleStore_*.log`，属日志残留，不影响加载（打包日志按 DLL 基名过滤，互不抓错）。
 
 ## 2. 合并架构与隔离策略
 
@@ -359,7 +359,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 | `[Ui]` | `OutsideBattlefield` | 宿主既有（`H3BattleStore.default.ini:15-19`），与移植无冲突 |
 | `[Store]` | `saveFormat` | 宿主既有（:21-25），与移植无冲突 |
 
-遗留文案（批次五清理，当前仍是源文字）：`AutoStore.inc.cpp:127`、:694-699 的注释写「H3Auto.user.ini」；`UiTexts.inc.cpp:178` 的注释仍以 `help.pack_ok` 举例（该键已于批次三删除）；`lang\zh-CN.ini:3` 注释仍提 `pack_*`。实际写入/读取的都是宿主文件（`g_user_ini_path`/`g_ini_path`）。
+遗留文案：**批次五已清**——`AutoStore.inc.cpp:127`、:694-699 的注释改为「H3BattleStore.user.ini」；`UiTexts.inc.cpp:178` 的举例注释改为通用描述（不再提已删的 `help.pack_ok`）；`lang\zh-CN.ini:3` 注释改为移除说明。实际写入/读取的一直是宿主文件（`g_user_ini_path`/`g_ini_path`）。
 
 ### 7.2 方案存档：路径、JSON v7、LRU
 
@@ -370,14 +370,14 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
   3. 找不到 `Games` 根（从 DLL 目录向上最多 8 级探测，:301-329）→ DLL 同目录（`DllDirUtf8_` :281-296，**依赖 `g_profiles_prefix`**）。
 - 文件内容（v7）：`{"version":7,"battle":"<hex16>","entries":[{"time":"...","active":1..5,"profiles":[5 套]}]}`；每套按字段展开 `stopTurns`、`summon`、`army[]`（`rule.waitMode` 0=无 / 1=每回合 / 2=不反兵攻城；`rule.siegeSafeHex` 仅该行动且已设置时写）、`status`（`attacks` 必需）、`forcefield`（`anchor_hex` 两整数数组）。只接受 v7 且指纹匹配，v7 之前一律视为没有存档（不做旧档兼容）。
 - 保留策略：同场文件内 `kBattlesKeep_ = 30`（`AutoStore.inc.cpp:277`），内容与最后一条相同则跳过不新增（:600-604），超限丢最老（:605-607）；跨文件再按 mtime 降序保留最近 30 场（`PruneBattleStore_LRU_` :624-690，宽字符 API——UTF-8 字节喂 `FindFirstFileA` 会在中文地图名目录里静默查不到）。
-- `g_profiles_prefix`：源侧是 `<DLL目录>\H3Auto.profiles`（源 `Entry.inc.cpp:194-199`，每槽一文件的旧前缀）；合并版只用于推导 DLL 目录兜底。**批次四在 DllMain 里初始化**（建议值 `<DLL目录>\H3BattleStore.profiles`，与宿主 ini 同族；命名最终值待裁定）。未初始化时它是空串，极端兜底路径（无 `Games` 根）会写不出文件。
+- `g_profiles_prefix`：源侧是 `<DLL目录>\H3Auto.profiles`（源 `Entry.inc.cpp:194-199`，每槽一文件的旧前缀）；合并版只用于推导 DLL 目录兜底。**批次四已改为在 `autoassist::AutoInit_()` 里经 `InitAutoPaths_()` 初始化**（`modules\AutoEntry.inc.cpp`，值 `<DLL目录>\H3BattleStore.profiles`），由宿主 `StartPlugin` 在版本门卫之后调用；它是 `static char* = new char[kPathCap_]`，只被 `DllDirUtf8_` 用来剥掉文件名取目录，不再是"方案文件前缀"。
 - 与宿主战场档彻底分家：宿主档在 `<存档根>\<64hex 指纹>\手动|自动\...`（binary/json），移植方案档在 `Games\<地图名>\Auto\`，两者互不读取、互不清理。
 
 ### 7.3 i18n
 
 - 加载链（`UiTexts.inc.cpp:2-5`、:197-268）：`[General] Language`（默认 `zh-CN`）→ `<DLL目录>\lang\<语言>.ini`（键名＝内置表的 `section.key`，如 `panel.title`、`actions.*`、`selectors.*`，读法由 `IniReadUtf8` 完成）→ 命中即写入覆盖缓冲（512 B/键）；缺文件或缺键回落内置默认表（`UiTexts.inc.cpp:21` 起，与 `lang\zh-CN.ini` 镜像，改文案要两处同步）。
 - 语言名做字符集校验（只允许字母、数字、`-`、`_`），非法回退 `zh-CN`（:201-210）。
-- `lang\zh-CN.ini` 12122 B，**UTF-8 带 BOM**（读侧兼容无 BOM），与源文件字节相同；`help.pack_*` 7 键仍在（§1.3），删键后需同步 `:3` 注释与 `UiTexts.inc.cpp:178` 的举例注释。
+- `lang\zh-CN.ini` 现 **11720 B、UTF-8 无 BOM**（删 7 个 `pack_*` 键后由 12122 B 变更；读侧无 BOM 亦兼容，故不影响加载），与内置默认表的键集合一致；改动文案时两侧都要改。BOM 的得失另注：`edit` 工具重写文件时不保留原 BOM，属工具行为，不是手工转码。
 
 ### 7.4 资源清单（`img\`）
 
@@ -394,12 +394,13 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 与 H3Auto 同目录共用 `img\` 不冲突：宿主用 `HB_*`，移植用 `HA_*`（`deploy.ps1:12` 注释同款口径）。`H3Auto\img\效果图.pcx` 不复制。
 
-### 7.5 部署（批次五）
+### 7.5 部署（批次五，已完成）
 
-- 目标目录：`<游戏目录>\_HD3_Data\Packs\热血插件`（`deploy.ps1:13`，与 H3Auto、H3RndNew 共用）。
-- 当前 `deploy.ps1` 只复制 DLL、`H3BattleStore.default.ini`、`使用说明.txt`、`img\HB_bg.pcx`（:24-32），**尚未复制 `lang\zh-CN.ini` 与 9 个 `img\HA_*.pcx`**；参照 H3Auto 侧 `deploy.ps1:24-41`（lang/img 整体复制）。
+- 目标目录：`<游戏目录>\_HD3_Data\Packs\热血插件`（`deploy.ps1:13`，与 H3RndNew 共用；历史上曾用 `战场存档`）。
+- `deploy.ps1` 现复制 DLL、`H3BattleStore.default.ini`、`使用说明.txt`、`img\HB_bg.pcx`、`img\HA_*.pcx`（glob，9 个）、`lang\zh-CN.ini`（`deploy.ps1` 的三个 Copy-Item 段），并建 `img\`/`lang\` 子目录；实测部署后 `img` 下 HA_* 9 个齐全、`lang\zh-CN.ini` 就位。
+- `pack.ps1` 显式清单由 4 条扩到 14 条（同批资源全含），保持「不扩为整个 Release 目录」的既有口径。
 - 版本号由用户手动维护（AGENTS.md 口径），agent 不自动 bump。
-- `README.md:31-45` 仍写 `Packs\战场存档\` 与 `Heroes3_2026.10.07`，与现行 `deploy.ps1`（`Packs\热血插件`、`H3Env.ps1` 的 `D:\Heroes3\Heroes3_2026.10.09`）不一致，批次五同步。
+- `README.md` 已同步为新口径（`Packs\热血插件\`、`D:\Heroes3\Heroes3_2026.10.09`，并列出 `img\HA_*.pcx` 与 `lang\zh-CN.ini`）；`使用说明.txt` 的安装节同批更新，并新增「不要再同时加载 H3Auto.dll」提示。
 
 ## 8. 分批实施与验收状态
 
@@ -433,31 +434,32 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 | 编译（`H3BS_UI_NULL` 变体） | `D:\logs\dsh\scripts\h3auto-port\build-batch3-null.log`（12:33:34）：0 警告 0 错误，用时 7.33 s |
 | 单测 | `D:\logs\dsh\scripts\h3auto-port\tests-batch3.log`（12:34:52）：Archive 217/12、Codec 4224/6、LogControls 30167/3、UiPort 39/3、AltTail 14/7、PolicyCore 1609/29，六组全 `All tests passed` + `PASS all unit tests` |
 | DLL 字节证据 | 默认 `Release\H3BattleStore.dll` 674816 B，SHA256 `16E68988F7DF110B8B79EEE96AB350A5B3F00F3F96DE09FE9D82A7B6F6341D86`（12:32:21）；NULL `Release\null\H3BattleStore.dll` 335360 B，SHA256 `E38AFC68C4C21C7B1CD174E027ED7F7D0BFF91FA9C62BA8EA32CFC5A5696660E`（12:33:33）。两个产物的 `AutoAssist.AfterBlt`、`AutoAssist.PanelMouse`、`打铁设置` 均命中（NULL 变体仍带文案表与 id 注册，只是不编界面实现） |
-| 遗留 | `lang\zh-CN.ini` 的 `pack_*` 死键未删（§1.3 末两行） |
+| 遗留 | `lang\zh-CN.ini` 的 `pack_*` 死键已于批次五删除（§1.3、§8.6）；本批的 NULL 变体哈希为批次三值，批次四后重新构建为 396800 B（§8.5），跨批次比哈希无意义 |
 
-### 8.5 批次四（待做）：`Entry.inc.cpp` 合并
+### 8.5 批次四（已完成，commit `eb3ed19`）：`Entry.inc.cpp` 合并
 
-1. `0x600430` 单壳合并（§5.4）；
-2. `0x4786B0` 单壳合并（§5.3，源回调的原函数调用必须摘除）；
-3. 新增 `0x4746B0`（LoHook）与 `0x4744D0`（HiHook）（§5.5）；
-4. 协作机制直连化（§6）；
-5. `DllMain` 补 `AutoReadConfig_()`、`LoadUiTexts()`、`g_profiles_prefix` 初始化；`DETACH` 补 `ShutdownCombatHotkeys()`、`ResetAutoState()`（§5.6）；
-6. 战斗热键 `WH_KEYBOARD` 与面板钩子的安装/卸载路径在合并版下各只有一处；
-7. 验收：四件套 + 实机（§9 第 1 项）。
+1. `0x600430` 单壳合并（§5.4）——宿主 `Hook_AfterBlt_`（`Entry.inc.cpp:993` 唯一注册）先画悬浮条，再 `__try` 调 `autoassist::AutoBltFrameSegment_()`，铠甲用 `autoassist::GHID_BLT`；
+2. `0x4786B0` 单壳合并（§5.3）——宿主 `Hook_BattleExecute_`（`Entry.inc.cpp:998` 唯一注册）在 `THISCALL_2(orig)` **之前**插入 `autoassist::AutoOnActionExecuteSegment_(reinterpret_cast<autoassist::_BattleMgr_*>(mgr), parameter)`（铠甲 `GHID_ACTION_EXEC`），源回调的原函数调用已摘除（抽成段函数），原版函数由宿主壳在 `__try` 之外恰好调用一次；
+3. 新增 `0x4746B0`（LoHook）/`0x4744D0`（HiHook）——由 `AutoInstallHooks_()` 注册（`modules\AutoEntry.inc.cpp:106-107`），位置在宿主 `StartPlugin` 的 SoD 版本门卫之后；
+4. 协作机制直连化（§6）——`StoreAutomationBusy_()`/`g_storeRestoreEpoch`/`StoreBeforeAutoAction_(void*)` 直连，全仓已无 `VarFind`/`VarGetValue`；
+5. 启动接线：`StartPlugin` 调 `autoassist::AutoInit_()`（= `InitAutoPaths_()` + `AutoReadConfig_()` + `LoadUiTexts()`）与 `AutoInstallHooks_()`；`DETACH` 调 `AutoShutdown_()`（`ShutdownCombatHotkeys()` + `ResetAutoState()`）；
+6. 热键与面板钩子安装/卸载路径各只有一处：`EnsureCombatKbHook_()` 惰性自装（首次进 `PollControlHotkeys_` 路径时），卸载集中在 `AutoShutdown_()`；
+7. 验收：默认与 `H3BS_UI_NULL` 两变体构建各 **0 警告 0 错误**（`build-batch4.log`/`build-batch4-null.log`，末次复跑为 `build-final.log`/`build-final-null.log`）；六组 Catch2 单测 exit 0（`tests-batch4.log`、末次 `tests-final.log`：Archive 217/12、Codec 4224/6、LogControls 30167/3、UiPort 39/3、AltTail 14/7、PolicyCore 1609/29）；默认 `Release\H3BattleStore.dll` 727552 B SHA256 `E3DD935AEDACAD4D5EACE209072D576637AF251EF5145C4280B0A56F8FC31637`，NULL `Release\null\H3BattleStore.dll` 396800 B SHA256 `587DFC0A2F5401D8FD5EDC50960B1CB88D69D9B02B258BBC852CB74EF11EB732`；字节证据见 §8.6。**实机验收待用户**。
 
-### 8.6 批次五（待做）：配置、素材、部署、文案
+### 8.6 批次五（已完成，commit `cdc1d21` + 文档提交）：配置、素材、部署、文案
 
-1. `H3BattleStore.default.ini` 增 `[General] DisableOnStart/Language` 与 `[Hotkeys] ToggleManual/OneShotManual/OpenSettings`（出厂默认对齐源插件：0 / zh-CN / F9 / J / P）；
-2. 删 `lang\zh-CN.ini:69-75` 的 `pack_*` 键（`UiTexts` 侧已于批次三删除），并修 §7.1 列出的遗留注释；
-3. `deploy.ps1` 复制 `lang\zh-CN.ini` 与 `img\HA_*.pcx`；部署后移除同目录旧 `H3Auto.dll`（§1.4）；
-4. `使用说明.txt` 合并两种功能的说明并删掉打包日志段落；`README.md` 部署目录/游戏目录口径对齐；
-5. `pack.ps1` 清单确认包含新素材；四件套验收。
+1. `H3BattleStore.default.ini` 增 `[Hotkeys] ToggleManual=F9/OneShotManual=J/OpenSettings=P` 与 `[General] DisableOnStart=0/LastProfile=1/Language=zh-CN`（出厂默认对齐源插件；分层读取器与宿主同源，故键写在宿主 ini）；
+2. `lang\zh-CN.ini` 的 7 个 `pack_*` 键已删（`UiTexts` 侧批次三已删），§7.1 列出的遗留注释全部改毕；
+3. `deploy.ps1` 复制 `lang\zh-CN.ini` 与 `img\HA_*.pcx`；`pack.ps1` 清单扩到 14 条；部署目录旧 `H3Auto.dll`（用户已删）不复存在；
+4. `使用说明.txt` 补「打铁助手已合并 / 删掉旧 H3Auto.dll / 热键 F9-J-P / 方案库与战斗存档的区别」与配置示例；`README.md` 目录与文件清单口径对齐、新增合并小节与「不要再同时加载 H3Auto.dll」纪律；
+5. 验收：`deploy.bat` exit 0，部署副本与构建产物 SHA256 一致（727552 B `E3DD935A…`），`img\HA_*.pcx` 9 个与 `lang\zh-CN.ini` 就位；仓库与部署副本的 `使用说明.txt`/`default.ini`/`lang\zh-CN.ini` 哈希逐一同；`git diff --check` exit 0，`README/使用说明/变更记录/docs/11` 均 UTF-8 无 BOM + 全 CRLF。**打包日志按钮归属**：保留的是宿主悬浮条第一行那个（本项目自带），删掉的是打铁设置面板帮助页里重复的那个。
+
 
 ## 9. 风险与待验证项
 
 1. **同址钩子合并的行为只能实机验收**。`0x600430`、`0x4786B0` 合并后「段顺序、原函数恰一次、`g_executorDepth` 深度、面板帧与悬浮条绘制叠加」都无法由离线单测证明；尤其点 A 的②段必须保证原函数不在段内被调用。
 2. **面板与宿主状态条并存时的交互**。合并版里宿主的常驻状态条（`WH_KEYBOARD`/`WH_MOUSE`＋每帧绘制）与移植面板（自带 `WH_KEYBOARD`/`WH_MOUSE`＋模态吞并）同在一个 DLL、同一游戏窗口线程，钩子链上会出现两个插件侧钩子；面板存活期间的读档/自动存档闸（`g_storeWaitSaveUntil`）、`g_restoreBusy` 与面板吞并的先后需要实机确认。
-3. **`g_profiles_prefix` 未初始化**（当前 `AutoStore.inc.cpp:126` 只分配未填值）会让最深兜底路径（找不到 `Games` 根）写不出文件；批次四必须初始化。
+3. **`g_profiles_prefix` 未初始化**（当前 `AutoStore.inc.cpp:126` 只分配未填值）会让最深兜底路径（找不到 `Games` 根）写不出文件；**批次四已完成初始化**（`AutoEntry.inc.cpp` 的 `InitAutoPaths_()`，经 `AutoInit_()` 在版本门卫之后调用），此风险已消除。
 4. **源文档 JSON v5 的口径已过时**。源 `H3Auto\docs` 多篇仍写 v5：`01-总体架构与Hook.md:97`、`03-英雄施法与自动停止.md:35-36`、`04-方案模型与部队身份.md:159`、`06-设置面板与输入绘制.md:135/149`、`11-验证边界与待办.md:30/38`、`README.md:17`、`设计文档.md:15/25`；只有 `07-战斗指纹与方案存档.md:50` 记的是现行 v7（v5→v6 加 `waitMode` 等待方式；v6→v7 行动新增 `AA_SIEGE`、等待方式第 3 项语义改为不反兵攻城、新增 `siegeSafeHex` 字段）。合并版文档与代码一律以 **v7** 为准。
 5. **残留源文案/注释**：`AutoStore.inc.cpp:127`、:694-699 与 `UiTexts.inc.cpp:193` 仍写 `H3Auto.user.ini`/`H3Auto.default.ini`；`lang\zh-CN.ini:69-75` 仍是 7 个 `pack_*` 死键（`:3` 注释与 `UiTexts.inc.cpp:178` 的举例注释也需同步）。功能无影响，但玩家日志与后续维护会被误导。
 6. **配置文件多写者**：宿主 `[Logging] MinLevel`（UI 点击写）与移植 `[General] LastProfile`（勾号写）都走 `IniWriteKeyUtf8(g_user_ini_path, ...)` 的整体读改写；同线程同步调用风险低，但同一次会话内连续写需要实测确认不互相丢键。
