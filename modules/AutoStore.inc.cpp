@@ -124,7 +124,7 @@ static struct Config {
 // 常驻路径：堆上 4MB，DLL 加载时分配一次。目录可能很深，MAX_PATH 不够。
 // 配置分两层（同目录）：default = 出厂默认随包分发；user = 玩家改动层。
 static char* g_profiles_prefix = new char[kPathCap_]; // 每槽一文件：前缀 + 编号（1..5）
-// 勾号生效时记忆槽位：更新内存值并写 H3Auto.user.ini [General] LastProfile（玩家层）。
+// 勾号生效时记忆槽位：更新内存值并写 H3BattleStore.user.ini [General] LastProfile（玩家层）。
 void RememberProfileSlot(int slot)
 {
     if (slot < 0 || slot >= 5) return;
@@ -691,12 +691,12 @@ void PruneBattleStore()
 
 static void AutoReadConfig_()
 {
-    // 全部键走分层读取：H3Auto.default.ini 打底，H3Auto.user.ini 叠加覆盖。
+    // 全部键走分层读取：H3BattleStore.default.ini 打底，H3BattleStore.user.ini 叠加覆盖。
     cfg.disable_on_start = IniReadIntUtf8Layered("General", "DisableOnStart", 0);
     cfg.disable_on_start = ClampInt(cfg.disable_on_start, 0, 1);
 
     // 上次勾号生效的槽位（面板自动选中该编号，不自动读档）。
-    // 存 H3Auto.user.ini [General] LastProfile，无记录默认 1。
+    // 存 H3BattleStore.user.ini [General] LastProfile，无记录默认 1。
     {
         char buf[8] = {};
         const bool hit = IniReadUtf8Layered("General", "LastProfile",

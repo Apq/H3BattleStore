@@ -174,8 +174,8 @@ static const UiTextEntry kUiTextDefaults[] = {
 };
 static const int kUiTextCount = (int)(sizeof(kUiTextDefaults) / sizeof(kUiTextDefaults[0]));
 
-// 覆盖缓冲（lang 文件命中才非空）。512：单条文案含多行说明与路径占位
-// （help.pack_ok 原文 233 字节），192 会在「压缩包内的」处截断。
+// 覆盖缓冲（lang 文件命中才非空）。512：单条文案含多行说明与路径占位，
+// 192 会在多行说明中途截断。
 static char s_ui_overrides[kUiTextCount][512];
 
 // 取界面文案。键不存在返回 "!!键!!"（开发期立即可见）。
