@@ -204,6 +204,8 @@ static WORD PanelRGB8888To565_(DWORD color)
     return PanelRGB888To565_((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
+static bool g_panelLegacyImgDirNoted = false;  // 旧 img\ 目录兜底只提示一次，避免整排素材刷屏
+
 static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width,
     int expected_height, H3LoadedPcx16*& cache, bool& load_failed,
     bool allow_shorter_height)
@@ -224,12 +226,26 @@ static H3LoadedPcx16* LoadPanelPcx24_(const char* asset_name, int expected_width
         return nullptr;
     }
     const size_t remaining = (size_t)kPathCap_ - static_cast<size_t>(slash + 1 - path);
-    strcpy_s(slash + 1, remaining, "img\\");
+    strcpy_s(slash + 1, remaining, "pcx\\");
     strcat_s(path, kPathCap_, asset_name);
 
     FILE* file = nullptr;
     wchar_t* wpath = Utf8ToWideAlloc_(path);
     if (!wpath || _wfopen_s(&file, wpath, L"rb") != 0 || !file) {
+        // 兼容旧布局（img\）：素材目录 2026-10-15 由 img 改名 pcx，老安装目录未改组时不至于整块无图。
+        if (wpath) { delete[] wpath; wpath = nullptr; }
+        if (file) { fclose(file); file = nullptr; }
+        strcpy_s(slash + 1, remaining, "img\\");
+        strcat_s(path, kPathCap_, asset_name);
+        wpath = Utf8ToWideAlloc_(path);
+        if (wpath && _wfopen_s(&file, wpath, L"rb") == 0 && file) {
+            if (!g_panelLegacyImgDirNoted) {
+                g_panelLegacyImgDirNoted = true;
+                LogInfo("[Panel] 素材取自旧目录 img\\（新版应为 pcx\\）：%s", asset_name);
+            }
+        }
+    }
+    if (!wpath || !file) {
         LogError("[Panel] PCX 资源加载失败：%s", path);
         delete[] path;
         delete[] wpath;

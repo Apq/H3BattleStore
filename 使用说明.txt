@@ -17,7 +17,7 @@
 战斗中默认键位：F9 启停打铁（全手动/自动）、J 单次接管当前部队、P 打开打铁设置面板；
 可在 H3BattleStore.user.ini 的 [Hotkeys] 段改键（ToggleManual / OneShotManual / OpenSettings）。
 面板里是方案 1-5（各自独立草稿）与法术规则、力盾、攻击魔法等设置；面板素材是
-img\HA_*.pcx，界面文字可用 lang\zh-CN.ini 覆盖（删掉这个文件就用内置中文）。
+pcx\HA_*.pcx，界面文字可用 lang\zh-CN.ini 覆盖（删掉这个文件就用内置中文）。
 打铁方案库存的是“打铁策略方案”，与本插件的“战斗存档”不是一回事：方案库按
 <游戏根>\Games\<地图名>\Auto\<16位hex>.json 存放（JSON v7，最多保留最近 30 场），
 战斗存档仍在 Games\<游戏名>\战场存档\ 下。读档期间打铁不提交自动效果；读档成功后
@@ -39,10 +39,12 @@ img\HA_*.pcx，界面文字可用 lang\zh-CN.ini 覆盖（删掉这个文件就�
    H3BattleStore.dll          插件本体
    H3BattleStore.default.ini  出厂默认配置
    使用说明.txt               本说明文件
-   img\HB_bg.pcx              悬浮条底图
-   img\HA_*.pcx               打铁助手面板素材（9 个，建议一并复制）
+   pcx\HB_bg.pcx              悬浮条底图
+   pcx\HA_*.pcx               打铁助手面板素材（9 个，建议一并复制）
    lang\zh-CN.ini             打铁助手界面文案（可不要，缺则用内置中文）
    H3BattleStore.user.ini     玩家配置（日志级别等，没有也不影响）
+（素材目录 2026-10-15 由 img 改名为 pcx；DLL 对旧的 img 目录仍可兜底读取，日志会提示
+ “素材取自旧目录 img”。换成新结构后，游戏目录里残留的旧 img 目录可以删掉。）
 3. 打开 HD Mod 启动器，进“插件”页，在“未加载”里找到
    “战斗中存档”，点“→”加到“已加载”。
 4. 启动游戏即可。

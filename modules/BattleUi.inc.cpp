@@ -325,6 +325,7 @@ static WORD UiRgb8888To565_(DWORD c)
 
 static H3LoadedPcx16* g_barBg = nullptr;
 static bool g_barBgFailed = false;
+static bool g_barBgLegacyDirNoted = false;  // 旧 img\ 目录兜底只提示一次
 
 // 单张三行底图，沿用 RGB 三平面 PCX 解码与游戏位深转换路径。
 static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached, bool& failed)
@@ -342,9 +343,22 @@ static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached,
         delete[] wpath;
         return nullptr;
     }
+    const size_t dllDirLen = (size_t)(slash + 1 - wpath);
 
     FILE* file = nullptr;
     if (_wfopen_s(&file, wpath, L"rb") != 0 || !file) {
+        // 兼容旧布局（img\）：素材目录 2026-10-15 由 img 改名 pcx，老安装目录未改组时不至于整条无底图。
+        const wchar_t* base = wcsrchr(filename, L'\\');
+        base = base ? base + 1 : filename;
+        if (swprintf_s(wpath + dllDirLen, pathCap - dllDirLen, L"img\\%ls", base) > 0
+            && _wfopen_s(&file, wpath, L"rb") == 0 && file) {
+            if (!g_barBgLegacyDirNoted) {
+                g_barBgLegacyDirNoted = true;
+                LogInfo("底图取自旧目录 img\\（新版应为 pcx\\）：%ls", base);
+            }
+        }
+    }
+    if (!file) {
         LogWarn("背景图加载失败：%ls", filename);
         delete[] wpath;
         return nullptr;
@@ -429,7 +443,7 @@ static H3LoadedPcx16* UiLoadBg_(const wchar_t* filename, H3LoadedPcx16*& cached,
 // HB_bg.pcx: centered HA_bg texture with baked gold border, one 480x72 image.
 static H3LoadedPcx16* UiLoadBarBg_()
 {
-    return UiLoadBg_(L"img\\HB_bg.pcx", g_barBg, g_barBgFailed);
+    return UiLoadBg_(L"pcx\\HB_bg.pcx", g_barBg, g_barBgFailed);
 }
 
 // 同位深 pcx16 区域复制（src/dst 均按当前游戏位深分配，行内逐像素等宽）。

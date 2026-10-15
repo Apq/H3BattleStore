@@ -4,8 +4,8 @@ from PIL import Image
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT.parent / "H3Auto" / "img" / "HA_bg.pcx"
-TARGET = ROOT / "img" / "HB_bg.pcx"
+SOURCE = ROOT / "pcx" / "HA_bg.pcx"
+TARGET = ROOT / "pcx" / "HB_bg.pcx"
 PREVIEW = ROOT / "png" / "HB_bg.png"
 W, H = 480, 72
 GOLD = (220, 200, 110)

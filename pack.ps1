@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Source,
     [string]$OutputDir
 )
@@ -34,17 +34,18 @@ $files = @(
     @{ Local = Join-Path $PSScriptRoot 'Release\H3BattleStore.dll'; Entry = '热血插件/H3BattleStore.dll' },
     @{ Local = Join-Path $PSScriptRoot 'H3BattleStore.default.ini'; Entry = '热血插件/H3BattleStore.default.ini' },
     @{ Local = Join-Path $PSScriptRoot '使用说明.txt';              Entry = '热血插件/使用说明.txt' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HB_bg.pcx';             Entry = '热血插件/img/HB_bg.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HB_bg.pcx';             Entry = '热血插件/pcx/HB_bg.pcx' },
     # 2026-10-15：合并进本插件的打铁助手面板素材与界面文案（原属 H3Auto）。
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_bg.pcx';             Entry = '热血插件/img/HA_bg.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_button_frame.pcx';   Entry = '热血插件/img/HA_button_frame.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_cancel_normal.pcx';  Entry = '热血插件/img/HA_cancel_normal.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_cancel_pressed.pcx'; Entry = '热血插件/img/HA_cancel_pressed.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_cell.pcx';           Entry = '热血插件/img/HA_cell.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_grid_frame.pcx';     Entry = '热血插件/img/HA_grid_frame.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_icon_frame.pcx';     Entry = '热血插件/img/HA_icon_frame.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_ok_normal.pcx';      Entry = '热血插件/img/HA_ok_normal.pcx' },
-    @{ Local = Join-Path $PSScriptRoot 'img\HA_ok_pressed.pcx';     Entry = '热血插件/img/HA_ok_pressed.pcx' },
+    # 素材目录名同日由 img 改为 pcx（与 H3MegaDesc 同规，DLL 内路径同步）。
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_bg.pcx';             Entry = '热血插件/pcx/HA_bg.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_button_frame.pcx';   Entry = '热血插件/pcx/HA_button_frame.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_cancel_normal.pcx';  Entry = '热血插件/pcx/HA_cancel_normal.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_cancel_pressed.pcx'; Entry = '热血插件/pcx/HA_cancel_pressed.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_cell.pcx';           Entry = '热血插件/pcx/HA_cell.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_grid_frame.pcx';     Entry = '热血插件/pcx/HA_grid_frame.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_icon_frame.pcx';     Entry = '热血插件/pcx/HA_icon_frame.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_ok_normal.pcx';      Entry = '热血插件/pcx/HA_ok_normal.pcx' },
+    @{ Local = Join-Path $PSScriptRoot 'pcx\HA_ok_pressed.pcx';     Entry = '热血插件/pcx/HA_ok_pressed.pcx' },
     @{ Local = Join-Path $PSScriptRoot 'lang\zh-CN.ini';            Entry = '热血插件/lang/zh-CN.ini' }
 )
 

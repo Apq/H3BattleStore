@@ -177,7 +177,7 @@ namespace autoassist {                     // 62
 | `modules\MagicChannelUi.inc.cpp` | 同 | 原样（被 `SettingsDlg.inc.cpp:672` 包含） | 224 行 |
 | `modules\PanelDraw.hpp` | 同 | 删 `GetHelpPackBtnRect_` 声明，换成说明注释（`-1/+3`） | 27 行 |
 | `modules\PanelInput.hpp` | 同 | 原样 | 21 行 |
-| `img\HA_bg.pcx` 等 9 个 | `img\HA_*.pcx` | 复制（哈希相同） | 见 §7.4 |
+| `img\HA_bg.pcx` 等 9 个 | `pcx\HA_*.pcx` | 复制（哈希相同；目标目录 2026-10-15 由 `img\` 改名） | 见 §7.4 |
 | `lang\zh-CN.ini` | `lang\zh-CN.ini` | 复制（12122 B，UTF-8 带 BOM）；7 个 `pack_*` 死键待删 | — |
 
 批次三同时把界面层挂进包含链并加了 `H3BS_UI_NULL` 保护（§2.1），因此 `Release\null\H3BattleStore.dll` 是不含面板实现的诊断变体。
@@ -379,7 +379,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 - 语言名做字符集校验（只允许字母、数字、`-`、`_`），非法回退 `zh-CN`（:201-210）。
 - `lang\zh-CN.ini` 现 **11720 B、UTF-8 无 BOM**（删 7 个 `pack_*` 键后由 12122 B 变更；读侧无 BOM 亦兼容，故不影响加载），与内置默认表的键集合一致；改动文案时两侧都要改。BOM 的得失另注：`edit` 工具重写文件时不保留原 BOM，属工具行为，不是手工转码。
 
-### 7.4 资源清单（`img\`）
+### 7.4 资源清单（`pcx\`，2026-10-15 由 `img\` 改名，与 H3MegaDesc 同规）
 
 | 文件 | 字节 | 用途（按文件名与布局常量对应） |
 |---|---|---|
@@ -392,15 +392,15 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 | `HA_cancel_normal.pcx` / `HA_cancel_pressed.pcx` | 4289 / 4362 | 取消按钮常态/按下 |
 | `HB_bg.pcx`（宿主既有） | 88119 | 宿主控制条底图（480×48，源自 `HA_bg.pcx` 中段裁切，见 `docs\变更记录.md` 2026-10-13 条） |
 
-与 H3Auto 同目录共用 `img\` 不冲突：宿主用 `HB_*`，移植用 `HA_*`（`deploy.ps1:12` 注释同款口径）。`H3Auto\img\效果图.pcx` 不复制。
+宿主与移植素材同目录共存不冲突：宿主用 `HB_*`，移植用 `HA_*`（`deploy.ps1` 注释同款口径）。`H3Auto\img\效果图.pcx` 不复制。目录名 2026-10-15 经用户裁定由 `img\` 改为 `pcx\`，仓库目录、部署目标目录与 DLL 内加载路径（`BattleUi.inc.cpp` 的 `L"pcx\\HB_bg.pcx"`、`PanelGfx.inc.cpp` 的 `"pcx\\"`）三处同步；两个加载器都带**旧布局兜底**（`pcx\` 打开失败后重试 `img\`，各以 `static bool` 只 `LogInfo` 一次），老安装目录未改组时不会面板整块无图或悬浮条无底图。
 
 ### 7.5 部署（批次五，已完成）
 
 - 目标目录：`<游戏目录>\_HD3_Data\Packs\热血插件`（`deploy.ps1:13`，与 H3RndNew 共用；历史上曾用 `战场存档`）。
-- `deploy.ps1` 现复制 DLL、`H3BattleStore.default.ini`、`使用说明.txt`、`img\HB_bg.pcx`、`img\HA_*.pcx`（glob，9 个）、`lang\zh-CN.ini`（`deploy.ps1` 的三个 Copy-Item 段），并建 `img\`/`lang\` 子目录；实测部署后 `img` 下 HA_* 9 个齐全、`lang\zh-CN.ini` 就位。
+- `deploy.ps1` 现复制 DLL、`H3BattleStore.default.ini`、`使用说明.txt`、`pcx\HB_bg.pcx`、`pcx\HA_*.pcx`（glob，9 个）、`lang\zh-CN.ini`（`deploy.ps1` 的三个 Copy-Item 段），并建 `pcx\`/`lang\` 子目录；实测部署后 `pcx` 下 HA_* 9 个齐全、`lang\zh-CN.ini` 就位。
 - `pack.ps1` 显式清单由 4 条扩到 14 条（同批资源全含），保持「不扩为整个 Release 目录」的既有口径。
 - 版本号由用户手动维护（AGENTS.md 口径），agent 不自动 bump。
-- `README.md` 已同步为新口径（`Packs\热血插件\`、`D:\Heroes3\Heroes3_2026.10.09`，并列出 `img\HA_*.pcx` 与 `lang\zh-CN.ini`）；`使用说明.txt` 的安装节同批更新，并新增「不要再同时加载 H3Auto.dll」提示。
+- `README.md` 已同步为新口径（`Packs\热血插件\`、`D:\Heroes3\Heroes3_2026.10.09`，并列出 `pcx\HA_*.pcx` 与 `lang\zh-CN.ini`）；`使用说明.txt` 的安装节同批更新，并新增「不要再同时加载 H3Auto.dll」提示。
 
 ## 8. 分批实施与验收状态
 
@@ -450,9 +450,9 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 1. `H3BattleStore.default.ini` 增 `[Hotkeys] ToggleManual=F9/OneShotManual=J/OpenSettings=P` 与 `[General] DisableOnStart=0/LastProfile=1/Language=zh-CN`（出厂默认对齐源插件；分层读取器与宿主同源，故键写在宿主 ini）；
 2. `lang\zh-CN.ini` 的 7 个 `pack_*` 键已删（`UiTexts` 侧批次三已删），§7.1 列出的遗留注释全部改毕；
-3. `deploy.ps1` 复制 `lang\zh-CN.ini` 与 `img\HA_*.pcx`；`pack.ps1` 清单扩到 14 条；部署目录旧 `H3Auto.dll`（用户已删）不复存在；
+3. `deploy.ps1` 复制 `lang\zh-CN.ini` 与 `pcx\HA_*.pcx`；`pack.ps1` 清单扩到 14 条；部署目录旧 `H3Auto.dll`（用户已删）不复存在；
 4. `使用说明.txt` 补「打铁助手已合并 / 删掉旧 H3Auto.dll / 热键 F9-J-P / 方案库与战斗存档的区别」与配置示例；`README.md` 目录与文件清单口径对齐、新增合并小节与「不要再同时加载 H3Auto.dll」纪律；
-5. 验收：`deploy.bat` exit 0，部署副本与构建产物 SHA256 一致（727552 B `E3DD935A…`），`img\HA_*.pcx` 9 个与 `lang\zh-CN.ini` 就位；仓库与部署副本的 `使用说明.txt`/`default.ini`/`lang\zh-CN.ini` 哈希逐一同；`git diff --check` exit 0，`README/使用说明/变更记录/docs/11` 均 UTF-8 无 BOM + 全 CRLF。**打包日志按钮归属**：保留的是宿主悬浮条第一行那个（本项目自带），删掉的是打铁设置面板帮助页里重复的那个。
+5. 验收：`deploy.bat` exit 0，部署副本与构建产物 SHA256 一致（727552 B `E3DD935A…`），`pcx\HA_*.pcx` 9 个与 `lang\zh-CN.ini` 就位；仓库与部署副本的 `使用说明.txt`/`default.ini`/`lang\zh-CN.ini` 哈希逐一同；`git diff --check` exit 0，`README/使用说明/变更记录/docs/11` 均 UTF-8 无 BOM + 全 CRLF。**打包日志按钮归属**：保留的是宿主悬浮条第一行那个（本项目自带），删掉的是打铁设置面板帮助页里重复的那个。
 
 
 ## 9. 风险与待验证项
@@ -463,7 +463,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 4. **源文档 JSON v5 的口径已过时**。源 `H3Auto\docs` 多篇仍写 v5：`01-总体架构与Hook.md:97`、`03-英雄施法与自动停止.md:35-36`、`04-方案模型与部队身份.md:159`、`06-设置面板与输入绘制.md:135/149`、`11-验证边界与待办.md:30/38`、`README.md:17`、`设计文档.md:15/25`；只有 `07-战斗指纹与方案存档.md:50` 记的是现行 v7（v5→v6 加 `waitMode` 等待方式；v6→v7 行动新增 `AA_SIEGE`、等待方式第 3 项语义改为不反兵攻城、新增 `siegeSafeHex` 字段）。合并版文档与代码一律以 **v7** 为准。
 5. **残留源文案/注释**：`AutoStore.inc.cpp:127`、:694-699 与 `UiTexts.inc.cpp:193` 仍写 `H3Auto.user.ini`/`H3Auto.default.ini`；`lang\zh-CN.ini:69-75` 仍是 7 个 `pack_*` 死键（`:3` 注释与 `UiTexts.inc.cpp:178` 的举例注释也需同步）。功能无影响，但玩家日志与后续维护会被误导。
 6. **配置文件多写者**：宿主 `[Logging] MinLevel`（UI 点击写）与移植 `[General] LastProfile`（勾号写）都走 `IniWriteKeyUtf8(g_user_ini_path, ...)` 的整体读改写；同线程同步调用风险低，但同一次会话内连续写需要实测确认不互相丢键。
-7. **部署口径不一致**：`README.md:31-45`（`Packs\战场存档\`、游戏目录 `2026.10.07`）与 `deploy.ps1`（`Packs\热血插件`、`2026.10.09`）不一致；`deploy.ps1` 尚未复制 `lang`/`HA_*` 素材。
+7. ~~**部署口径不一致**~~（已消除）：`README.md` 与 `deploy.ps1` 现同为 `Packs\热血插件`、`D:\Heroes3\Heroes3_2026.10.09`；`deploy.ps1` 亦已复制 `lang\`/`HA_*` 素材，素材目录 2026-10-15 起统一为 `pcx\`（`deploy.ps1` 建 `pcx\`/`lang\` 两个子目录）。
 8. **双加载**：旧 `H3Auto.dll` 若还在 `Packs\热血插件\`，HD 会同时加载两个插件，面板/钩子/资源冲突重复（§1.4）。合并版部署必须核对该目录。
 9. **铠甲上限**：`kMaxGuardHooks` 16→32 后合计 22 个钩子 id；以后并第三个插件前必须复核，超出会被静默并入 0 号（`CrashGuard.hpp:84`），故障归属将不可读。
 10. **`[Logging] MinLevel` 默认值差异**：宿主 `debug`、源 `info`。合并版以宿主（唯一属主）为准，文档与使用说明需要按宿主口径描述。
@@ -480,4 +480,4 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 | 宿主 Entry / 服务 | `modules\Entry.inc.cpp`（:6-14 / :480-660 / :740-1032）、`modules\BattleStoreService.inc.cpp:485-524` |
 | 源插件（只读） | `H3Auto\modules\Entry.inc.cpp`（全文）、`H3Auto\modules\ConfigLog.inc.cpp`（签名/键位）、`H3Auto\H3Auto.default.ini`、`H3Auto\deploy.ps1`、`H3Auto\docs\07-战斗指纹与方案存档.md:50` 等 |
 | 构建与测试证据 | `D:\logs\dsh\scripts\h3auto-port\build-batch2.log`、`tests-batch2.log`、`build-batch3.log`、`build-batch3-null.log`、`tests-batch3.log`、`port-batch2.ps1`、`D:\logs\dsh\scripts\h3auto-port-doc\common-static-funcs.txt` / `common-static-vars.txt`、`tests\run-unit-tests.ps1`、`tests\PolicyCoreTests.cpp` |
-| 其它 | `deploy.ps1`、`H3BattleStore.default.ini`、`lang\zh-CN.ini`、`img\` 清单、`git log`（`7446d10`、`a08c5c6`、`9a41bc0`）、`Release\H3BattleStore.dll` 与 `Release\null\H3BattleStore.dll`（大小/SHA256/标记串实测） |
+| 其它 | `deploy.ps1`、`H3BattleStore.default.ini`、`lang\zh-CN.ini`、`pcx\` 清单、`git log`（`7446d10`、`a08c5c6`、`9a41bc0`）、`Release\H3BattleStore.dll` 与 `Release\null\H3BattleStore.dll`（大小/SHA256/标记串实测） |
