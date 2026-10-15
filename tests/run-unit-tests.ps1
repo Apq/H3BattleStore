@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 # H3BattleStore 单元测试（Catch2 v3 amalgamated，2026-10-15 起参照 H3Space）：
 #   1) third_party\catch2\catch_amalgamated.cpp 只编一次成 tests\unit-tmp\catch2.obj
 #      （源码更新时才重编，避免每套测试重复编译 amalgamated 大文件）；
@@ -21,7 +21,7 @@ try {
         cmd /d /c ('call "' + $vcvars + '" >nul && cl ' + $common + ' /c third_party\catch2\catch_amalgamated.cpp /Fo"' + $catchObj + '" > "' + $log + '" 2>&1')
         if ($LASTEXITCODE -ne 0) { throw "catch2 compile failed; see $log" }
     }
-    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests', 'AltTailTests', 'PolicyCoreTests')) {
+    foreach ($name in @('ArchiveTests', 'CodecTests', 'LogControlsTests', 'UiPortTests', 'AltTailTests', 'PolicyCoreTests', 'CrashFixTests')) {
         $sources = '"tests\' + $name + '.cpp" "' + $catchObj + '"'
         if ($name -eq 'LogControlsTests') {
             $sources += ' lzma\LzmaEnc.c lzma\LzFind.c lzma\CpuArch.c'
@@ -34,7 +34,8 @@ try {
         cmd /d /c ('call "' + $vcvars + '" >nul && ' + $compile)
         if ($LASTEXITCODE -ne 0) { throw "$name compile failed; see $log" }
         Write-Host "== $name =="
-        if ($name -eq 'LogControlsTests') {
+        # fixture 目录：LogControlsTests（日志/剪贴板夹具）与 CrashFixTests（[CrashFix] 分层 ini）共用口径
+        if ($name -eq 'LogControlsTests' -or $name -eq 'CrashFixTests') {
             $env:H3BS_TEST_FIXTURE = Join-Path $out ([guid]::NewGuid().ToString('N'))
             & $exe
         } else { & $exe }

@@ -31,6 +31,14 @@
 - 协作机制随之改为**同 DLL 直连**（原跨 DLL 的 patcher 变量 `H3BattleStore.RestoreEpoch.v1`/`BusyQuery.v1`/`BeforeAutoAction.v1` 不再需要）：读档确认/恢复期间打铁不提交自动效果；读档成功后打铁清运行态、回全手动并按 `F9` 继续，移动/近战游标从头开始。历史约定与边界见[协作与防冲突](<docs/10-H3Auto协作与防冲突.md>)，本次合并的完整设计见[H3Auto 功能移植](<docs/11-H3Auto功能移植.md>)。
 - 打铁助手**不含**打包日志功能（本项目已有，见下文悬浮条第一行）——源插件帮助页里的「打包日志」按钮与相关文案随合并一并移除，帮助页只保留日志级别选择与开源地址行。
 
+### 战斗崩溃修复（H3BattleCrashFix）已迁入本插件（2026-10-15）
+
+- 用户裁定：战斗类修复统一随本插件走；**随身空间（H3Space）同日起不再携带该功能**——升级本插件与随身空间请同批部署，避免战斗崩溃保护断档。
+- 三个防崩型 HiHook（整函数 `__try`，异常吞并落盘，安全默认 = 跳过本次原函数调用）：**[障碍]** `CombatMgr::RemoveObstacle @0x466710`（障碍 def 双重释放崩溃，恢复事务经 `kObstacleRemove` 直呼该地址同样受保护）；**[光环]** `UpdateAuraLinks @0x43E790`（独角兽抗魔光环 × 丧心病狂/蛊惑写坏关联）；**[阻止清理]** `Vector::FindAndRemove @0x43E720`（损坏 vector 越界读保护）。
+- 配置：`H3BattleStore.default.ini [CrashFix]`（`DisableObstacle`/`DisableAura`，`0`=启用修复默认，`1`=不挂钩），可在 user.ini 覆盖。
+- 守卫前缀 `CrashFix.*`（与 `BattleStore.*`/`AutoAssist.*` 互不混淆，崩溃日志直接读归属）；守卫数 23→26，上限 32。
+- **不要再同时加载旧的 H3BattleCrashFix.dll**（同地址双挂）；同日也别再从随身空间侧期待该功能。
+
 ## 安装与部署
 
 需要 32 位 Heroes III SoD 和 HD Mod 插件环境。
@@ -113,9 +121,17 @@ Language=zh-CN
 [Store]
 ; binary（默认，.hbs）或 json（可读可手改可 diff 的 .json）；改后需重启游戏生效。
 saveFormat=binary
+
+[CrashFix]
+; 2026-10-15 迁入的战斗崩溃修复（源 H3BattleCrashFix；用户裁定归本插件）。
+; 0=启用修复（默认）；1=不挂钩对应修复；改后需重启游戏生效。
+DisableObstacle=0
+DisableAura=0
 ```
 
 悬浮条单选列表选中等级时只写 user 层的 `MinLevel`，不改动 `H3BattleStore.default.ini`；本次调整不自动改写玩家 ini，原有配置覆盖优先级不变。`DisableLog` 仍以 ini 为准，界面不提供开关。日志文件最多保留30个的策略不变，它与手动档永久保留、自动档保留30个相互独立。
+
+**2026-10-15 修复 `user.ini` 写入器老缺陷**：旧写入器在重写已有文件时会把**每个既有键的值原地截断**（`MinLevel = debug` 变成 `MinLevel`），于是用悬浮条改一次日志级别，`user.ini` 里其它键（自定义热键、界面选择等）的值会被逐个吃空、静默回落默认——现在写入不再破坏既有键（同文件多键往返有单测 `tests\CrashFixTests.cpp` 兜住）。若你以前遇到过"改了日志级别后热键失效"，原因就是这个，重设一次即可。
 
 ## 构建
 
@@ -187,7 +203,7 @@ Release\null\H3BattleStore.dll           Null 变体（验证/实验用，不部
 ## 设计与逆向资料
 
 - [需求文档](需求文档.md)：玩家行为和验收标准。
-- [设计文档](设计文档.md)：总览、架构与 Hook 索引；专题见 docs/（指纹索引、快照采集、恢复事务、UI 输入、文件格式、验证边界、诊断日志），历史轮次见 [变更记录](变更记录.md)。
+- [设计文档](设计文档.md)：总览、架构与 Hook 索引；专题见 docs/（指纹索引、快照采集、恢复事务、UI 输入、文件格式、验证边界、诊断日志、界面分离、H3Auto 移植、[战斗崩溃修复迁入](docs/12-战斗崩溃修复迁入.md)），历史轮次见 [变更记录](变更记录.md)。
 - [使用说明](使用说明.txt)：面向玩家的安装和操作说明。
 - [战斗中存档可行性逆向笔记](D:/GitHub/H3/H3Note/战斗中存档可行性逆向笔记.md)：结构、地址和恢复算法的静态逆向依据。
 

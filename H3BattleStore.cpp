@@ -102,6 +102,14 @@ namespace autoassist {
 #include "modules/AutoEntry.inc.cpp"
 } // namespace autoassist
 
+// 战斗崩溃修复（2026-10-15 迁入，用户裁定：战斗类修复归本插件，随身空间不再携带；
+// 源 D:\GitHub\H3\H3BattleCrashFix，曾短暂并入 H3Space 后迁出）。三个防崩型 HiHook
+// （障碍/光环/阻止清理），守卫前缀 CrashFix.*。依赖的 CrashGuard/IniUtf8 均在上方
+// 全局作用域，包一层独立命名空间即可（与 crashfix 同款 MSVC 坑规避见模块头注）。
+namespace crashfix {
+#include "modules/CrashFix.inc.cpp"
+}
+
 #include "modules/BattleUiPort.hpp"
 #if defined(H3BS_UI_NULL)
 // 无界面诊断变体（编译期宏，供自动化测试/自动化验证用；与玩家可选的两套界面无关）。

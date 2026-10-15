@@ -251,9 +251,18 @@ static bool IniWriteKeyUtf8(const char* path, const char* section,
             } else if (in_section && !written) {
                 char* eq = strchr(t, '=');
                 if (eq) {
-                    *eq = 0;
-                    const bool key_match = _stricmp(IniTrim_(t), key) == 0;
-                    *eq = '=';
+                    // 匹配键名**不得改写源行**（2026-10-15 自 H3Space/H3RndNew 移植的
+                    // 老 bug 修复）：旧写法把 '=' 临时写 0 再 IniTrim_，等号前的空格被
+                    // 写成 0，恢复 '=' 也补不回那个空格，于是该行在 strlen 口径下被截断，
+                    // 每写一次就毁掉一个既有键的值（`MinLevel = debug` → `MinLevel`，
+                    // 重读即回落默认）。玩家侧表现：用面板写一次日志级别/热键，user.ini
+                    // 里其它键的值被逐个吃掉。隔离回归见 tests\CrashFixTests.cpp 与
+                    // tests\ini-probe（写入→重读往返）。
+                    const char* key_end = eq;
+                    while (key_end > t && (key_end[-1] == ' ' || key_end[-1] == '\t')) --key_end;
+                    const size_t key_length = static_cast<size_t>(key_end - t);
+                    const bool key_match = strlen(key) == key_length
+                        && _strnicmp(t, key, key_length) == 0;
                     if (key_match) {
                         char nl[320];
                         int n = _snprintf(nl, sizeof(nl) - 1, "%s = %s\r\n",

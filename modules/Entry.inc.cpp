@@ -1000,6 +1000,11 @@ static void StartPlugin()
     // 注册两个新地址钩子（0x600430、0x4786B0 已在上方按单壳合并注册，不重复挂）。
     autoassist::AutoInit_();
     autoassist::AutoInstallHooks_();
+    // 2026-10-15 迁入（用户裁定：战斗崩溃修复归本插件，随身空间不再携带）：
+    // 三个防崩型 HiHook（障碍 RemoveObstacle / 光环 UpdateAuraLinks /
+    // 阻止清理 FindAndRemove），见 modules/CrashFix.inc.cpp。
+    crashfix::ReadConfig_();
+    crashfix::StartHooks_();
     LogInfo("战斗存档：codec=%u 可逆事务已启用，实机恢复验收尚未完成。", kCodecVersion);
 }
 
