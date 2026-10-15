@@ -500,13 +500,27 @@ TEST_CASE("logcontrols: severity policy, guard windows, level config, layered in
     for (int i = 0; i < 7; ++i)
         WriteFixture(root + L"\\H3BattleStore_fixture_" + std::to_wstring(i) + L".log", i);
     WriteFixture(root + L"\\H3Auto_unrelated.log", 9);
-    LogPackEntry entries[5] = {};
-    REQUIRE_MESSAGE(LogPackCollectRecent_(entries, 5) == 5, "collect exactly five latest logs");
-    REQUIRE_MESSAGE(std::strcmp(entries[0].name, "H3BattleStore_fixture_6.log") == 0
-        && std::strcmp(entries[4].name, "H3BattleStore_fixture_2.log") == 0, "newest-first ordering");
+    LogPackEntry* logs = nullptr;
+    REQUIRE_MESSAGE(LogPackCollectLogs_(&logs) == 7, "collect every own log, not a fixed five");
+    REQUIRE_MESSAGE(logs != nullptr
+        && std::strcmp(logs[0].name, "H3BattleStore_fixture_6.log") == 0
+        && std::strcmp(logs[6].name, "H3BattleStore_fixture_0.log") == 0,
+        "newest-first ordering keeps the oldest too");
+    delete[] logs;
     REQUIRE_MESSAGE(PackRecentLogs_(nullptr, 0, reason, sizeof(reason)), "LZMA 7z pack success");
     REQUIRE_MESSAGE(copiedPath.find(L"H3BattleStore_logs_") != std::wstring::npos
         && GetFileAttributesW(copiedPath.c_str()) != INVALID_FILE_ATTRIBUTES, "wide CF_HDROP pack path");
+    // 名字流按 UTF-16LE 存文件名：7 份必须全在包里（旧实现"最近 5 份"会漏掉最旧两份）。
+    {
+        const std::string blob = ReadFixtureText_(copiedPath);
+        for (int i = 0; i < 7; ++i) {
+            const std::string name = "H3BattleStore_fixture_" + std::to_string(i) + ".log";
+            std::string needle;
+            for (const char c : name) { needle.push_back(c); needle.push_back('\0'); }
+            REQUIRE_MESSAGE(blob.find(needle) != std::string::npos,
+                name + " is inside the packed .7z");
+        }
+    }
     clipboardFail = true;
     REQUIRE_MESSAGE(!PackRecentLogs_(nullptr, 0, reason, sizeof(reason)) && std::strstr(reason, "7z"),
         "clipboard failure reports generated file");

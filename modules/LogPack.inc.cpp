@@ -1,7 +1,7 @@
 // 日志打包：复用 H3Auto 的 LZMA / .7z 容器与 CF_HDROP 文件式剪贴板方案。
-// 最近 5 个日志文件（完整文件，不截尾部）LZMA 压缩为 .7z（手写容器，
-// LZMA SDK 源码级集成见 lzma/），以 CF_HDROP 文件式复制到剪贴板
-// （同资源管理器复制文件，聊天框 Ctrl+V 直接发送）。
+// DLL 同目录下**所有**自家日志（完整文件，不截尾部；**不限份数**，只按文件名
+// 前缀筛选）LZMA 压缩为 .7z（手写容器，LZMA SDK 源码级集成见 lzma/），
+// 以 CF_HDROP 文件式复制到剪贴板（同资源管理器复制文件，聊天框 Ctrl+V 直接发送）。
 // 路径经 UTF-8 / UTF-16 转换，支持中文插件目录。
 
 // LzmaEnc.h → 7zTypes.h 用 EXTERN_C_BEGIN 包裹到文件尾，且注释掉了
@@ -73,9 +73,16 @@ static void LogPackDllDir_(char* dir, int dir_size)
     else dir[0] = 0;
 }
 
-// 找最近 max_count 个日志（按写入时间降序）。返回实际数量。
-static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
+// 收集 DLL 同目录下**所有**日志（按写入时间降序）。返回条数，成功时 *out 指向堆数组
+// （调用方负责 delete[]）；无匹配或分配失败返回 0（*out = nullptr）。
+//
+// 筛选条件只有一条：文件名前缀 = 日志器同源基名（见下）。**不限份数**——用户
+// 2026-10-16 裁定「改成只限前缀,不限数量」：份数由日志器自己的保留策略（ConfigLog
+// 保留最近 30 个）与用户手工增删决定，打包侧不再截断，数组按需 2 倍扩容。
+// （H3Space 已于 2026-10-15 按同口径改过，本插件此前仍是"最近 5 份"。）
+static int LogPackCollectLogs_(LogPackEntry** out)
 {
+    if (out) *out = nullptr;
     // 路径缓冲在堆上：打包按钮跑在游戏线程，栈放不下 4MB。
     char* dir = new(std::nothrow) char[kPathCap_];
     wchar_t* wdir = new(std::nothrow) wchar_t[kPathCap_ / 2];
@@ -85,10 +92,10 @@ static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
         return 0;
     }
     LogPackDllDir_(dir, kPathCap_);
-    int n = 0;
-    if (dir[0]) {
-        LogPackEntry all[64];
-        int total = 0;
+    LogPackEntry* list = nullptr;
+    int total = 0;
+    int cap = 0;
+    if (dir[0] && out) {
         WIN32_FIND_DATAW fd;
         Utf8ToWide_(dir, wdir, kPathCap_ / 2);
         // 收集模式与日志器同源（g_log_base = DLL 文件名去扩展名）：与 H3Auto
@@ -106,30 +113,41 @@ static int LogPackCollectRecent_(LogPackEntry* out, int max_count)
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                if (total >= (int)(sizeof(all) / sizeof(all[0]))) break;
+                if (total == cap) {
+                    const int want = cap ? cap * 2 : 16;
+                    LogPackEntry* bigger = new(std::nothrow) LogPackEntry[want];
+                    if (!bigger) break; // 内存不足：已收到的先带走，不假装收全
+                    for (int i = 0; i < total; ++i) bigger[i] = list[i];
+                    delete[] list;
+                    list = bigger;
+                    cap = want;
+                }
                 WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1,
-                    all[total].name, sizeof(all[total].name), nullptr, nullptr);
-                all[total].name[sizeof(all[total].name) - 1] = 0;
-                all[total].write_time = fd.ftLastWriteTime;
+                    list[total].name, sizeof(list[total].name), nullptr, nullptr);
+                list[total].name[sizeof(list[total].name) - 1] = 0;
+                list[total].write_time = fd.ftLastWriteTime;
                 ++total;
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
-        // 写入时间降序（简单选择排序，n≤64）。
+        // 写入时间降序（简单选择排序；日志份数在几十量级，O(n²) 无妨）。
         for (int i = 0; i < total; ++i) {
             int best = i;
             for (int j = i + 1; j < total; ++j)
-                if (CompareFileTime(&all[j].write_time, &all[best].write_time) > 0)
+                if (CompareFileTime(&list[j].write_time, &list[best].write_time) > 0)
                     best = j;
             if (best != i) {
-                LogPackEntry t = all[i]; all[i] = all[best]; all[best] = t;
+                LogPackEntry t = list[i]; list[i] = list[best]; list[best] = t;
             }
         }
-        n = total < max_count ? total : max_count;
-        for (int i = 0; i < n; ++i) out[i] = all[i];
     }
     delete[] dir; delete[] wdir; delete[] pattern;
-    return n;
+    if (total <= 0) {
+        delete[] list;
+        return 0;
+    }
+    *out = list;
+    return total;
 }
 
 // 历史教训：全量读大日志曾致 32 位进程 UI 假死（先截尾部 2MB 规避）；
@@ -272,24 +290,40 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
     actual_path[0] = 0;
     fail_reason[0] = 0;
 
-    // 最近五份完整日志与一份说明；剪贴板只放 .7z 文件本身。
-    LogPackEntry entries[6];
-    const int nLogs = LogPackCollectRecent_(entries, 5);
+    // 全部自家日志（不限份数，只按文件名前缀收集）+ 一份说明；剪贴板只放 .7z 本身。
+    LogPackEntry* logs = nullptr;
+    const int nLogs = LogPackCollectLogs_(&logs);
     if (nLogs <= 0) {
         _snprintf(fail_reason, reason_size - 1, "%s", "没有找到日志文件");
         fail_reason[reason_size - 1] = 0;
         delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
         return false;
     }
+    // 收集结果只保证 nLogs 项，而说明文件要占第 nLogs 项 ⇒ 另开 nLogs + 1 的数组，
+    // 不复用收集器缓冲（份数正好等于其扩容容量时写 list[nLogs] 会越界）。
+    const int nItems = nLogs + 1;
+    LogPackEntry* entries = new(std::nothrow) LogPackEntry[nItems];
+    BYTE** datas = new(std::nothrow) BYTE*[nItems]();
+    BYTE** packs = new(std::nothrow) BYTE*[nItems]();
+    size_t* pack_lens = new(std::nothrow) size_t[nItems]();
+    DWORD* unpack_sizes = new(std::nothrow) DWORD[nItems]();
+    DWORD* crcs = new(std::nothrow) DWORD[nItems]();
+    if (!entries || !datas || !packs || !pack_lens || !unpack_sizes || !crcs) {
+        delete[] entries; delete[] datas; delete[] packs; delete[] pack_lens;
+        delete[] unpack_sizes; delete[] crcs; delete[] logs;
+        delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
+        _snprintf(fail_reason, reason_size - 1, "alloc");
+        fail_reason[reason_size - 1] = 0;
+        return false;
+    }
+    for (int i = 0; i < nLogs; ++i) entries[i] = logs[i];
+    delete[] logs;
 
     LogPackDllDir_(dir, kPathCap_);
 
-    // 读入每个日志（完整文件，不截尾部）并 LZMA 压缩。
-    BYTE* datas[6] = {};
-    BYTE* packs[6] = {};
-    size_t pack_lens[6] = {};
-    DWORD unpack_sizes[6] = {};
-    DWORD crcs[6] = {};
+    // 读入每个日志（完整文件，不截尾部）并 LZMA 压缩。份数不限 ⇒ 每条流各一组缓冲；
+    // 原文件字节在压缩成功后立即释放（30 份 × 数 MB 会吃满 32 位进程地址空间），
+    // 只把压缩流留到组容器时用。
     BYTE props[LZMA_PROPS_SIZE] = {};
     int done = 0;
     for (int i = 0; i < nLogs; ++i) {
@@ -331,12 +365,15 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
             _snprintf(fail_reason, reason_size - 1, "%s", entries[i].name);
             goto bail;
         }
+        // 压缩流已独立于原文件字节：立即释放，份数不限时峰值内存才不会翻倍。
+        delete[] datas[i];
+        datas[i] = nullptr;
         done = i + 1;
     }
     // 发送说明使用 UTF-8 BOM，沿用 H3Auto 的 CRLF 展开方式。
     {
         char note[512];
-        _snprintf(note, sizeof(note) - 1, "H3BattleStore 战场存档日志包。|包含最近五份完整日志，保留开场初始化信息。|请将压缩包与问题描述发送到：|%s", kLogFeedbackContacts_);
+        _snprintf(note, sizeof(note) - 1, "H3BattleStore 战场存档日志包。|包含全部 %d 份日志（不限份数，按文件名前缀收集），保留开场初始化信息。|请将压缩包与问题描述发送到：|%s", nLogs, kLogFeedbackContacts_);
         note[sizeof(note) - 1] = 0;
         char expanded[768];
         int elen = 0;
@@ -492,15 +529,19 @@ static bool PackRecentLogs_(char* out_path, int out_path_size, char* fail_reason
         }
         LogInfo("[LogPack] 已打包 %d 个日志（LZMA）→ %s（已文件式复制到剪贴板）",
             done, zip_name);
-        for (int i = 0; i < done; ++i) delete[] datas[i];
-        for (int i = 0; i < done; ++i) if (packs[i]) delete[] packs[i];
+        for (int i = 0; i < nItems; ++i) delete[] datas[i];
+        for (int i = 0; i < nItems; ++i) if (packs[i]) delete[] packs[i];
+        delete[] entries; delete[] datas; delete[] packs; delete[] pack_lens;
+        delete[] unpack_sizes; delete[] crcs;
         delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
         return true;
     }
 
 bail:
-    for (int i = 0; i < 6; ++i) delete[] datas[i];
-    for (int i = 0; i < 6; ++i) delete[] packs[i];
+    for (int i = 0; i < nItems; ++i) delete[] datas[i];
+    for (int i = 0; i < nItems; ++i) delete[] packs[i];
+    delete[] entries; delete[] datas; delete[] packs; delete[] pack_lens;
+    delete[] unpack_sizes; delete[] crcs;
     delete[] internal_path; delete[] dir; delete[] path; delete[] wpath;
     fail_reason[reason_size - 1] = 0;
     return false;
