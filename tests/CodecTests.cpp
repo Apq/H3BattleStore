@@ -12,14 +12,15 @@
 #include "../modules/BattleCodec.inc.cpp"
 #include "../modules/BattleFingerprint.hpp"
 
-static int g_failures = 0;
+// 2026-10-15 起测试框架换 Catch2 v3 amalgamated（参照 H3Space）：断言转发
+// CHECK（失败继续、非致命，与旧 g_failures 计数口径一致），描述经 INFO 附加。
+#define CATCH_CONFIG_NO_POSIX_SIGNALS
+#include <catch_amalgamated.hpp>
 
 static void Expect(bool condition, const char* name)
 {
-    if (!condition) {
-        printf("FAIL %s\n", name);
-        ++g_failures;
-    }
+    INFO(name);
+    CHECK(condition);
 }
 
 static void TestMapFingerprint_()
@@ -371,13 +372,35 @@ static void TestV5Roundtrip_()
     }
 }
 
-int main()
+// 2026-10-15 起按 Catch2 组织：五个独立纯函数组各自一个用例；main 的内联大块
+// （v5 往返 + 障碍物 + RestorePolicy_）共享局部夹具，保持为单个用例、原序执行。
+TEST_CASE("codec: map fingerprint", "[codec]")
 {
     TestMapFingerprint_();
+}
+
+TEST_CASE("codec: war machine equipment", "[codec]")
+{
     TestWarMachineEquipment_();
+}
+
+TEST_CASE("codec: control state policy", "[codec]")
+{
     TestControlStatePolicy_();
+}
+
+TEST_CASE("codec: stale link normalization", "[codec]")
+{
     TestNormalizeStaleLinks_();
+}
+
+TEST_CASE("codec: v5 roundtrip", "[codec]")
+{
     TestV5Roundtrip_();
+}
+
+TEST_CASE("codec: capture roundtrip, obstacles and restore policy", "[codec][roundtrip]")
+{
     std::unique_ptr<CodecCapture> captureStorage(new CodecCapture{});
     CodecCapture& capture = *captureStorage;
     capture.version = kCodecVersion;
@@ -937,11 +960,4 @@ int main()
     Expect(RestorePolicy_(bad, &error), "double-wide right second hex accepted");
     bad.squares[23].twoHexMonsterSquare = 0;
     Expect(!RestorePolicy_(bad, &error), "double-wide incorrect flag rejected");
-
-    if (g_failures) {
-        printf("%d codec test(s) failed\n", g_failures);
-        return 1;
-    }
-    printf("codec tests passed\n");
-    return 0;
 }

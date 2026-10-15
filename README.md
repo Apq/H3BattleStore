@@ -118,19 +118,22 @@ Release\null\H3BattleStore.dll           Null 变体（验证/实验用，不部
 
 ## 测试
 
-只保留独立单元测试，不启动游戏、不安装钩子、不操作真实剪贴板：
+独立单元测试改用 **Catch2 v3（amalgamated，`third_party/catch2/`，参照 H3Space 工程）**；不启动游戏、不安装钩子、不操作真实剪贴板：
 
 ```powershell
 .\tests\run-unit-tests.ps1
 ```
 
-- Archive：文件格式、CRC、提交写入、元数据扫描与未知坏档不误删。
-- Codec：构造快照的编解码、数据范围与恢复策略校验。
-- LogControls：默认 debug（中文“调试”）、五级持久化重读、写入失败保留等级、实际日志写入过滤、阶段/结果分级、重复限频与计数（含计时回绕）、原生消息路由、最近五份完整日志的 LZMA 打包、Unicode CF_HDROP 载荷与剪贴板失败处理。
-- UiPort：NullUi 契约——输入事件全透传、无绘制/服务副作用、读档 fail-closed（无界面确认框只告警丢弃）、通知与生命周期日志顺序、事件结构 POD 断言生效。测试用最小类型 stub，不链接 H3API。
-- AltTail：ALT 退后落点判定——只认尾端正后方一格，行边缘/越界/无退后能力/攻击或超出射程一律拒绝，非 ALT、单格宽与 AI 方保持原版。
+- 运行方式：五组用例各自由 `cl`（`/nologo /EHsc /std:c++17 /utf-8 /W4 /wd4505 /O2`）连同 `catch_amalgamated.cpp` 独立链接成 `tests\unit-tmp\<组名>.exe` 后运行，**退出码非零即失败**；`catch_amalgamated.cpp` 只编译一次并缓存为 `tests\unit-tmp\catch2.obj`（源码更新才重编），避免每套重复编译大文件。
+- LogControls 的 fixture 目录经环境变量 `H3BS_TEST_FIXTURE` 传入（Catch2 接管命令行解析，不再用 argv 传参）。
+- 断言口径：原 `Expect`/`Check` 的"失败即止"对应 `REQUIRE`，非致命累计对应 `CHECK`，原描述文本经 `INFO` 附加到失败报告；`REQUIRE_MESSAGE`/`CHECK_MESSAGE` 由测试文件自行用 `INFO`+断言包装（本版 amalgamated 未提供 `*_MESSAGE` 变体）。
+- Archive：文件格式、CRC、提交写入、元数据扫描与未知坏档不误删（12 个 `TEST_CASE`）。
+- Codec：构造快照的编解码、数据范围与恢复策略校验（6 个 `TEST_CASE`）。
+- LogControls：默认 debug（中文"调试"）、五级持久化重读、写入失败保留等级、实际日志写入过滤、阶段/结果分级、重复限频与计数（含计时回绕）、原生消息路由、最近五份完整日志的 LZMA 打包、Unicode CF_HDROP 载荷与剪贴板失败处理（3 个 `TEST_CASE`）。
+- UiPort：NullUi 契约——输入事件全透传、无绘制/服务副作用、读档 fail-closed（无界面确认框只告警丢弃）、通知与生命周期日志顺序、事件结构 POD 断言生效。测试用最小类型 stub，不链接 H3API（3 个 `TEST_CASE`）。
+- AltTail：ALT 退后落点判定——只认尾端正后方一格，行边缘/越界/无退后能力/攻击或超出射程一律拒绝，非 ALT、单格宽与 AI 方保持原版（7 个 `TEST_CASE`）。
 
-以上单元测试已通过。真实钩子 ABI 测试、布局探针及读取真实游戏档的测试入口已按用户要求删除。游戏内显示、点击、残影和战斗恢复效果以用户实测为准。
+以上单元测试已通过（Archive 217 / Codec 4224 / LogControls 30167 / UiPort 39 / AltTail 14 条断言，全部 exit 0）。真实钩子 ABI 测试、布局探针及读取真实游戏档的测试入口已按用户要求删除。游戏内显示、点击、残影和战斗恢复效果以用户实测为准。
 
 2026-10-06 23:14/23:15读档崩溃已定位为刷新标记错误：空部队槽被强制重绘，原版43DEDA读取NULL DEF的+28。源码改为仅标记预检通过的参与槽（含合法尸体），并在写内存前检查保存和回滚双方的位置/DEF首组除数/选帧；不改v3格式、不删除旧档。后续E0424842仍是保护性终止，不能吞掉第一异常后继续战斗。
 

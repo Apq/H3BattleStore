@@ -1,6 +1,7 @@
 // UiPortTests.cpp
 // NullUi 契约测试：真实 NullUi 编制单元（经 IBattleStoreUi 调用）+ 最小 H3API 类型 stub。
 // 不链接 H3API、不载入游戏、不依赖图形资源或 WinAPI 调用。
+// 2026-10-15 起测试框架换 Catch2 v3 amalgamated（参照 H3Space）。
 //
 // 边界声明（这是契约测试，不是生产服务恢复测试）：
 //   1. 只验证 NullUi 如何驱动服务与记录日志（副作用顺序、服务 call counts、传参），
@@ -9,6 +10,14 @@
 //   2. 不验证界面绘制、悬停布局、改键交互与吞并策略——那些属于 HdNativeUi 契约。
 //   3. 不验证恢复成功链路（指纹校验、档案定位、解码与写入）：无界面时 NullUi 必须
 //      fail closed，本测试断言它“不确认、不执行恢复”，而不是断言恢复结果。
+
+#define CATCH_CONFIG_NO_POSIX_SIGNALS
+#include <catch_amalgamated.hpp>
+
+// 本版 Catch2 v3 amalgamated 未提供 *_MESSAGE 变体：INFO + 断言等价实现
+// （INFO 把描述附到下一次断言失败的报告里，描述文本与原 Expect_ 逐字一致）。
+// 条件整体加括号：Catch2 的表达式分解器不容忍断言顶层的 && / ||。
+#define CHECK_MESSAGE(condition, message) do { INFO(message); CHECK((condition)); } while (0)
 
 #include <cstdarg>
 #include <cstddef>
@@ -158,18 +167,6 @@ static bool StoreConsumeRestore_(H3CombatManager* mgr, int result, StoreEntry* e
 
 #include "../modules/NullUiPort.inc.cpp"
 
-static int g_failed = 0;
-static int g_checks = 0;
-
-static void Expect_(bool condition, const char* name)
-{
-    ++g_checks;
-    if (!condition) {
-        printf("FAIL %s\n", name);
-        ++g_failed;
-    }
-}
-
 static bool LogIs_(size_t index, char level, const char* text)
 {
     return index < g_fake.logs.size() && g_fake.logs[index].level == level
@@ -187,7 +184,7 @@ static bool ServiceSequenceIs_(std::initializer_list<const char*> expected)
 }
 
 // ---- 测试1：入口全局端口、POD 事件与“不接管输入” ----
-static void TestPortAndInputPassThrough_()
+TEST_CASE("uiport: installed port, POD events, input pass-through")
 {
     ResetFake_();
     H3CombatManager mgr;
@@ -205,22 +202,22 @@ static void TestPortAndInputPassThrough_()
 
     // 装机端口确实是 NullUi，并且契约与具体实例无关（另建一个实例同行为）。
     IBattleStoreUi* ui = g_uiPort;
-    Expect_(ui != nullptr && dynamic_cast<NullUi*>(ui) == &g_nullUi,
+    CHECK_MESSAGE(ui != nullptr && dynamic_cast<NullUi*>(ui) == &g_nullUi,
         "installed port is the NullUi instance, not a stub or null");
     NullUi second;
     IBattleStoreUi* other = &second;
 
     // POD 事件：可零初始化、可 sizeof/offsetof 布局稳定、可整块 memcpy（SEH 边界要求）。
     const UiKeyEvent_ zeroKey = {};
-    Expect_(zeroKey.vk == 0 && !zeroKey.down && !zeroKey.up && !zeroKey.repeat
+    CHECK_MESSAGE(zeroKey.vk == 0 && !zeroKey.down && !zeroKey.up && !zeroKey.repeat
         && zeroKey.source == 0, "UiKeyEvent_ zero initializes every field");
     const UiMouseEvent_ zeroMouse = {};
-    Expect_(zeroMouse.kind == 0 && zeroMouse.gameX == 0 && zeroMouse.gameY == 0
+    CHECK_MESSAGE(zeroMouse.kind == 0 && zeroMouse.gameX == 0 && zeroMouse.gameY == 0
         && zeroMouse.wheelDelta == 0, "UiMouseEvent_ zero initializes every field");
-    Expect_(offsetof(UiKeyEvent_, vk) == 0 && offsetof(UiKeyEvent_, source) == 8
+    CHECK_MESSAGE(offsetof(UiKeyEvent_, vk) == 0 && offsetof(UiKeyEvent_, source) == 8
         && offsetof(UiMouseEvent_, wheelDelta) == 12,
         "POD event layout stays field-for-field stable for hooks");
-    Expect_(std::is_trivially_copyable<UiKeyEvent_>::value
+    CHECK_MESSAGE(std::is_trivially_copyable<UiKeyEvent_>::value
         && std::is_trivially_copyable<UiMouseEvent_>::value
         && std::is_trivially_destructible<UiKeyEvent_>::value
         && std::is_trivially_destructible<UiMouseEvent_>::value,
@@ -233,23 +230,23 @@ static void TestPortAndInputPassThrough_()
     const bool keyRoundTrips = std::memcmp(&key, &copiedKey, sizeof(key)) == 0;
 
     ui->Initialize();
-    Expect_(g_fake.logs.size() == 1 && LogIs_(0, 'I', "[NullUi] initialized"),
+    CHECK_MESSAGE(g_fake.logs.size() == 1 && LogIs_(0, 'I', "[NullUi] initialized"),
         "Initialize records the NullUi lifecycle event");
 
     // 系统键：down/up/repeat 的 8 种组合 + 两种 source，一律不透吞。
     for (int mask = 0; mask != 8; ++mask) {
         const UiKeyEvent_ event = {65, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, mask % 2};
         const bool passed = !ui->OnSystemKey(event) && !other->OnSystemKey(event);
-        Expect_(passed && keyRoundTrips, "every system key down/up/repeat source combination passes through");
+        CHECK_MESSAGE(passed && keyRoundTrips, "every system key down/up/repeat source combination passes through");
     }
     // 鼠标：kind 0..5 × 战斗开关，一律 false。
     for (int kind = 0; kind != 6; ++kind) {
         const UiMouseEvent_ event = {kind, 100 + kind, 200 - kind, kind == 5 ? -120 : 0};
-        Expect_(!ui->OnSystemMouse(event, false) && !ui->OnSystemMouse(event, true)
+        CHECK_MESSAGE(!ui->OnSystemMouse(event, false) && !ui->OnSystemMouse(event, true)
             && !other->OnSystemMouse(event, true),
             "each mouse kind passes through with combat open or closed");
     }
-    Expect_(!ui->HitBar(&msg, false) && !ui->HitBar(&msg, true)
+    CHECK_MESSAGE(!ui->HitBar(&msg, false) && !ui->HitBar(&msg, true)
         && !ui->OnGameMouse(&msg) && !other->OnGameMouse(&msg),
         "HitBar and GameMouse never consume");
 
@@ -264,41 +261,41 @@ static void TestPortAndInputPassThrough_()
     ui->OnFrameKeyPoll(&mgr, 5678, false);
     ui->OnListReloaded();
     ui->CancelRebind("test");
-    Expect_(g_fake.serviceCalls.empty() && g_fake.logs.size() == 1,
+    CHECK_MESSAGE(g_fake.serviceCalls.empty() && g_fake.logs.size() == 1,
         "draw/frame/rebind/game callbacks call no service and emit no log");
-    Expect_(!ui->IsRebindWaiting() && ui->RebindLatchKey() == 0
+    CHECK_MESSAGE(!ui->IsRebindWaiting() && ui->RebindLatchKey() == 0
         && !other->IsRebindWaiting() && other->RebindLatchKey() == 0,
         "NullUi reports no rebind wait and a zero latch");
 }
 
 // ---- 测试2：列表委托、恢复超时提示与 fail-closed 拒绝 ----
-static void TestReloadAndRestore_()
+TEST_CASE("uiport: reload delegation, restore timeout notice, fail-closed discard")
 {
     ResetFake_();
     H3CombatManager mgr;
     IBattleStoreUi* ui = g_uiPort;
 
     g_fake.reloadResult = true;
-    Expect_(ui->ReloadEntries(&mgr), "ReloadEntries propagates service success");
-    Expect_(g_fake.reloadCalls == 1 && g_fake.reloadMgr == &mgr,
+    CHECK_MESSAGE(ui->ReloadEntries(&mgr), "ReloadEntries propagates service success");
+    CHECK_MESSAGE(g_fake.reloadCalls == 1 && g_fake.reloadMgr == &mgr,
         "ReloadEntries passes the original manager to the service");
     g_fake.reloadResult = false;
-    Expect_(!ui->ReloadEntries(nullptr), "ReloadEntries propagates service failure");
-    Expect_(g_fake.reloadCalls == 2 && g_fake.reloadMgr == nullptr,
+    CHECK_MESSAGE(!ui->ReloadEntries(nullptr), "ReloadEntries propagates service failure");
+    CHECK_MESSAGE(g_fake.reloadCalls == 2 && g_fake.reloadMgr == nullptr,
         "ReloadEntries preserves a null manager argument");
-    Expect_(ServiceSequenceIs_({"reload", "reload"}),
+    CHECK_MESSAGE(ServiceSequenceIs_({"reload", "reload"}),
         "only the reload service runs during list refresh");
 
     ResetFake_();
     g_fake.maintainResult = false;
     ui->MaintainRestore(&mgr);
-    Expect_(g_fake.maintainCalls == 1 && g_fake.maintainMgr == &mgr
+    CHECK_MESSAGE(g_fake.maintainCalls == 1 && g_fake.maintainMgr == &mgr
         && ServiceSequenceIs_({"maintain"}) && g_fake.logs.empty(),
         "non-expired restore maintenance makes no timeout warning");
 
     g_fake.maintainResult = true;
     ui->MaintainRestore(&mgr);
-    Expect_(g_fake.maintainCalls == 2 && g_fake.logs.size() == 1
+    CHECK_MESSAGE(g_fake.maintainCalls == 2 && g_fake.logs.size() == 1
         && LogIs_(0, 'W', "[NullUi] restore request expired; ui could not display timeout notice"),
         "only an expired restore request produces the timeout warning");
 
@@ -307,7 +304,7 @@ static void TestReloadAndRestore_()
     g_fake.consumeReturn = false;
     g_fake.consumeQueuePending = true;
     ui->ProcessRestore(&mgr, 41);
-    Expect_(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
+    CHECK_MESSAGE(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
         && g_fake.consumeResult == 41 && g_fake.logs.empty()
         && g_fake.consumeQueuePending,
         "a missing restore request is a silent no-op without prompting");
@@ -317,22 +314,22 @@ static void TestReloadAndRestore_()
     g_fake.consumeReturn = true;
     g_fake.consumeQueuePending = true;
     ui->ProcessRestore(&mgr, -7);
-    Expect_(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
+    CHECK_MESSAGE(g_fake.consumeCalls == 1 && g_fake.consumeMgr == &mgr
         && g_fake.consumeResult == -7 && g_fake.consumeSawEntry
         && g_fake.consumeSawGeneration && g_fake.consumeSawKey
         && !g_fake.consumeQueuePending && g_fake.logs.size() == 1
         && LogIs_(0, 'W', "[NullUi] restore request cannot be confirmed without UI; request discarded"),
         "a ready restore request is discarded with one fail-closed warning");
-    Expect_(g_fake.consumedStamp == 0x1234 && g_fake.consumedGeneration == 77
+    CHECK_MESSAGE(g_fake.consumedStamp == 0x1234 && g_fake.consumedGeneration == 77
         && g_fake.returnedExpectedKey == "fake-output-key"
         && g_fake.consumedExpectedKey.empty(),
         "the snapshot handed over by the service is not executed or mutated");
-    Expect_(ServiceSequenceIs_({"consume"}),
+    CHECK_MESSAGE(ServiceSequenceIs_({"consume"}),
         "restore processing only consumes the request; no confirm or execute service runs");
 }
 
 // ---- 测试3：保存/提示日志与生命周期通知 ----
-static void TestNotifications_()
+TEST_CASE("uiport: saved/notice logs and lifecycle notifications")
 {
     ResetFake_();
     IBattleStoreUi* ui = g_uiPort;
@@ -348,27 +345,14 @@ static void TestNotifications_()
     ui->OnBattleReset();
     ui->OnFaultCleanup();
 
-    Expect_(g_fake.logs.size() == 5 && g_fake.serviceCalls.empty(),
+    CHECK_MESSAGE(g_fake.logs.size() == 5 && g_fake.serviceCalls.empty(),
         "notifications only log, in call order, without touching services");
-    Expect_(LogIs_(0, 'I', expected), "MarkSaved preserves the full UTC timestamp");
-    Expect_(LogIs_(1, 'I', (std::string("[NullUi] notice logged: utf8=") + notice).c_str()),
+    CHECK_MESSAGE(LogIs_(0, 'I', expected), "MarkSaved preserves the full UTC timestamp");
+    CHECK_MESSAGE(LogIs_(1, 'I', (std::string("[NullUi] notice logged: utf8=") + notice).c_str()),
         "MarkNotice preserves UTF-8 bytes");
-    Expect_(LogIs_(2, 'I', "[NullUi] notice logged: utf8="),
+    CHECK_MESSAGE(LogIs_(2, 'I', "[NullUi] notice logged: utf8="),
         "MarkNotice accepts null safely");
-    Expect_(LogIs_(3, 'I', "[NullUi] battle state reset")
+    CHECK_MESSAGE(LogIs_(3, 'I', "[NullUi] battle state reset")
         && LogIs_(4, 'I', "[NullUi] fault cleanup acknowledged"),
         "battle reset and fault cleanup notify in call order");
-}
-
-int main(int argc, char** argv)
-{
-    // runner 会传 fixture 目录参数；本测试不使用文件系统，容许其可选存在。
-    (void)argv;
-    Expect_(argc >= 1, "runner passes no required argument to this contract test");
-    TestPortAndInputPassThrough_();
-    TestReloadAndRestore_();
-    TestNotifications_();
-    if (g_failed == 0) printf("PASS %d checks: NullUi contract (no game, no H3API, no UI resources, no WinAPI)\n", g_checks);
-    else printf("FAILED %d of %d NullUi contract checks\n", g_failed, g_checks);
-    return g_failed == 0 ? 0 : 1;
 }

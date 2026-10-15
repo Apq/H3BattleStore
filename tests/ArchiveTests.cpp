@@ -26,16 +26,15 @@ using hbs::ArchiveRecord;
 using hbs::ArchiveSection;
 using hbs::ArchiveStore;
 
-static int g_failed = 0;
+// 2026-10-15 起测试框架换 Catch2 v3 amalgamated（参照 H3Space）：断言转发
+// CHECK（失败继续、非致命，与旧 g_failed 计数口径一致），描述经 INFO 附加。
+#define CATCH_CONFIG_NO_POSIX_SIGNALS
+#include <catch_amalgamated.hpp>
 
 static void Expect(bool condition, const char* name)
 {
-    if (condition) {
-        printf("  PASS  %s\n", name);
-        return;
-    }
-    printf("  FAIL  %s\n", name);
-    ++g_failed;
+    INFO(name);
+    CHECK(condition);
 }
 
 static std::string Key(char fill, char tail)
@@ -849,20 +848,64 @@ static void TestLocalStamp()
     Expect(!hbs::detail::FormatLocalArchiveStamp(stamp, nullptr, 0, nullptr), "null output rejected");
 }
 
-int main()
+// 2026-10-15 起按 Catch2 组织：每个 Test 函数/参数化调用一个用例，执行顺序与
+// 旧 main 一致；函数体与断言逐字未动。
+TEST_CASE("archive: binary frame encode/decode", "[archive]")
 {
     TestCodec();
+}
+
+TEST_CASE("archive: rejects invalid input", "[archive]")
+{
     TestRejects();
+}
+
+TEST_CASE("archive: fingerprint directory layout [binary]", "[archive][binary]")
+{
     TestLayoutFor(ArchiveFormat::Binary);
+}
+
+TEST_CASE("archive: fingerprint directory layout [json]", "[archive][json]")
+{
     TestLayoutFor(ArchiveFormat::Json);
+}
+
+TEST_CASE("archive: hidden archives stay on disk [binary]", "[archive][binary]")
+{
     TestHiddenArchivesStayOnDiskFor(ArchiveFormat::Binary);
+}
+
+TEST_CASE("archive: hidden archives stay on disk [json]", "[archive][json]")
+{
     TestHiddenArchivesStayOnDiskFor(ArchiveFormat::Json);
+}
+
+TEST_CASE("archive: existing temporary file is preserved [binary]", "[archive][binary]")
+{
     TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Binary);
+}
+
+TEST_CASE("archive: existing temporary file is preserved [json]", "[archive][json]")
+{
     TestExistingTemporaryFileIsPreservedFor(ArchiveFormat::Json);
+}
+
+TEST_CASE("archive: json frame text", "[archive][json]")
+{
     TestJsonFrameText();
+}
+
+TEST_CASE("archive: auto slot [binary]", "[archive][binary]")
+{
     TestAutoSlotFor(ArchiveFormat::Binary);
+}
+
+TEST_CASE("archive: auto slot [json]", "[archive][json]")
+{
     TestAutoSlotFor(ArchiveFormat::Json);
+}
+
+TEST_CASE("archive: local archive stamp", "[archive]")
+{
     TestLocalStamp();
-    printf(g_failed ? "FAILED %d\n" : "ALL PASSED\n", g_failed);
-    return g_failed ? 1 : 0;
 }
