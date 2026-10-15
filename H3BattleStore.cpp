@@ -23,6 +23,9 @@ static_assert(sizeof(H3CombatManager) == 0x140EC, "SoD combat manager layout");
 static_assert(offsetof(H3CombatManager, accessibleSquares) == 0x4C, "previous shade cache layout");
 static_assert(offsetof(H3CombatManager, accessibleSquares2) == 0x107, "current shade cache layout");
 static_assert(offsetof(H3CombatManager, tacticsPhase) == 0x13D68, "native shade override is tactics phase");
+// 移植（批次四）：autoassist 的裸结构视图 _BattleMgr_（modules\Compat.inc.cpp）与官方
+// 布局共用同一对象指针，关键字段偏移必须一致——不一致会让同址单壳合并传错对象语义。
+static_assert(offsetof(H3CombatManager, action) == 0x3C, "autoassist _BattleMgr_::action matches official layout");
 
 // 跨模块前置声明：实现在 Entry.inc.cpp，供先于其包含的恢复与界面模块使用。
 static bool CombatIsReadable_(const H3CombatManager* mgr);
@@ -50,6 +53,10 @@ static bool TryCaptureCombat_(hbs::ArchiveSlot slot = hbs::ArchiveSlot::Manual,
 #include "modules/BattleFingerprint.hpp"
 #include "modules/BattleRestore.inc.cpp"
 #include "modules/BattleStoreService.inc.cpp"
+
+// 移植（批次四）：协作直连所需的宿主回调。定义在 Entry.inc.cpp（晚于 autoassist
+// 区块），因此必须在此前置声明，供 autoassist 内的自动战斗判定直连调用。
+static BOOL __stdcall StoreBeforeAutoAction_(void* manager);
 
 // ===== 2026-10-15 H3Auto 功能移植（批次二：纯逻辑核心 + 功能层）=====
 // 命名空间隔离由本包含点承担：被包含文件自身都不再开命名空间
@@ -89,6 +96,10 @@ namespace autoassist {
 #include "modules/PanelInput.inc.cpp"    // 面板输入捕获（WH_KEYBOARD/WH_MOUSE）
 #include "modules/PanelDraw.inc.cpp"     // 面板内容绘制
 #endif
+
+// 入口接线（批次四）：新地址钩子（0x4746B0 / 0x4744D0）注册、每帧段与战斗消息段，
+// 以及被宿主同址单壳合并的 0x600430 / 0x4786B0 两段。必须在功能层与界面层之后。
+#include "modules/AutoEntry.inc.cpp"
 } // namespace autoassist
 
 #include "modules/BattleUiPort.hpp"

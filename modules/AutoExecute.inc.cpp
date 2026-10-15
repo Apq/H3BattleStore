@@ -747,8 +747,12 @@ static bool ShouldYieldToPlayer_(_BattleMgr_* mgr)
 }
 
 // 原版 0x4786B0 真正开始执行 action 时调用：确认单次接管的人工动作已消费。
-int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
+// 2026-10-15 移植（批次四）：本函数不再是自己的 HiHook 回调——0x4786B0 与宿主的
+// Hook_BattleExecute_ 同址，已单壳合并；原版调用由宿主外壳负责，此处只做源插件
+// 那段判定（原表达式 THISCALL_2(int, h->GetDefaultFunc(), This, flags) 随外壳移交）。
+void AutoOnActionExecuteSegment_(_BattleMgr_* This, int flags)
 {
+    (void)flags;
     __try {
         // action=1 是英雄施法，不结束单次接管：玩家可先施法再给该部队下命令。
         if (This && g_control == CM_ONESHOT_LOCKED
@@ -771,9 +775,6 @@ int __stdcall HH_OnBattleActionExecute(HiHook* h, _BattleMgr_* This, int flags)
             }
         }
     } __except (GuardCrashFilter_(GHID_ACTION_EXEC, GetExceptionInformation())) {}
-    // 原函数调用在 __try 之外：原版代码自身的崩溃（游戏 bug）不属于插件
-    // 铠甲的吞没范围，正常传播（§18 L2 边界）。
-    return THISCALL_2(int, h->GetDefaultFunc(), This, flags);
 }
 
 void ResetAutoState()
@@ -2858,17 +2859,17 @@ int DecideTakeover(_BattleMgr_* mgr)
     }
 }
 
-// H3BattleStore协作ABI v1：动态查询，不依赖DLL加载顺序；未加载时原行为。
-// Query返回忙态，Before返回FALSE代表稳定玩家窗口未建立（暂不推进自动效果）。
-// 保存失败也消费本回合尝试并返回TRUE，不阻塞自动战斗、不重试。首档尝试
-// 后不再要求活动栈对齐，避免原版自动模式的active_stack滞后挡住后续行动。
+// 宿主协作 ABI：合并进同一 DLL 后不再走 patcher 变量查找（跨插件动态查询），
+// 改为同 TU 直连——宿主 BattleStoreService.inc.cpp 的 StoreAutomationBusy_ /
+// g_storeRestoreEpoch 与 Entry.inc.cpp 的 StoreBeforeAutoAction_ 都在本文件之前
+// 声明（后者由宿主 TU 顶部前置声明引入，见 H3BattleStore.cpp）。
+// 语义保持：忙态查询、恢复通知、动作前首档窗口三者行为与源插件一致。
 static bool g_storeCoopRestoring = false;
 static void BattleStoreRestoreNotify_()
 {
-    Variable* epoch = _P->VarFind("H3BattleStore.RestoreEpoch.v1");
+    const DWORD current = g_storeRestoreEpoch ? g_storeRestoreEpoch->GetValue() : 0;
     static DWORD lastEpoch = 0;
-    if (!epoch || epoch->GetValue() == lastEpoch) return;
-    const DWORD current = epoch->GetValue();
+    if (current == lastEpoch) return;
     g_storeCoopRestoring = true;
     __try {
         // 面板关闭可重入Blt，处理闸先置位，手动控制先于刷新。
@@ -2881,18 +2882,12 @@ static void BattleStoreRestoreNotify_()
 }
 static bool BattleStoreAllowsAutomation_(_BattleMgr_* mgr)
 {
-    if (!_P || !mgr) return true;
-    typedef BOOL (__stdcall* BusyQuery)();
-    typedef BOOL (__stdcall* BeforeAction)(void*);
-    const auto busy = reinterpret_cast<BusyQuery>(
-        _P->VarGetValue<DWORD>("H3BattleStore.BusyQuery.v1", 0));
+    if (!mgr) return true;
     return BattleStoreAutomationAllowed_(
-        [busy]() { return g_storeCoopRestoring || (busy && busy()); },
+        []() { return g_storeCoopRestoring || StoreAutomationBusy_() != FALSE; },
         []() { BattleStoreRestoreNotify_(); },
         [mgr]() {
-            const auto before = reinterpret_cast<BeforeAction>(
-                _P->VarGetValue<DWORD>("H3BattleStore.BeforeAutoAction.v1", 0));
-            return (!before || before(mgr)) && mgr == o_BattleMgr;
+            return StoreBeforeAutoAction_(mgr) != FALSE && mgr == o_BattleMgr;
         });
 }
 

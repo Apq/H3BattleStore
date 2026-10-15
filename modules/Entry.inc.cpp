@@ -783,6 +783,13 @@ static int __stdcall Hook_BattleExecute_(HiHook* hook, H3CombatManager* mgr, int
             }
         }
         __except (GuardCrashFilter_(GUARD_EXECUTE, GetExceptionInformation())) {}
+        // 2026-10-15 移植（批次四）单壳合并：源插件 HH_OnBattleActionExecute @ 同地址的
+        // 「单次接管人工动作消费」段原样前置（源侧也是在调用原函数之前判定 This->action）。
+        __try {
+            autoassist::AutoOnActionExecuteSegment_(
+                reinterpret_cast<autoassist::_BattleMgr_*>(mgr), parameter);
+        }
+        __except (GuardCrashFilter_(autoassist::GHID_ACTION_EXEC, GetExceptionInformation())) {}
         result = THISCALL_2(int, hook->GetDefaultFunc(), mgr, parameter);
         __try {
             if (actionBefore >= 0 && CombatIsReadable_(mgr)) {
@@ -891,6 +898,13 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
             g_uiPort->Draw(mgr);
     }
     __except (GuardCrashFilter_(GUARD_BLT, GetExceptionInformation())) {}
+    // 2026-10-15 移植（批次四）单壳合并：源插件 Hook_BltComplete @ 同地址（面板帧 /
+    // 自动推进）。宿主段先画战斗悬浮条，移植段再做面板帧与主动作推进；两段各自
+    // 独立铠甲（BattleStore.AfterBlt / AutoAssist.AfterBlt），互不吞对方故障。
+    __try {
+        autoassist::AutoBltFrameSegment_();
+    }
+    __except (GuardCrashFilter_(autoassist::GHID_BLT, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
@@ -982,6 +996,10 @@ static void StartPlugin()
     _PI->WriteHiHook(0x476500, SPLICE_, EXTENDED_, THISCALL_, Hook_AltTailClick_);
     _PI->WriteHiHook(0x495C50, SPLICE_, EXTENDED_, THISCALL_, Hook_CycleCombatScreen_);
     _PI->WriteLoHook(0x600430, Hook_AfterBlt_);
+    // 2026-10-15 移植（批次四）：源插件 StartPlugin 的等价接线——读配置与界面文案后
+    // 注册两个新地址钩子（0x600430、0x4786B0 已在上方按单壳合并注册，不重复挂）。
+    autoassist::AutoInit_();
+    autoassist::AutoInstallHooks_();
     LogInfo("战斗存档：codec=%u 可逆事务已启用，实机恢复验收尚未完成。", kCodecVersion);
 }
 
@@ -1025,6 +1043,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (g_combatKeyboardHook) UnhookWindowsHookEx(g_combatKeyboardHook);
         if (g_combatMouseHook) UnhookWindowsHookEx(g_combatMouseHook);
+        // 2026-10-15 移植（批次四）：源 DllMain DETACH 的两件事（卸战斗热键 + 清自动状态）。
+        autoassist::AutoShutdown_();
         GuardShutdown();
     }
     return TRUE;
