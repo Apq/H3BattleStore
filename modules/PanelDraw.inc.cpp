@@ -858,19 +858,25 @@ static void DrawCastTiming_(H3LoadedPcx16* scr)
         ARMY_TIMING_MODE_W, ARMY_TIMING_H,
         ct.mode == CAST_TIMING_UNIT ? T("panel.cast_timing_unit_none")
             : T("panel.cast_timing_default"), mode_open);
-    const int entry = FindCastTimingCandidate_(ct);
-    const bool unit_open = s_cast_timing_dd_open && s_cast_timing_dd_kind == 2;
-    Fill(scr, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
-        STATUS_UNIT_ITEM_H, unit_open ? 104 : 74, unit_open ? 70 : 52, unit_open ? 28 : 24);
-    scr->DrawFrame(ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
-        STATUS_UNIT_ITEM_H, (BYTE)210, (BYTE)170, (BYTE)72);
-    if (entry >= 0) DrawCastTimingUnitItem_(scr, ARMY_TIMING_UNIT_X,
-        ARMY_TIMING_Y, entry, false);
-    else DrawTxt(scr, font, T("panel.cast_timing_unit_none"), ARMY_TIMING_UNIT_X + 6,
-        ARMY_TIMING_Y, ARMY_TIMING_UNIT_W - 24, STATUS_UNIT_ITEM_H,
-        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
-    CellControl_DrawArrow(scr, ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W - 14,
-        ARMY_TIMING_Y + STATUS_UNIT_ITEM_H / 2 - 2, !unit_open);
+    // 只有“指定部队”模式才显示/命中右侧部队下拉；“首次行动”模式
+    // 释放该区域，避免给玩家一个看似可配置但实际无效的控件。
+    const bool show_unit = ct.mode == CAST_TIMING_UNIT;
+    const int entry = show_unit ? FindCastTimingCandidate_(ct) : -1;
+    const bool unit_open = show_unit && s_cast_timing_dd_open
+        && s_cast_timing_dd_kind == 2;
+    if (show_unit) {
+        Fill(scr, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
+            STATUS_UNIT_ITEM_H, unit_open ? 104 : 74, unit_open ? 70 : 52, unit_open ? 28 : 24);
+        scr->DrawFrame(ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
+            STATUS_UNIT_ITEM_H, (BYTE)210, (BYTE)170, (BYTE)72);
+        if (entry >= 0) DrawCastTimingUnitItem_(scr, ARMY_TIMING_UNIT_X,
+            ARMY_TIMING_Y, entry, false);
+        else DrawTxt(scr, font, T("panel.cast_timing_unit_none"), ARMY_TIMING_UNIT_X + 6,
+            ARMY_TIMING_Y, ARMY_TIMING_UNIT_W - 24, STATUS_UNIT_ITEM_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        CellControl_DrawArrow(scr, ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W - 14,
+            ARMY_TIMING_Y + STATUS_UNIT_ITEM_H / 2 - 2, !unit_open);
+    }
     if (mode_open) {
         static const int kRows[2] = { 0, 1 };
         for (int v = 0; v < 2; ++v) {

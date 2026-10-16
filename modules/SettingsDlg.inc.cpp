@@ -2136,6 +2136,12 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
     // Army 页施法时机下拉展开时：选项即选、点框收起、点外收起（与状态页同款）。
     if (s_p.active_page == PAGE_ARMY && s_cast_timing_dd_open) {
+        if (s_cast_timing_dd_kind == 2
+            && s_p.draft_cast_timing[s_p.selected_profile].mode != CAST_TIMING_UNIT) {
+            ResetCastTimingDropdown_();
+            DrawPanelToBuffer_();
+            return;
+        }
         if (raw_command == 4)
             return;
         if (raw_command == 8 || raw_command == 16) {
@@ -2155,6 +2161,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                             ct = s_cast_timing_unit_id[0];
                     }
                     H3AutoPolicy::NormalizeSpellCastTiming(&ct);
+                    // 切回首次行动时右侧部队控件消失，同时清掉可能残留的部队浮层状态。
+                    if (ct.mode != CAST_TIMING_UNIT)
+                        ResetCastTimingDropdown_();
                     LogInfo("[Panel] 施法时机模式=%d (方案%d)", (int)ct.mode,
                         s_p.selected_profile + 1);
                     ResetCastTimingDropdown_();
@@ -2672,7 +2681,8 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 DrawPanelToBuffer_();
                 return;
             }
-            if (PointInRect_(px, py, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y,
+            if (s_p.draft_cast_timing[s_p.selected_profile].mode == CAST_TIMING_UNIT
+                && PointInRect_(px, py, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y,
                     ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H)) {
                 BuildCastTimingCandidates_();
                 ResetCastTimingDropdown_();
