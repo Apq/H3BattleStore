@@ -455,6 +455,8 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 一大行 = 一个槽，**两大列 × 四行**装下 8 个槽（`STATUS_BIG_COLS=2` / `STATUS_ROWS=4`），每大列宽 `(531-10)/2 = 260`。每大列内分**三小列**：
 
+**槽位序号是「先行后列」**（2026-10-16 用户实测裁定「魔法列表那里增加时,+按钮出现的顺序不对,现在是先列后行,应该是先行后列」）：序号 0/1 在第一行的左右两列，2/3 在第二行……映射收敛成 `PanelLayout.hpp` 的纯函数 `StatusSlotCol_(i) = i % STATUS_BIG_COLS` / `StatusSlotRow_(i) = i / STATUS_BIG_COLS`，绘制与命中都只经它们（`StatusSlotRect_` → `StatusMagicX_/StatusModeX_/StatusUnitX_/StatusRowY_`），顺序本身由 `PolicyCoreTests` 的几何用例逐序号钉住。**「＋」按钮画在第 `slot_count` 个槽位上**，所以新增槽的落点顺序就是行优先（先往右、再往下）；原实现是先列后行（0..3 把左列跑满再跳右列），加一个槽会先往下一行跑，与"从左到右、从上到下"的直觉相反。
+
 | 小列 | 宽度 | 内容 |
 |---|---|---|
 | ① 魔法 | `STATUS_MAGIC_W = 72`（按 4 个汉字宽 + 内边距 + 箭头） | 该槽的法术，展开列表宽 `STATUS_MAGIC_LIST_W = 122`（浮层，压到 660 边界之外不越界） |

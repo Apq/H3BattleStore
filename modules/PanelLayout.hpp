@@ -204,7 +204,8 @@ static const int SUMMON_FB_TEXT_W = 130;
 
 // 保持状态页：力盾落点行 → 说明 → 阈值 → 槽位区。
 // 槽位区（2026-10-16 用户要求重排）：**两大列**，每大列 4 行（2×4＝8＝
-// kStatusSlotCapacity）；每槽**三个小列**——魔法下拉（按 4 个汉字宽）、
+// kStatusSlotCapacity），**序号按"先行后列"排**（见 StatusSlotCol_/StatusSlotRow_）；
+// 每槽**三个小列**——魔法下拉（按 4 个汉字宽）、
 // 全体/指定下拉（按 2 个汉字宽）、部队下拉（生物头像 + 位置 + 数量）。
 // 行高按第三个下拉框的头像高度算（用户要求），整块收在 MAGIC_LIST_BOTTOM 之上。
 static const int STATUS_NOTE_Y = FF_ROW_Y + 28;
@@ -221,6 +222,16 @@ static const int STATUS_ICON_H = 56;    // 头像高＝行高基准
 static const int STATUS_ICON_W = 50;    // 按原图框等比
 static const int STATUS_SLOT_H = STATUS_ICON_H + 4;
 static const int STATUS_ROW_GAP = 4;
+
+// 槽位序号 → (大列, 行) 的映射：**先行后列**（2026-10-16 用户实测裁定
+// 「魔法列表那里增加时,+按钮出现的顺序不对,现在是先列后行,应该是先行后列」）。
+// 序号 0/1 = 第一行的左右两列，2/3 = 第二行，依此类推。「＋」按钮画在第
+// slot_count 个槽位上，所以玩家看到的新增落点顺序就是行优先；原实现是先列后行
+// （0..3 把左列跑满再跳右列），与"从左到右、从上到下"的直觉相反。
+// 绘制与命中都只经这两个函数（技能 h3auto-panel-dropdown-store：几何必须同源），
+// 顺序本身由 PolicyCoreTests 直接钉住——它不像行数/列数那样会被 static_assert 拦住。
+inline int StatusSlotCol_(int index) { return index % STATUS_BIG_COLS; }
+inline int StatusSlotRow_(int index) { return index / STATUS_BIG_COLS; }
 static const int STATUS_MAGIC_W = 72;   // 魔法下拉：4 个字 + 内边距 + 箭头
 static const int STATUS_MODE_W  = 46;   // 全体/指定：2 个字 + 内边距 + 箭头
 static const int STATUS_UNIT_W  = STATUS_BIG_W - STATUS_MAGIC_W - STATUS_MODE_W

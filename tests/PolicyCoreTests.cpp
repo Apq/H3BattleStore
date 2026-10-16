@@ -1755,10 +1755,33 @@ void TestStatusPageGeometry()
         "unit dropdown rows use the same height as the slot rows");
     Check(STATUS_ROW0_Y > STATUS_TH_ROW_Y + STATUS_TH_ROW_H,
         "slot rows start below the threshold row");
+    // **槽位顺序：先行后列**（2026-10-16 用户实测裁定「…增加时,+按钮出现的顺序
+    // 不对,现在是先列后行,应该是先行后列」）。「＋」按钮画在第 slot_count 个槽位
+    // 上，所以新增落点必须"先往右、再往下"；先列后行会让加一个槽就往下一行跑、
+    // 把左列跑满才跳右列。顺序不像行列数那样能被 static_assert 拦住，只能显式钉。
+    Check(StatusSlotCol_(0) == 0 && StatusSlotRow_(0) == 0,
+        "slot 0 sits on the first row, left column");
+    Check(StatusSlotCol_(1) == 1 && StatusSlotRow_(1) == 0,
+        "slot 1 stays on the same row, to the right (row-first)");
+    Check(StatusSlotCol_(2) == 0 && StatusSlotRow_(2) == 1,
+        "slot 2 wraps to the next row's left column");
+    Check(StatusSlotCol_(1) > StatusSlotCol_(0)
+            && StatusSlotRow_(1) == StatusSlotRow_(0),
+        "the + after slot 0 appears to its right, not below");
+    Check(StatusSlotRow_(2) > StatusSlotRow_(1),
+        "the + wraps to the next row only after both columns are used");
+    for (int i = 0; i < STATUS_BIG_COLS * STATUS_ROWS; ++i) {
+        Check(StatusSlotCol_(i) == i % STATUS_BIG_COLS
+                && StatusSlotRow_(i) == i / STATUS_BIG_COLS,
+            "slot index maps row-first (先行后列) across the whole grid");
+        Check(StatusSlotCol_(i) >= 0 && StatusSlotCol_(i) < STATUS_BIG_COLS
+                && StatusSlotRow_(i) >= 0 && StatusSlotRow_(i) < STATUS_ROWS,
+            "every slot index maps inside the two-column by four-row grid");
+    }
     // 每个槽行的三个下拉都必须至少能看到 1 项（否则"点开是空的、还点不中"），
     // 且列表原点必须落在内容区内。18＝魔法/全体·指定项高，60＝部队项高。
-    for (int row = 0; row < STATUS_BIG_COLS * STATUS_ROWS; ++row) {
-        const int y = STATUS_ROW0_Y + (row % STATUS_ROWS)
+    for (int slot = 0; slot < STATUS_BIG_COLS * STATUS_ROWS; ++slot) {
+        const int y = STATUS_ROW0_Y + StatusSlotRow_(slot)
             * (STATUS_SLOT_H + STATUS_ROW_GAP);
         for (int item_h : {STATUS_ITEM_H, STATUS_MODE_ITEM_H, STATUS_UNIT_ITEM_H}) {
             for (int count = 1; count <= 18; ++count) {

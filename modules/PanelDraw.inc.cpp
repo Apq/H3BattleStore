@@ -939,13 +939,14 @@ static const char* StatusSpellName_(int spell_id, char* out, int out_size)
 }
 
 // 槽位矩形（2026-10-16 用户要求重排）：**两大列**，每大列 4 行，共 8 槽
-// ＝kStatusSlotCapacity。列内三小列的 X 由下面同一组函数给出，绘制与命中
-// 都调它们（技能 h3auto-panel-dropdown-store：几何必须同源）。
+// ＝kStatusSlotCapacity。序号映射是**先行后列**（0/1 在第一行左右，2/3 在第二行…），
+// 见 PanelLayout.hpp 的 StatusSlotCol_/StatusSlotRow_——那里是唯一来源，
+// 绘制与命中都调下面这组函数（技能 h3auto-panel-dropdown-store：几何必须同源）。
 static void StatusSlotRect_(int index, int* x, int* y)
 {
-    const int big = index / STATUS_ROWS;
-    const int row = index % STATUS_ROWS;
-    if (x) *x = GRID_FRAME_X + big * (STATUS_BIG_W + STATUS_BIG_GAP);
+    const int col = StatusSlotCol_(index);
+    const int row = StatusSlotRow_(index);
+    if (x) *x = GRID_FRAME_X + col * (STATUS_BIG_W + STATUS_BIG_GAP);
     if (y) *y = STATUS_ROW0_Y + row * (STATUS_SLOT_H + STATUS_ROW_GAP);
 }
 
