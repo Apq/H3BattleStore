@@ -245,8 +245,9 @@ static const int STATUS_MAGIC_W = 72;   // 魔法下拉：4 个字 + 内边距 +
 static const int STATUS_MODE_W  = 46;   // 全体/指定：2 个字 + 内边距 + 箭头
 static const int STATUS_UNIT_W  = STATUS_BIG_W - STATUS_MAGIC_W - STATUS_MODE_W
     - 2 * STATUS_SUB_GAP;               // 头像 + 位置 + 数量
-// 魔法下拉展开列表比收起框宽：框只有 4 字，列表里要能读全法术名（浮层，不占列宽）。
-static const int STATUS_MAGIC_LIST_W = STATUS_MAGIC_W + STATUS_MODE_W + STATUS_SUB_GAP;
+// 魔法下拉展开列表覆盖当前大列宽，确保法术名与等级系别后缀完整可见。
+// 浮层只在列表展开时使用，收起态仍保持原来的窄框宽度。
+static const int STATUS_MAGIC_LIST_W = STATUS_BIG_W;
 static const int STATUS_ADD_W = STATUS_BIG_W;
 static const int STATUS_ADD_H = STATUS_SLOT_H;
 static const int STATUS_ITEM_H = 18;      // 魔法下拉列表项高

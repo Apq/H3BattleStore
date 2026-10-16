@@ -742,11 +742,15 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
                 if (i != skip_slot)
                     used = used || status.slots[i] == spell;
             unsigned flags = 0;
+            unsigned school = 0; // 法术系别掩码（0x1C），供"下拉里没显示等级系别"取证
             __try {
                 flags = *reinterpret_cast<const unsigned*>(
                     table + spell * 0x88 + 0x0C);
+                school = *reinterpret_cast<const unsigned*>(
+                    table + spell * 0x88 + 0x1C);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 flags = 0;
+                school = 0;
             }
             int expertise = 0;
             __try {
@@ -765,8 +769,8 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
             // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出
             // 是已被别的槽占用（used=1）、还是魔法书里没有（book=0）——不必再让
             // 玩家自证，也不必靠猜。expertise/flags 一并留痕，方便核对群体口径。
-            LogDebug("[Panel] status cand grp=%d spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d",
-                grp, spell, has_spell ? 1 : 0, expertise, flags, used ? 1 : 0,
+            LogDebug("[Panel] status cand grp=%d spell=%d book=%d exp=%d flags=0x%X school=0x%X used=%d ok=%d",
+                grp, spell, has_spell ? 1 : 0, expertise, flags, school, used ? 1 : 0,
                 ok ? 1 : 0);
             if (ok) kept[kept_n++] = spell;
         }
