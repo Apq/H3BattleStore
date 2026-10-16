@@ -353,6 +353,15 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 - **运行时**：`CastTimingAllowsThisHandoff_(mgr, side)` 插在 `TryProtectCast_` 的 `heroCasted` 之前；独立的 `TryAttackMagicCast_` 在确认当前人类侧后也复用同一门闸，因此保活/状态/召唤与攻击魔法四通道时机一致。默认模式放行（行为不变）；指定模式取 `CurrentTurnStack_` 当前轮到部队、`BuildStableIdentitiesFromBattle_` 现算身份、`StableStackIdentityEquals` 比对——不匹配或身份不在场（阵亡/重打丢召唤物）本回合不判施法。`g_cast_in_flight`/`heroCasted` 防重入与一回合一施上限不变。
 - **验证边界**：两变体 0 错 0 警、七组单测全绿（含新用例 `policy: 每回合施法时机` 与 JSON 往返/缺键用例）、部署哈希一致；「指定部队轮到它行动时才施法、默认仍是首次行动」属游戏内行为，**由用户实机验收**。
 
+### 5.9 魔法下拉显示对应系别等级（2026-10-16 用户需求）
+
+保持状态与攻击魔法两个 Tab 的魔法下拉项，在法术名称后追加「(等级系别)」，例如 `迟缓 (高级土系)`。
+
+- 系别从游戏 `H3Spell` 表的 `school` 字段读取（气/火/水/土），不使用固定法术编号映射。
+- 等级通过当前战场英雄 `GetSpellExpertise(spell, specialTerrain)` 实时读取，按 0..3 显示「无/初级/高级/专家」。
+- 两个 Tab 共用 `StatusSpellNameWithExpertise_`，只改变下拉显示，不改变魔法资格、群体判定、目标选择或施法参数。
+- 中文内置文案与 `lang/zh-CN.ini` 同步；较长下拉名称使用现有宽下拉区域，游戏内字体与实际显示仍由用户验收。
+
 ## 6. 协作机制直连化改造
 
 两插件时代的协作 ABI（[协作与防冲突](<10-H3Auto协作与防冲突.md>) §2）靠 patcher 注册表 + 名字查询；合并成同 TU 后，移植侧不再需要「动态查询、加载顺序无关」，改为直接调用宿主实现。

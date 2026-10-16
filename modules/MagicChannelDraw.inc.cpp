@@ -74,9 +74,9 @@ static void DrawAttackMagicDropdown_(H3LoadedPcx16* scr) {
         Fill(scr, x, y + v * h, w, h, hover ? 184 : selected ? 136 : 68,
             hover ? 136 : selected ? 88 : 42, hover ? 48 : selected ? 24 : 18);
         scr->DrawFrame(x, y + v * h, w, h, (BYTE)210, (BYTE)170, (BYTE)72);
-        char name[160] = {};
+        char name[192] = {};
         const char* label = s_attack_dd_kind == 0
-            ? StatusSpellName_(s_attack_dd_ids[option], name, sizeof(name)) : AttackMagicTargetLabel_(option);
+            ? StatusSpellNameWithExpertise_(s_attack_dd_ids[option], name, sizeof(name)) : AttackMagicTargetLabel_(option);
         DrawTxt(scr, font, label, x + 6, y + v * h, w - 12, h,
             (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
     }

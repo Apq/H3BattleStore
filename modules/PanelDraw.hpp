@@ -36,3 +36,4 @@ static void DrawPanelToBuffer_();
 static void DrawAttackMagicPage_(H3LoadedPcx16* scr);
 static void DrawAttackMagicDropdown_(H3LoadedPcx16* scr);
 static const char* StatusSpellName_(int spell_id, char* out, int out_size);
+static const char* StatusSpellNameWithExpertise_(int spell_id, char* out, int out_size);

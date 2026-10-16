@@ -1042,6 +1042,51 @@ static const char* StatusSpellName_(int spell_id, char* out, int out_size)
     return out;
 }
 
+// 下拉列表中的法术名称追加英雄对应魔法系别熟练度，例如「迟缓 (高级土系)」。
+// 系别从法术表读取，熟练度按当前英雄/地形实时查询；没有战场上下文时显示“无”。
+static const char* StatusSpellNameWithExpertise_(int spell_id, char* out, int out_size)
+{
+    if (!out || out_size <= 0) return "";
+    char name[160] = {};
+    StatusSpellName_(spell_id, name, sizeof(name));
+    const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
+    if (!table || spell_id <= 0 || spell_id >= 81) {
+        _snprintf(out, out_size, "%s", name);
+        return out;
+    }
+    int school = 0;
+    int expertise = 0;
+    __try {
+        // H3Spell: name +0x10, shortName +0x14, level +0x18, school +0x1C。
+        school = *reinterpret_cast<const int*>(table + spell_id * 0x88 + 0x1C);
+        _BattleMgr_* mgr = o_BattleMgr;
+        H3CombatManager* cm = H3CombatManager::Get();
+        const int side = mgr ? ResolveHumanSide_(mgr) : -1;
+        if (cm && mgr && side >= 0 && side <= 1 && cm->hero[side])
+            expertise = reinterpret_cast<H3Hero*>(cm->hero[side])->GetSpellExpertise(
+                spell_id, cm->specialTerrain);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        school = 0;
+        expertise = 0;
+    }
+    if (expertise < 0 || expertise > 3) expertise = 0;
+    const char* school_text = nullptr;
+    if (school == h3::NH3Spells::NSchool::AIR) school_text = T("magic.school_air");
+    else if (school == h3::NH3Spells::NSchool::FIRE) school_text = T("magic.school_fire");
+    else if (school == h3::NH3Spells::NSchool::WATER) school_text = T("magic.school_water");
+    else if (school == h3::NH3Spells::NSchool::EARTH) school_text = T("magic.school_earth");
+    if (!school_text) {
+        _snprintf(out, out_size, "%s", name);
+        return out;
+    }
+    const char* level = expertise == 3 ? T("magic.expertise_expert")
+        : expertise == 2 ? T("magic.expertise_advanced")
+        : expertise == 1 ? T("magic.expertise_basic")
+        : T("magic.expertise_none");
+    _snprintf(out, out_size, "%s (%s%s)", name, level, school_text);
+    return out;
+}
+
 // 槽位矩形（2026-10-16 用户要求重排）：**两大列**，每大列 4 行，共 8 槽
 // ＝kStatusSlotCapacity。序号映射是**先行后列**（0/1 在第一行左右，2/3 在第二行…），
 // 见 PanelLayout.hpp 的 StatusSlotCol_/StatusSlotRow_——那里是唯一来源，
@@ -1505,9 +1550,9 @@ static void DrawPanelToBuffer_()
                 }
                 Fill(scr, x, y, w, h, bg_r, bg_g, bg_b);
                 scr->DrawFrame(x, y, w, h, fr, fg, fb);
-                char label[96] = {};
+                char label[192] = {};
                 DrawTxt(scr, small_font,
-                    StatusSpellName_(s_status_dd_ids[i], label, sizeof(label)),
+                    StatusSpellNameWithExpertise_(s_status_dd_ids[i], label, sizeof(label)),
                     x + 6, y, w - 12, h,
                     (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
             }
