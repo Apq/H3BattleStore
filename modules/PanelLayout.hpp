@@ -17,8 +17,9 @@ static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 129;  // 左界左移 10
 static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
 static const int GRID_X      = GRID_FRAME_X; // 卡片贴内容区左缘
-// 2026-10-17 用户实测微调：首行整体再下移 5（105→110），部队框底 170。
-static const int ARMY_TIMING_Y = 110;
+// 2026-10-17 用户实测微调：首行整体再下移 5（105→110），后再移 3（110→113），
+// 部队框底 173。
+static const int ARMY_TIMING_Y = 113;
 static const int ARMY_TIMING_H = 18;
 static const int ARMY_TIMING_LABEL_W = 86;
 static const int ARMY_TIMING_MODE_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W;
@@ -37,7 +38,7 @@ static const int ARMY_TIMING_WAIT_HIT_W   =
     ARMY_TIMING_WAIT_CHECK_W + 4 + ARMY_TIMING_WAIT_TEXT_W;
 static const int ARMY_TIMING_WAIT_X = ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W + 8;
 // 首行行高按部队框（要放头像，与保持状态第三小列同款）＝STATUS_UNIT_ITEM_H。
-static const int GRID_Y      = 181;  // 2026-10-17 用户实测：三卡片+滚动条整体再下移 10（171→181）；首行（110+60）下方 11px，三卡片底 441
+static const int GRID_Y      = 186;  // 2026-10-17 用户实测：三卡片+滚动条 171→181 后再移 5（181→186）；首行（113+60）下方 13px，三卡片底 446
 static const int SCROLL_W    = 16;
 static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - SCROLL_W; // 贴内容区右缘
 static const int SCROLL_Y    = GRID_Y;
@@ -111,7 +112,7 @@ static const int TAB_GAP     = 8;
 static const int TAB_FIRST_Y = 85;  // 与保活行上缘对齐
 static const int TAB_SEP_X   = 119;  // 分隔竖线（2px 金框色）
 static const int TAB_SEP_Y0  = 72;   // 随内容+15后上移10（相对内容）
-static const int TAB_SEP_Y1  = 456;  // 随内容+15；2026-10-17 卡片下移后卡片底=441，与下线间距 15px（线位置不动）
+static const int TAB_SEP_Y1  = 456;  // 随内容+15；2026-10-17 卡片再下移后卡片底=446，与下线间距 10px（线位置不动）
 // 两条横向金线（2px，与竖线同色）：上线接竖线上端、下线接竖线下端，
 // 框住 Tab 条与内容区。
 static const int TAB_HLINE_X0 = 17;
