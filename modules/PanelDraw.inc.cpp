@@ -839,9 +839,10 @@ static void DrawCastTimingUnitItem_(H3LoadedPcx16* scr, int x, int y,
     char pos[12] = {}, cnt[24] = {};
     CellControl_FormatPosition(pos, sizeof(pos), s_cast_timing_unit_hex[entry]);
     _snprintf(cnt, sizeof(cnt), "%d", s_cast_timing_unit_count_alive[entry]);
-    DrawTxt(scr, font, pos, tx, y + 2, tw, STATUS_ICON_H / 2,
+    // 上行数量、下行位置（2026-10-17 用户要求互换；与保持状态第三小列同口径）。
+    DrawTxt(scr, font, cnt, tx, y + 2, tw, STATUS_ICON_H / 2,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
-    DrawTxt(scr, font, cnt, tx, y + 2 + STATUS_ICON_H / 2, tw, STATUS_ICON_H / 2,
+    DrawTxt(scr, font, pos, tx, y + 2 + STATUS_ICON_H / 2, tw, STATUS_ICON_H / 2,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
 }
 
@@ -867,13 +868,16 @@ static void DrawCastTiming_(H3LoadedPcx16* scr)
     if (show_unit) {
         Fill(scr, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
             STATUS_UNIT_ITEM_H, unit_open ? 104 : 74, unit_open ? 70 : 52, unit_open ? 28 : 24);
-        scr->DrawFrame(ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
-            STATUS_UNIT_ITEM_H, (BYTE)210, (BYTE)170, (BYTE)72);
         if (entry >= 0) DrawCastTimingUnitItem_(scr, ARMY_TIMING_UNIT_X,
             ARMY_TIMING_Y, entry, false);
         else DrawTxt(scr, font, T("panel.cast_timing_unit_none"), ARMY_TIMING_UNIT_X + 6,
             ARMY_TIMING_Y, ARMY_TIMING_UNIT_W - 24, STATUS_UNIT_ITEM_H,
             (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        // 边框最后画：DrawCastTimingUnitItem_ 内部会 Fill 整个框，先画边框会被盖掉
+        // （2026-10-17 玩家反馈"部队框缺边框、下拉列表却有"就是这个顺序问题；
+        //  下拉列表项那边同样是"填底色→画项→再补边框"，见本函数 unit_open 分支）。
+        scr->DrawFrame(ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
+            STATUS_UNIT_ITEM_H, (BYTE)210, (BYTE)170, (BYTE)72);
         CellControl_DrawArrow(scr, ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W - 14,
             ARMY_TIMING_Y + STATUS_UNIT_ITEM_H / 2 - 2, !unit_open);
     }
@@ -1265,11 +1269,12 @@ static void DrawStatusUnitItem_(H3LoadedPcx16* scr, int x, int y, int entry,
     const int text_h = STATUS_ICON_H / 2;
     char pos[12] = {};
     CellControl_FormatPosition(pos, sizeof(pos), s_status_unit_hex[entry]);
-    DrawTxt(scr, font, pos, text_x, y + 2, text_w, text_h,
-        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
     char cnt[24] = {};
     _snprintf(cnt, sizeof(cnt), "%d", s_status_unit_count_alive[entry]);
-    DrawTxt(scr, font, cnt, text_x, y + 2 + text_h, text_w, text_h,
+    // 上行数量、下行位置（2026-10-17 用户要求互换；与部队页施法行部队框同口径）。
+    DrawTxt(scr, font, cnt, text_x, y + 2, text_w, text_h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    DrawTxt(scr, font, pos, text_x, y + 2 + text_h, text_w, text_h,
         (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
 }
 
