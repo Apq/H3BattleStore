@@ -182,6 +182,9 @@ static int  g_battle_attempt_id = 0;
 static unsigned long long g_status_immune_mask = 0;
 // 只抑制“当前没有可接受部队”的重复说明，不阻止以后出现可接受部队时再施。
 static unsigned long long g_status_norecipient_logged = 0;
+// 只抑制“玩家选的目标模式当前等级做不到、已按能做到的方式施放”的重复说明
+// （2026-10-16 三小列布局的 B 方案口径），每场清零。
+static unsigned long long g_status_mode_fallback_logged = 0;
 static H3AutoPolicy::StableStackIdentity g_rule_identities[21] = {};
 // takeover mismatch 聚合（0.5 对外版）：跟踪失效时每个部队每次行动都命中
 // 一次（玩家日志 2026-10-02 实证 4 小时 558 条 warn，真信号被刷屏淹没）。
@@ -823,6 +826,7 @@ void ResetAutoState()
     g_summon_locked_spell = -1;    // 召唤元素锁定只在本场内有效
     g_status_immune_mask = 0;      // 保持状态免疫跳过掩码只在本场内有效
     g_status_norecipient_logged = 0;
+    g_status_mode_fallback_logged = 0;
     ClearOneShotManual_();
     // 重打/重绑不清 MANUAL（用户显式选择）；单次接管是运行时，回按 J 前的模式。
     if (g_control == CM_ONESHOT_WAIT || g_control == CM_ONESHOT_LOCKED)
@@ -1665,11 +1669,17 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     int durations[H3AutoPolicy::kStatusSlotCapacity] = {};
     for (int i = 0; i < H3AutoPolicy::kStatusSlotCapacity; ++i)
         durations[i] = -1;
+    // 每槽的单体目标格（2026-10-16 三小列布局）：-1 = 无目标格（群体施放）。
+    // mode=指定、或当前等级根本没有群体版时按单体走，目标格取玩家点的那一队
+    // （失效就退回剩余最少者）。
+    int single_hex[H3AutoPolicy::kStatusSlotCapacity] = {};
+    for (int i = 0; i < H3AutoPolicy::kStatusSlotCapacity; ++i)
+        single_hex[i] = -1;
     for (int i = 0; i < status.slot_count; ++i) {
         const int spell = status.slots[i];
         // 资格只看"英雄会不会"（HeroMagicAllowed_ 已含 HasSpell 与费用/回合
         // 门槛）；学校等级 0 照样能施放原版 baseValue[0]（H3Note 禁施笔记），
-        // 群体版资格由下面的 MagicHasMassVersion 单独判，不拿 exp<=0 当未学。
+        // 群体版资格由 StatusSpellCanMass 单独判，不拿 exp<=0 当未学。
         if (spell <= 0 || spell >= 81
                 || spell == H3AutoPolicy::kSlowSpellId)
             continue;
@@ -1682,9 +1692,21 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             spell_flags = 0;
         }
-        // A positionless hero cast must actually have a native mass version.
-        if (!H3AutoPolicy::MagicHasMassVersion(spell_flags, expertise_of[i])) continue;
+        // 群体还是单体：玩家选的模式优先，但原版规则说了算——当前等级没有
+        // 群体版就一定是单体（选了「全体」也做不到，按单体兜底并留一条 info，
+        // 用户 2026-10-16 同意的 B 方案）。
+        const bool can_mass = H3AutoPolicy::StatusSpellCanMass(
+            spell, spell_flags, expertise_of[i]);
+        const bool want_single =
+            !can_mass || status.target_mode[i] == H3AutoPolicy::kStatusTargetPick;
+        if (!can_mass && status.target_mode[i] != H3AutoPolicy::kStatusTargetPick
+                && (g_status_mode_fallback_logged & (1ULL << spell)) == 0) {
+            g_status_mode_fallback_logged |= 1ULL << spell;
+            LogInfo("[Status] spell=%d 选了全体但当前等级没有群体版，已按单体施放",
+                spell);
+        }
         int stack_durations[21] = {};
+        int stack_hexes[21] = {};
         int stack_count = 0;
         int living = 0;
         for (int slot = 0; slot < 21; ++slot) {
@@ -1702,24 +1724,41 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 continue;
             }
-            stack_durations[stack_count++] = dur > 0 ? dur : 0;
+            const int hex = StackHex_(st);
+            if (hex < 0) continue;
+            stack_durations[stack_count] = dur > 0 ? dur : 0;
+            stack_hexes[stack_count] = hex;
+            ++stack_count;
         }
         if (living > 0 && stack_count == 0
                 && (g_status_norecipient_logged & (1ULL << spell)) == 0) {
             g_status_norecipient_logged |= 1ULL << spell;
             LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放", spell);
         }
-        durations[i] = H3AutoPolicy::RepresentativeMassDuration(
-            stack_durations, stack_count);
+        if (!want_single) {
+            durations[i] = H3AutoPolicy::RepresentativeMassDuration(
+                stack_durations, stack_count);
+            continue;
+        }
+        const int pick = H3AutoPolicy::ChooseSingleStatusTarget(stack_durations,
+            stack_hexes, stack_count, status.target_hex[i]);
+        if (pick < 0) {
+            durations[i] = -1;
+            continue;
+        }
+        durations[i] = stack_durations[pick];
+        single_hex[i] = stack_hexes[pick];
     }
     const int best_index = H3AutoPolicy::ChooseBuffToRefresh(
         durations, status.slot_count, refresh_turns);
     const int best_duration = best_index >= 0 ? durations[best_index] : -1;
     if (best_index >= 0)
-        LogDebug("[Status] buff pick spell=%d remain=%d th=%d turn=%d",
+        LogDebug("[Status] buff pick spell=%d remain=%d th=%d turn=%d hex=%d",
             status.slots[best_index], best_duration, refresh_turns,
-            status_turn);
+            status_turn, single_hex[best_index]);
     int spell_id = best_index >= 0 ? status.slots[best_index] : -1;
+    // 施法目标格：≥0 = 单体打这一格；-1 = 无目标群体施放。
+    int cast_hex = best_index >= 0 ? single_hex[best_index] : -1;
     // 敌方失明（62，单体对敌；2026-10-16 用户提出「保持状态里对敌人增加
     // 一个选项」）。排在友方增益之后、减速之前：失明通常只 1 回合（被打断
     // 或到期就得续），减速是长时效群体法术；两者同时到期时先补失明（一支
@@ -1730,10 +1769,17 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     int blind_hex = -1;
     if (spell_id < 0) {
         const int blind_spell = H3AutoPolicy::kBlindSpellId;
-        bool want_blind = false;
+        // 找失明所在的槽（拿它的目标模式与指定目标格）。同一种法术不重复占槽
+        // （下拉剔除已选项），所以最多一个。
+        int blind_slot = -1;
         for (int i = 0; i < status.slot_count
                 && i < H3AutoPolicy::kStatusSlotCapacity; ++i)
-            want_blind = want_blind || status.slots[i] == blind_spell;
+            if (status.slots[i] == blind_spell) { blind_slot = i; break; }
+        const bool want_blind = blind_slot >= 0;
+        const int blind_mode = blind_slot >= 0
+            ? status.target_mode[blind_slot] : H3AutoPolicy::kStatusTargetAll;
+        const int blind_want_hex = blind_slot >= 0
+            ? status.target_hex[blind_slot] : -1;
         const bool blind_masked =
             (g_status_immune_mask & (1ULL << blind_spell)) != 0
             || !HeroMagicAllowed_(cm, side, blind_spell);
@@ -1780,9 +1826,33 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         const H3AutoPolicy::StatusMaintainChoice blind =
             H3AutoPolicy::ChooseBlindTarget(blind_durations, blind_hexes,
                 blind_threats, 21, refresh_turns);
-        if (blind.spell_id == blind_spell) {
+        // 「指定」：只认玩家点过的那一队（它得在可失明候选里，且确实该补——
+        // 剩余回合 ≤ 阈值）。原版失明没有群体版，选「全体」也是同一套单体
+        // 逻辑（按剩余最少/威胁最大兜底），故两者只在目标来源上不同。
+        int blind_pick_hex = blind.spell_id == blind_spell ? blind.target_hex : -1;
+        if (blind_pick_hex >= 0
+                && blind_mode == H3AutoPolicy::kStatusTargetPick) {
+            int hit = -1;
+            for (int i = 0; i < 21; ++i)
+                if (blind_durations[i] >= 0 && blind_hexes[i] == blind_want_hex) {
+                    hit = i;
+                    break;
+                }
+            if (hit < 0) {
+                blind_pick_hex = -1;   // 指定目标已不可失明（阵亡/免疫/换场）
+                LogDebug("[Status] blind 指定目标 hex=%d 不可用，本回合不施放",
+                    blind_want_hex);
+            } else if (blind_durations[hit] > refresh_turns) {
+                blind_pick_hex = -1;   // 还够，不动它
+                LogDebug("[Status] blind 指定目标 hex=%d 剩余 %d > 阈值 %d，不施放",
+                    blind_want_hex, blind_durations[hit], refresh_turns);
+            } else {
+                blind_pick_hex = blind_want_hex;
+            }
+        }
+        if (blind_pick_hex >= 0) {
             spell_id = blind_spell;
-            blind_hex = blind.target_hex;
+            blind_hex = blind_pick_hex;
             // 失效目标落到哪一队：info 留痕（玩家可感知的“为什么是它”）。
             int t_slot = -1;
             int t_cid = -1;
@@ -1790,7 +1860,7 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             int t_remain = -1;
             int t_value = 0;
             for (int i = 0; i < 21; ++i) {
-                if (blind_hexes[i] != blind.target_hex) continue;
+                if (blind_hexes[i] != blind_pick_hex) continue;
                 t_slot = i;
                 t_remain = blind_durations[i];
                 t_value = blind_threats[i] > 2000000000LL
@@ -1810,16 +1880,28 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             blind_acceptable, blind_living, blind_masked ? 1 : 0);
     }
     if (spell_id < 0) {
-        bool want_slow = false;
-        for (int i = 0; i < status.slot_count; ++i)
-            want_slow = want_slow || status.slots[i] == H3AutoPolicy::kSlowSpellId;
+        // 减速槽的目标模式与指定目标格（同一种法术不重复占槽，最多一个）。
+        int slow_slot = -1;
+        for (int i = 0; i < status.slot_count
+                && i < H3AutoPolicy::kStatusSlotCapacity; ++i)
+            if (status.slots[i] == H3AutoPolicy::kSlowSpellId) { slow_slot = i; break; }
+        const bool want_slow = slow_slot >= 0;
+        const int slow_mode = slow_slot >= 0
+            ? status.target_mode[slow_slot] : H3AutoPolicy::kStatusTargetAll;
+        const int slow_want_hex = slow_slot >= 0
+            ? status.target_hex[slow_slot] : -1;
         int expertise = 0;
         __try {
             expertise = hero->GetSpellExpertise(H3AutoPolicy::kSlowSpellId,
                 cm->specialTerrain);
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        // 单体减速（非专家、或玩家选「指定」）也支持：原版非专家减速就是单体，
+        // 选「指定」时按玩家点的那一队（失效或还够就本回合不施）。
+        const bool slow_mass = expertise >= 3
+            && slow_mode == H3AutoPolicy::kStatusTargetAll;
         int enemy_durations[21] = {};
         int enemy_hexes[21] = {};
+        int slow_single_hex = -1;
         const bool slow_masked =
             (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0
             || !HeroMagicAllowed_(cm, side, H3AutoPolicy::kSlowSpellId);
@@ -1835,6 +1917,7 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 slow_flags = 0;
             }
             int stack_durations[21] = {};
+            int stack_hexes[21] = {};
             int stack_count = 0;
             int living_slow = 0;
             for (int slot = 0; slot < 21; ++slot) {
@@ -1852,16 +1935,34 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     continue;
                 }
-                stack_durations[stack_count++] = dur > 0 ? dur : 0;
+                const int hex = StackHex_(st);
+                if (hex < 0) continue;
+                stack_durations[stack_count] = dur > 0 ? dur : 0;
+                stack_hexes[stack_count] = hex;
+                ++stack_count;
             }
-            found_slow = H3AutoPolicy::RepresentativeMassDuration(
-                stack_durations, stack_count);
             if (living_slow > 0 && stack_count == 0
                     && (g_status_norecipient_logged
                         & (1ULL << H3AutoPolicy::kSlowSpellId)) == 0) {
                 g_status_norecipient_logged |= 1ULL << H3AutoPolicy::kSlowSpellId;
                 LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放",
                     H3AutoPolicy::kSlowSpellId);
+            }
+            if (slow_mass) {
+                found_slow = H3AutoPolicy::RepresentativeMassDuration(
+                    stack_durations, stack_count);
+            } else {
+                // 单体：优先玩家指定格，其次剩余最少者（并列取先出现的）。
+                const int pick = H3AutoPolicy::ChooseSingleStatusTarget(
+                    stack_durations, stack_hexes, stack_count,
+                    slow_mode == H3AutoPolicy::kStatusTargetPick
+                        ? slow_want_hex : -1);
+                if (pick >= 0 && stack_durations[pick] <= refresh_turns) {
+                    found_slow = stack_durations[pick];
+                    slow_single_hex = stack_hexes[pick];
+                } else if (pick >= 0) {
+                    found_slow = stack_durations[pick];   // 还够：不施放
+                }
             }
         }
         for (int slot = 0; slot < 21; ++slot) {
@@ -1870,13 +1971,19 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             enemy_durations[slot] = (want_slow && !slow_masked
                     && st && st->count_current > 0 && found_slow >= 0)
                 ? found_slow : -1;
-            enemy_hexes[slot] = 0;
+            enemy_hexes[slot] = slow_single_hex >= 0 ? slow_single_hex : 0;
         }
         const H3AutoPolicy::StatusMaintainChoice slow =
             H3AutoPolicy::ChooseSlowTarget(
-                expertise >= 3, enemy_durations, enemy_hexes, 21,
+                slow_mass, enemy_durations, enemy_hexes, 21,
                 refresh_turns);
         spell_id = slow.spell_id;
+        // 单体减速（非专家、或玩家选「指定」）：ChooseSlowTarget 只负责群体，
+        // 这里自己把槽位里选中它的那一队交出去。
+        if (!slow_mass && slow_single_hex >= 0) {
+            spell_id = H3AutoPolicy::kSlowSpellId;
+            cast_hex = slow_single_hex;
+        }
         // 实锤快照：cas=施法前 currentActiveSide；slow_low/min=敌方迟缓
         // 剩余时长 ≤阈值 的队数与最小值（-1 视为无/免疫，不参与）。
         int slow_low = 0;
@@ -1901,15 +2008,12 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             _snprintf(one, sizeof(one), "%s%d", i ? "," : "", durations[i]);
             strcat_s(buffs, sizeof(buffs), one);
         }
-        LogDebug("[Status] slow branch want=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d buffs=[%s]",
-            want_slow ? 1 : 0, expertise, spell_id, refresh_turns, status_turn,
+        LogDebug("[Status] slow branch want=%d mode=%d mass=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d buffs=[%s]",
+            want_slow ? 1 : 0, slow_mode, slow_mass ? 1 : 0, expertise, spell_id,
+            refresh_turns, status_turn,
             cas_now, slow_low, slow_min == 99 ? -1 : slow_min, buffs);
-        if (expertise < 3) return false;
     }
-    // 保持状态列表里除失明外都是全体魔法，不指定目标格（失明是单体，
-    // 必须带目标格）。
     if (spell_id < 0 || spell_id >= 70) return false;
-    const bool blind_cast = spell_id == H3AutoPolicy::kBlindSpellId;
     // 等级只作为施法实参（效果强度/群体版），**不作为资格**：能不能放以魔法书
     // 为准，HeroMagicAllowed_ 里的 HasSpell 已经把关（2026-10-16 用户裁定
     // "会不会以魔法书的显示为准"）。选中的法术来自槽位，这里实算它的等级。
@@ -1921,30 +2025,45 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         expertise = 0;
     }
     if (!HeroMagicAllowed_(cm, side, spell_id)) return false;
-    if (blind_cast) {
-        // 单体：目标格由上面的候选选择给出；可施与否交原版判定
+    // 失明的目标格来自候选选择（blind_hex），其余法术的目标格来自槽位的
+    // 「指定」模式（cast_hex，-1 = 群体无目标格）。两者统一成一个施法格。
+    int cast_hex_final = (spell_id == H3AutoPolicy::kBlindSpellId)
+        ? blind_hex : cast_hex;
+    if (cast_hex_final >= 0) {
+        // 单体：目标格由候选/玩家指定给出；可施与否交原版判定
         // （与保活的 CanCastSpellAtCoord 同款，避免弹出阻止框/空放）。
-        if (blind_hex < 0) return false;
-        if (!cm->CanCastSpellAtCoord(spell_id, expertise, blind_hex)) {
+        if (!cm->CanCastSpellAtCoord(spell_id, expertise, cast_hex_final)) {
             LogInfo("[Status] spell=%d 目标格 %d 不可施放，本回合不施放",
-                spell_id, blind_hex);
+                spell_id, cast_hex_final);
             return false;
         }
+        if (!H3Spell::SingleTarget(spell_id, expertise)) {
+            // 玩家选了「指定」，但这个等级只有群体版：原版会强制群体施放，
+            // 按能做到的方式施放（用户 2026-10-16 同意的 B 方案），留一条 info。
+            if ((g_status_mode_fallback_logged & (1ULL << spell_id)) == 0) {
+                g_status_mode_fallback_logged |= 1ULL << spell_id;
+                LogInfo("[Status] spell=%d 选了指定但当前等级只有群体版，已按全体施放",
+                    spell_id);
+            }
+            cast_hex_final = -1;
+        }
     } else if (H3Spell::SingleTarget(spell_id, expertise)) {
+        // 单体法术却没有目标格（候选里没找到可接受部队）：不施放。
         return false;
     }
     const int st_mana_before = GetHeroMana_(mgr, side);
     const int st_casted_before = GetHeroCasted_(mgr, side);
+    const bool single_cast = cast_hex_final >= 0;
     const int st_cas = CastSideGuardEnter_(cm, side);
     g_cast_in_flight = true;
     __try {
         LogDebug("[Status] cast spell=%d exp=%d power=%d turn=%d hex=%d mana=%d casted=%d cas=%d",
             spell_id, expertise, spell_power, status_turn,
-            blind_cast ? blind_hex : -1,
+            cast_hex_final,
             st_mana_before, st_casted_before, st_cas);
         // Hero path computes mass targeting from expertise and enforces mana/book.
-        // 失明是单体，目标格取自候选选择；其余法术 -1 = 无目标群体施放。
-        cm->CastSpell(spell_id, blind_cast ? blind_hex : -1, 0, -1, expertise,
+        // 单体（失明/指定）带目标格；群体 -1 = 无目标群体施放。
+        cm->CastSpell(spell_id, cast_hex_final, 0, -1, expertise,
             spell_power);
     } __except (1) {
         g_cast_in_flight = false;
@@ -1965,16 +2084,16 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     // 完全无法生效，整场跳过，避免每回合无效重施。
     {
         const int check_side = (spell_id == H3AutoPolicy::kSlowSpellId
-                || blind_cast) ? enemy_side : side;
+                || spell_id == H3AutoPolicy::kBlindSpellId) ? enemy_side : side;
         bool any_received = false;
         bool any_checked = false;
         __try {
             for (int slot = 0; slot < 21; ++slot) {
                 _BattleStack_* st = &mgr->stack[check_side][slot];
                 if (!st || st->count_current <= 0) continue;
-                // 失明是单体：只看被选中的那一队有没有拿到持续时间，
-                // 其它队身上残留的旧失明不算本次施放生效。
-                if (blind_cast && StackHex_(st) != blind_hex) continue;
+                // 单体施放（失明、或玩家「指定」的那一队）：只看被选中的那一队
+                // 有没有拿到持续时间，其它队身上残留的旧状态不算本次生效。
+                if (single_cast && StackHex_(st) != cast_hex_final) continue;
                 any_checked = true;
                 if (st->active_spell_duration[spell_id] > 0) {
                     any_received = true;

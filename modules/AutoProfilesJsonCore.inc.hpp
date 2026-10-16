@@ -166,6 +166,27 @@ static bool ParseStatusJson_(const BattleJson& obj, StatusProfileFields* status)
             fields.slots[fields.slot_count++] = spell;
         }
     }
+    // 每槽目标（2026-10-16 三小列布局）：targetModes[i] 0=全体 1=指定，
+    // targetHexes[i] 是「指定」时的战场格（-1=未指定）。旧档没有这两个键：
+    // 保持默认（全体/-1）即等于旧行为，不拒绝整档（Normalize 再兜一次范围）。
+    if (obj.contains("targetModes") && obj["targetModes"].is_array()) {
+        int i = 0;
+        for (const BattleJson& item : obj["targetModes"]) {
+            if (i >= kStatusSlotCapacity) break;
+            if (item.is_number_integer())
+                fields.target_mode[i] = item.get<int>();
+            ++i;
+        }
+    }
+    if (obj.contains("targetHexes") && obj["targetHexes"].is_array()) {
+        int i = 0;
+        for (const BattleJson& item : obj["targetHexes"]) {
+            if (i >= kStatusSlotCapacity) break;
+            if (item.is_number_integer())
+                fields.target_hex[i] = item.get<int>();
+            ++i;
+        }
+    }
     NormalizeStatusFields(&fields);
     *status = fields;
     return true;
@@ -176,7 +197,13 @@ static BattleJson StatusToJson_(const StatusProfileFields& status)
     StatusProfileFields fields = status;
     NormalizeStatusFields(&fields);
     BattleJson buffs = BattleJson::array();
-    for (int i = 0; i < fields.slot_count; ++i) buffs.push_back(fields.slots[i]);
+    BattleJson target_modes = BattleJson::array();
+    BattleJson target_hexes = BattleJson::array();
+    for (int i = 0; i < fields.slot_count; ++i) {
+        buffs.push_back(fields.slots[i]);
+        target_modes.push_back(fields.target_mode[i]);
+        target_hexes.push_back(fields.target_hex[i]);
+    }
     BattleJson attacks = BattleJson::array();
     for (int i = 0; i < fields.attack_count; ++i) {
         const AttackMagicRule& rule = fields.attacks[i];
@@ -185,7 +212,8 @@ static BattleJson StatusToJson_(const StatusProfileFields& status)
         attacks.push_back({{"spell", rule.spell_id}, {"target", rule.target_mode},
             {"positions", positions}});
     }
-    return {{"buffs", buffs}, {"slow", fields.slow},
+    return {{"buffs", buffs}, {"targetModes", target_modes},
+        {"targetHexes", target_hexes}, {"slow", fields.slow},
         {"refreshTurns", fields.refresh_turns}, {"attacks", attacks}};
 }
 

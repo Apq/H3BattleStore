@@ -390,17 +390,83 @@ static bool s_summon_cond_dd_open = false;
 static int  s_summon_cond_dd_hover = -1;
 static bool s_summon_act_dd_open = false;
 static int  s_summon_act_dd_hover = -1;
+// 保持状态页三个小列各自的下拉状态（2026-10-16 用户要求的三列布局）：
+//   第一小列魔法（s_status_dd_*）、第二小列全体/指定（s_status_mode_*）、
+//   第三小列部队（s_status_unit_*）。同一时刻最多一个列展开。
 static int  s_status_dd_open = -1;
 static int  s_status_dd_hover = -1;
 static int  s_status_dd_ids[81] = {};
 static int  s_status_dd_count = 0;
 static int  s_status_dd_first = 0;
+static int  s_status_mode_open = -1;
+static int  s_status_mode_hover = -1;
+static int  s_status_unit_open = -1;
+static int  s_status_unit_hover = -1;
+static int  s_status_unit_first = 0;
+// 部队候选：战场双方存活部队（己方在前、各自按槽位序）。只存定位与显示需要
+// 的四样：目标格 hex、当前数量、生物 id、归属侧；选中时把 hex 写进槽位。
+static int  s_status_unit_hex[STATUS_UNIT_CAP] = {};
+static int  s_status_unit_count_alive[STATUS_UNIT_CAP] = {};
+static int  s_status_unit_cid[STATUS_UNIT_CAP] = {};
+static int  s_status_unit_side[STATUS_UNIT_CAP] = {};
+static int  s_status_unit_count = 0;
+
+static void StatusResetDropdowns_()
+{
+    s_status_dd_open = -1;
+    s_status_dd_hover = -1;
+    s_status_dd_first = 0;
+    s_status_mode_open = -1;
+    s_status_mode_hover = -1;
+    s_status_unit_open = -1;
+    s_status_unit_hover = -1;
+    s_status_unit_first = 0;
+}
+
+static int StatusAnyDropdownOpen_()
+{
+    return s_status_dd_open >= 0 || s_status_mode_open >= 0
+        || s_status_unit_open >= 0;
+}
+
+// 第三小列候选：战场双方存活部队，己方在前（与「部队」页卡片同序）。
+static void BuildStatusUnitCandidates_()
+{
+    s_status_unit_count = 0;
+    _BattleMgr_* mgr = o_BattleMgr;
+    if (!mgr) return;
+    const int human = ResolveHumanSide_(mgr);
+    const int order[2] = { human, 1 - human };
+    for (int k = 0; k < 2; ++k) {
+        const int side = order[k];
+        if (side < 0 || side > 1) continue;
+        for (int slot = 0; slot < 21 && s_status_unit_count < STATUS_UNIT_CAP;
+                ++slot) {
+            _BattleStack_* st = &mgr->stack[side][slot];
+            if (st->count_current <= 0) continue;
+            const int hex = StackHex_(st);
+            if (hex < 0) continue;
+            s_status_unit_hex[s_status_unit_count] = hex;
+            s_status_unit_count_alive[s_status_unit_count] = st->count_current;
+            s_status_unit_cid[s_status_unit_count] = st->creature_id;
+            s_status_unit_side[s_status_unit_count] = side;
+            ++s_status_unit_count;
+        }
+    }
+}
+
+// 按目标格找候选下标（-1 = 该格上已无存活部队）。
+static int FindStatusUnitByHex_(int hex)
+{
+    if (hex < 0) return -1;
+    for (int i = 0; i < s_status_unit_count; ++i)
+        if (s_status_unit_hex[i] == hex) return i;
+    return -1;
+}
 
 static int StatusDropdownVisibleRows_()
 {
-    int x = 0, y = 0;
-    StatusSlotRect_(s_status_dd_open, &x, &y);
-    return H3AutoPolicy::VisibleTextRows(PANEL_H - y - STATUS_DD_H - 4,
+    return StatusListVisibleRows_(s_status_dd_open,
         SmallFontRowHeight_(STATUS_ITEM_H), s_status_dd_count);
 }
 
@@ -410,6 +476,21 @@ static int StatusDropdownFirstRow_()
     if (s_status_dd_first < 0) s_status_dd_first = 0;
     if (s_status_dd_first > last) s_status_dd_first = last;
     return s_status_dd_first;
+}
+
+// 部队下拉可见行数：项高＝行高（放头像），展开方向与行数与绘制同源。
+static int StatusUnitVisibleRows_()
+{
+    return StatusListVisibleRows_(s_status_unit_open, STATUS_UNIT_ITEM_H,
+        s_status_unit_count);
+}
+
+static int StatusUnitFirstRow_()
+{
+    const int last = s_status_unit_count - StatusUnitVisibleRows_();
+    if (s_status_unit_first < 0) s_status_unit_first = 0;
+    if (s_status_unit_first > last) s_status_unit_first = last;
+    return s_status_unit_first;
 }
 // 队数/血量阈值数字录入：与停止回合同款（预填当前值、光标可移动）。
 enum SummonNumEditWhich { SUMMON_EDIT_NONE = 0, SUMMON_EDIT_COUNT, SUMMON_EDIT_HP };
@@ -504,15 +585,17 @@ static void CloseSummonDropdowns_()
     s_summon_act_dd_hover = -1;
     s_status_dd_open = -1;
     s_status_dd_hover = -1;
+    StatusResetDropdowns_();
     CloseAttackMagicUi_();
 }
 
-// 构建保持状态下拉候选：失明、减速置顶，其后是英雄的群体增益。
-// 资格口径（2026-10-16 用户裁定）：**以魔法书显示为准**——
-// `hero->HasSpell(spell)`（learnedSpells|availableSpell，穿戴装备赋予也算，
-// 与原版施法面板同口径；见 attack 通道 BuildAttackMagicCandidates_）；
-// 学校技能等级（GetSpellExpertise 0..3）只决定群体版/效果强度，**不构成**
-// "会不会"的资格。减速与群体增益另需专家级（那才有群体版）。
+// 构建保持状态下拉候选：英雄魔法书里会的状态魔法（失明、减速置顶）。
+// 资格口径（2026-10-16 用户最终裁定）：**唯一门槛是会不会**——
+//   `hero->HasSpell(spell)`（learnedSpells|availableSpell，穿戴装备赋予也算，
+//   与原版施法面板同口径；见 attack 通道 BuildAttackMagicCandidates_）；
+//   「不区分全体了」：不再要求法术表带群体版、也不再要求减速到专家级——
+//   群体与否改由每槽的第二小列（全体/指定）决定，当前等级做不到时执行端
+//   按能做到的方式施放（用户同意的 B 方案）。
 // 已在其它槽选过的法术剔除（2026-10-16 最终口径：先试过"不剔除"，玩家
 // 定案改回剔除——同一种法术不重复占槽）；skip_slot 是正在编辑的槽，不算。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
@@ -554,16 +637,51 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         // 施法面板同口径：会不会以魔法书显示为准；学校等级只影响群体版。
         const bool has_spell = hero->HasSpell(spell) != 0;
         const bool ok = !used && H3AutoPolicy::IsStatusCandidateSpell(
-            spell, flags, expertise, has_spell);
+            spell, has_spell);
         // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出是
-        // 已被别的槽占用（used=1）、魔法书里没有（book=0），还是学校等级不够
-        // 群体版（exp<3）——不必再让玩家自证，也不必靠猜。debug 级，默认不刷屏。
+        // 已被别的槽占用（used=1）、还是魔法书里没有（book=0）——不必再让玩家
+        // 自证，也不必靠猜。expertise/flags 一并留痕，方便核对群体口径。
         LogDebug("[Panel] status cand spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d",
             spell, has_spell ? 1 : 0, expertise, flags, used ? 1 : 0, ok ? 1 : 0);
         if (!ok) continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
     }
     return s_status_dd_count;
+}
+
+// 该法术在当前英雄学校等级下能不能群体施放（不能就只能单体）。读不到战场/
+// 英雄时返回 0＝当作不能群体，与「做不到就按能做到的方式施放」的执行口径一致。
+static int StatusSpellCanMassHere_(int spell_id)
+{
+    const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
+    H3CombatManager* cm = H3CombatManager::Get();
+    if (!cm || !o_BattleMgr || !table || spell_id <= 0 || spell_id >= 81) return 0;
+    const int side = ResolveHumanSide_(o_BattleMgr);
+    if (side < 0 || side > 1) return 0;
+    H3Hero* hero = reinterpret_cast<H3Hero*>(o_BattleMgr->hero[side]);
+    if (!hero) return 0;
+    const unsigned flags = *reinterpret_cast<const unsigned*>(
+        table + spell_id * 0x88 + 0x0C);
+    const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
+    return H3AutoPolicy::StatusSpellCanMass(spell_id, flags, expertise) ? 1 : 0;
+}
+
+// 换法术/新建槽时给该槽的默认目标模式＝当前等级真能做到的那个。
+static int StatusDefaultTargetModeHere_(int spell_id)
+{
+    return StatusSpellCanMassHere_(spell_id)
+        ? H3AutoPolicy::kStatusTargetAll : H3AutoPolicy::kStatusTargetPick;
+}
+
+// 玩家选的目标模式当前等级做不到时给一句状态栏提示（执行端会按能做到的
+// 方式施放，见 AutoExecute 的 TryMaintainStatus_）。
+static void StatusWarnTargetFallback_(const StatusProfileFields& status, int slot)
+{
+    if (slot < 0 || slot >= status.slot_count) return;
+    const int mode = status.target_mode[slot];
+    const int can_mass = StatusSpellCanMassHere_(status.slots[slot]);
+    if ((mode == H3AutoPolicy::kStatusTargetAll) == (can_mass != 0)) return;
+    SetStatusText_(T("panel.status_target_fallback"), 3000);
 }
 
 // 复选框「框在文字前」：复用卡片降级勾选样式（10px 方框 + 勾）。
@@ -1378,20 +1496,48 @@ static bool UpdateDropdownHover_(int px, int py)
         }
     }
     if (s_status_dd_open >= 0) {
-        int x = 0, y = 0, hover = -1;
-        StatusSlotRect_(s_status_dd_open, &x, &y);
+        int hover = -1;
         const int first = StatusDropdownFirstRow_();
         const int rows = StatusDropdownVisibleRows_();
         for (int v = 0; v < rows; ++v) {
-            const int i = first + v;
-            const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
-            if (PointInRect_(px, py, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H))) {
-                hover = i;
+            int x = 0, y = 0, w = 0, h = 0;
+            StatusMagicItemRect_(v, &x, &y, &w, &h);
+            if (PointInRect_(px, py, x, y, w, h)) {
+                hover = first + v;
                 break;
             }
         }
         if (hover != s_status_dd_hover) {
             s_status_dd_hover = hover;
+            changed = true;
+        }
+    }
+    if (s_status_mode_open >= 0) {
+        int hover = -1;
+        for (int i = 0; i < H3AutoPolicy::kStatusTargetModeCount; ++i) {
+            int x = 0, y = 0, w = 0, h = 0;
+            StatusModeItemRect_(i, &x, &y, &w, &h);
+            if (PointInRect_(px, py, x, y, w, h)) { hover = i; break; }
+        }
+        if (hover != s_status_mode_hover) {
+            s_status_mode_hover = hover;
+            changed = true;
+        }
+    }
+    if (s_status_unit_open >= 0) {
+        int hover = -1;
+        const int first = StatusUnitFirstRow_();
+        const int rows = StatusUnitVisibleRows_();
+        for (int v = 0; v < rows; ++v) {
+            int x = 0, y = 0, w = 0, h = 0;
+            StatusUnitItemRect_(v, &x, &y, &w, &h);
+            if (PointInRect_(px, py, x, y, w, h)) {
+                hover = first + v;
+                break;
+            }
+        }
+        if (hover != s_status_unit_hover) {
+            s_status_unit_hover = hover;
             changed = true;
         }
     }
@@ -1751,15 +1897,20 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             StatusProfileFields& status =
                 s_p.draft_status[s_p.selected_profile];
             for (int i = 0; i < status.slot_count; ++i) {
-                int x = 0, y = 0;
-                StatusSlotRect_(i, &x, &y);
-                if (!PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H))
+                // 右键删除按整行（大列宽）命中：第二、三小列属于同一条槽，
+                // 整行任意处右击都删这一槽，不留"点这里没反应"的死区。
+                if (!PointInRect_(px, py, StatusMagicX_(i), StatusRowY_(i),
+                        STATUS_BIG_W, STATUS_SLOT_H))
                     continue;
-                for (int n = i; n + 1 < status.slot_count; ++n)
+                for (int n = i; n + 1 < status.slot_count; ++n) {
                     status.slots[n] = status.slots[n + 1];
+                    status.target_mode[n] = status.target_mode[n + 1];
+                    status.target_hex[n] = status.target_hex[n + 1];
+                }
                 status.slots[--status.slot_count] = 0;
-                s_status_dd_open = -1;
-                s_status_dd_hover = -1;
+                status.target_mode[status.slot_count] = H3AutoPolicy::kStatusTargetAll;
+                status.target_hex[status.slot_count] = -1;
+                StatusResetDropdowns_();
                 LogInfo("[Panel] 保持状态移除第%d项 (方案%d)",
                     i + 1, s_p.selected_profile + 1);
                 DrawPanelToBuffer_();
@@ -1804,45 +1955,127 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
-    // 保持状态下拉展开时：选项即选、点框保持/收起、点外收起
-    // （与召唤页下拉完全同款语义）。
-    if (s_p.active_page == PAGE_STATUS && s_status_dd_open >= 0) {
+    // 保持状态下拉展开时：选项即选、点框保持/收起、点外收起（三个小列同款语义）。
+    if (s_p.active_page == PAGE_STATUS && StatusAnyDropdownOpen_()) {
         if (raw_command == 4)
             return;
         if (raw_command == 8 || raw_command == 16) {
             StatusProfileFields& status =
                 s_p.draft_status[s_p.selected_profile];
-            int x = 0, y = 0;
-            StatusSlotRect_(s_status_dd_open, &x, &y);
-            const int first = StatusDropdownFirstRow_();
-            const int rows = StatusDropdownVisibleRows_();
-            for (int v = 0; v < rows; ++v) {
-                const int i = first + v;
-                const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
-                if (!PointInRect_(px, py, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H)))
-                    continue;
-                if (s_status_dd_open < status.slot_count)
-                    status.slots[s_status_dd_open] = s_status_dd_ids[i];
-                LogInfo("[Panel] 保持状态选择 slot=%d spell=%d (方案%d)",
-                    s_status_dd_open + 1, s_status_dd_ids[i],
-                    s_p.selected_profile + 1);
-                s_status_dd_open = -1;
-                s_status_dd_hover = -1;
+            // 第一小列：法术（选中后目标重置为该法术的默认模式）。
+            if (s_status_dd_open >= 0) {
+                const int first = StatusDropdownFirstRow_();
+                const int rows = StatusDropdownVisibleRows_();
+                for (int v = 0; v < rows; ++v) {
+                    int x = 0, y = 0, w = 0, h = 0;
+                    StatusMagicItemRect_(v, &x, &y, &w, &h);
+                    if (!PointInRect_(px, py, x, y, w, h)) continue;
+                    const int i = first + v;
+                    const int slot = s_status_dd_open;
+                    const int picked = s_status_dd_ids[i];
+                    if (slot < status.slot_count
+                        && status.slots[slot] != picked) {
+                        status.slots[slot] = picked;
+                        status.target_mode[slot] = StatusDefaultTargetModeHere_(picked);
+                        status.target_hex[slot] = -1;
+                    }
+                    LogInfo("[Panel] 保持状态选择 slot=%d spell=%d mode=%d (方案%d)",
+                        slot + 1, picked,
+                        slot < status.slot_count ? status.target_mode[slot] : -1,
+                        s_p.selected_profile + 1);
+                    if (slot < status.slot_count) StatusWarnTargetFallback_(status, slot);
+                    StatusResetDropdowns_();
+                    DrawPanelToBuffer_();
+                    return;
+                }
+                int x = 0, y = 0, w = 0, h = 0;
+                StatusMagicItemRect_(0, &x, &y, &w, &h);
+                const int box_x = StatusMagicX_(s_status_dd_open);
+                const int box_y = StatusRowY_(s_status_dd_open);
+                if (PointInRect_(px, py, box_x, box_y, STATUS_MAGIC_W, STATUS_SLOT_H)) {
+                    if (raw_command == 8) {
+                        StatusResetDropdowns_();
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                StatusResetDropdowns_();
                 DrawPanelToBuffer_();
                 return;
             }
-            if (PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H)) {
-                if (raw_command == 8) {
-                    s_status_dd_open = -1;
-                    s_status_dd_hover = -1;
+            // 第二小列：全体/指定（固定两项，选了做不到的给提示、执行端兜底）。
+            if (s_status_mode_open >= 0) {
+                for (int i = 0; i < H3AutoPolicy::kStatusTargetModeCount; ++i) {
+                    int x = 0, y = 0, w = 0, h = 0;
+                    StatusModeItemRect_(i, &x, &y, &w, &h);
+                    if (!PointInRect_(px, py, x, y, w, h)) continue;
+                    const int slot = s_status_mode_open;
+                    if (slot < status.slot_count) {
+                        status.target_mode[slot] = i;
+                        if (i == H3AutoPolicy::kStatusTargetAll)
+                            status.target_hex[slot] = -1;
+                        else if (FindStatusUnitByHex_(status.target_hex[slot]) < 0) {
+                            // 选「指定」但还没有目标（或原目标已阵亡）：默认取
+                            // 候选第一项（己方在前），玩家再改。
+                            if (s_status_unit_count > 0)
+                                status.target_hex[slot] = s_status_unit_hex[0];
+                        }
+                        LogInfo("[Panel] 保持状态目标 slot=%d spell=%d mode=%d hex=%d (方案%d)",
+                            slot + 1, status.slots[slot], i,
+                            status.target_hex[slot], s_p.selected_profile + 1);
+                        StatusWarnTargetFallback_(status, slot);
+                    }
+                    StatusResetDropdowns_();
                     DrawPanelToBuffer_();
+                    return;
                 }
+                const int box_x = StatusModeX_(s_status_mode_open);
+                const int box_y = StatusRowY_(s_status_mode_open);
+                if (PointInRect_(px, py, box_x, box_y, STATUS_MODE_W, STATUS_SLOT_H)) {
+                    if (raw_command == 8) {
+                        StatusResetDropdowns_();
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                StatusResetDropdowns_();
+                DrawPanelToBuffer_();
                 return;
             }
-            s_status_dd_open = -1;
-            s_status_dd_hover = -1;
-            DrawPanelToBuffer_();
-            return;
+            // 第三小列：部队（把该部队的战场格写进槽位目标）。
+            if (s_status_unit_open >= 0) {
+                const int first = StatusUnitFirstRow_();
+                const int rows = StatusUnitVisibleRows_();
+                for (int v = 0; v < rows; ++v) {
+                    int x = 0, y = 0, w = 0, h = 0;
+                    StatusUnitItemRect_(v, &x, &y, &w, &h);
+                    if (!PointInRect_(px, py, x, y, w, h)) continue;
+                    const int i = first + v;
+                    const int slot = s_status_unit_open;
+                    if (slot < status.slot_count) {
+                        status.target_hex[slot] = s_status_unit_hex[i];
+                        LogInfo("[Panel] 保持状态部队 slot=%d hex=%d cid=%d count=%d (方案%d)",
+                            slot + 1, s_status_unit_hex[i], s_status_unit_cid[i],
+                            s_status_unit_count_alive[i],
+                            s_p.selected_profile + 1);
+                    }
+                    StatusResetDropdowns_();
+                    DrawPanelToBuffer_();
+                    return;
+                }
+                const int box_x = StatusUnitX_(s_status_unit_open);
+                const int box_y = StatusRowY_(s_status_unit_open);
+                if (PointInRect_(px, py, box_x, box_y, STATUS_UNIT_W, STATUS_SLOT_H)) {
+                    if (raw_command == 8) {
+                        StatusResetDropdowns_();
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                StatusResetDropdowns_();
+                DrawPanelToBuffer_();
+                return;
+            }
         }
         return;
     }
@@ -1949,17 +2182,45 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             }
             bool handled = false;
             for (int i = 0; i < status.slot_count && !handled; ++i) {
-                int x = 0, y = 0;
-                StatusSlotRect_(i, &x, &y);
-                if (!PointInRect_(px, py, x, y, STATUS_DD_W, STATUS_DD_H))
+                const int row_y = StatusRowY_(i);
+                // 第一小列：魔法下拉。
+                if (PointInRect_(px, py, StatusMagicX_(i), row_y,
+                        STATUS_MAGIC_W, STATUS_SLOT_H)) {
+                    handled = true;
+                    StatusResetDropdowns_();
+                    if (BuildStatusCandidates_(status, i) > 0) {
+                        s_status_dd_open = i;
+                        s_status_dd_first = 0;
+                        s_status_dd_hover = -1;
+                    } else {
+                        SetStatusText_(T("panel.status_empty"), 3000);
+                    }
                     continue;
-                handled = true;
-                if (BuildStatusCandidates_(status, i) > 0) {
-                    s_status_dd_open = i;
-                    s_status_dd_first = 0;
-                    s_status_dd_hover = -1;
-                } else {
-                    SetStatusText_(T("panel.status_empty"), 3000);
+                }
+                // 第二小列：全体/指定下拉。
+                if (PointInRect_(px, py, StatusModeX_(i), row_y,
+                        STATUS_MODE_W, STATUS_SLOT_H)) {
+                    handled = true;
+                    StatusResetDropdowns_();
+                    s_status_mode_open = i;
+                    s_status_mode_hover = -1;
+                    continue;
+                }
+                // 第三小列：部队下拉（只有「指定」时这一列才存在）。
+                if (status.target_mode[i] == H3AutoPolicy::kStatusTargetPick
+                    && PointInRect_(px, py, StatusUnitX_(i), row_y,
+                        STATUS_UNIT_W, STATUS_SLOT_H)) {
+                    handled = true;
+                    StatusResetDropdowns_();
+                    BuildStatusUnitCandidates_();
+                    if (s_status_unit_count > 0) {
+                        s_status_unit_open = i;
+                        s_status_unit_first = 0;
+                        s_status_unit_hover = -1;
+                    } else {
+                        SetStatusText_(T("panel.status_unit_none"), 3000);
+                    }
+                    continue;
                 }
             }
             if (!handled) {
@@ -1970,6 +2231,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         STATUS_ADD_W, STATUS_ADD_H)) {
                     handled = true;
                     s_p.status_add_armed = true;
+                    StatusResetDropdowns_();
                     if (BuildStatusCandidates_(status, -1) > 0) {
                         // 「＋」默认给一个友方状态槽：候选前两项是对敌的失明/
                         // 减速，拿它们当默认会把"想给自己续增益"的玩家直接送进
@@ -1983,12 +2245,17 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                                 break;
                             }
                         }
-                        status.slots[status.slot_count++] = picked;
-                        s_status_dd_open = status.slot_count - 1;
+                        const int slot = status.slot_count;
+                        status.slots[slot] = picked;
+                        status.target_mode[slot] = StatusDefaultTargetModeHere_(picked);
+                        status.target_hex[slot] = -1;
+                        ++status.slot_count;
+                        s_status_dd_open = slot;
                         s_status_dd_first = 0;
                         s_status_dd_hover = -1;
-                        LogInfo("[Panel] 保持状态追加 spell=%d (方案%d)",
-                            picked, s_p.selected_profile + 1);
+                        LogInfo("[Panel] 保持状态追加 spell=%d mode=%d (方案%d)",
+                            picked, status.target_mode[slot],
+                            s_p.selected_profile + 1);
                     } else {
                         SetStatusText_(T("panel.status_empty"), 3000);
                     }

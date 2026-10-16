@@ -202,17 +202,68 @@ static const int SUMMON_FB_X  = SUMMON_ACT_DD_X + SUMMON_ACT_DD_W + 18;
 static const int SUMMON_FB_Y  = SUMMON_ACT_ROW_Y + 3;   // 与 18 高下拉中线对齐
 static const int SUMMON_FB_TEXT_W = 130;
 
-// 保持状态页：力盾落点行 → 说明 → 阈值 → 每行 4 个状态槽。
+// 保持状态页：力盾落点行 → 说明 → 阈值 → 槽位区。
+// 槽位区（2026-10-16 用户要求重排）：**两大列**，每大列 4 行（2×4＝8＝
+// kStatusSlotCapacity）；每槽**三个小列**——魔法下拉（按 4 个汉字宽）、
+// 全体/指定下拉（按 2 个汉字宽）、部队下拉（生物头像 + 位置 + 数量）。
+// 行高按第三个下拉框的头像高度算（用户要求），整块收在 MAGIC_LIST_BOTTOM 之上。
 static const int STATUS_NOTE_Y = FF_ROW_Y + 28;
-static const int STATUS_COLS = 4;
-static const int STATUS_GAP = 6;
-static const int STATUS_DD_W =
-    (GRID_FRAME_W - (STATUS_COLS - 1) * STATUS_GAP) / STATUS_COLS;
-static const int STATUS_DD_H = 18;
-static const int STATUS_ROW_H = STATUS_DD_H + 8;
-static const int STATUS_ADD_W = STATUS_DD_W;
-static const int STATUS_ADD_H = STATUS_DD_H;
-static const int STATUS_ITEM_H = 18;
+static const int STATUS_BIG_COLS = 2;
+static const int STATUS_ROWS = 4;
+static const int STATUS_BIG_GAP = 10;   // 两大列之间
+static const int STATUS_BIG_W =
+    (GRID_FRAME_W - (STATUS_BIG_COLS - 1) * STATUS_BIG_GAP) / STATUS_BIG_COLS;
+static const int STATUS_SUB_GAP = 4;    // 大列内三小列之间
+// TwCrPort 原图框（与部队页卡片同源：58×64 头像画在 60×66 框里）。
+static const int STATUS_ICON_FRAME_W = 60;
+static const int STATUS_ICON_FRAME_H = 66;
+static const int STATUS_ICON_H = 56;    // 头像高＝行高基准
+static const int STATUS_ICON_W = 50;    // 按原图框等比
+static const int STATUS_SLOT_H = STATUS_ICON_H + 4;
+static const int STATUS_ROW_GAP = 4;
+static const int STATUS_MAGIC_W = 72;   // 魔法下拉：4 个字 + 内边距 + 箭头
+static const int STATUS_MODE_W  = 46;   // 全体/指定：2 个字 + 内边距 + 箭头
+static const int STATUS_UNIT_W  = STATUS_BIG_W - STATUS_MAGIC_W - STATUS_MODE_W
+    - 2 * STATUS_SUB_GAP;               // 头像 + 位置 + 数量
+// 魔法下拉展开列表比收起框宽：框只有 4 字，列表里要能读全法术名（浮层，不占列宽）。
+static const int STATUS_MAGIC_LIST_W = STATUS_MAGIC_W + STATUS_MODE_W + STATUS_SUB_GAP;
+static const int STATUS_ADD_W = STATUS_BIG_W;
+static const int STATUS_ADD_H = STATUS_SLOT_H;
+static const int STATUS_ITEM_H = 18;      // 魔法下拉列表项高
+static const int STATUS_MODE_ITEM_H = 18; // 全体/指定列表项高
+// 部队下拉列表项高＝行高（要放头像），可见行数按内容区底 MAGIC_LIST_BOTTOM 收。
+static const int STATUS_UNIT_ITEM_H = STATUS_SLOT_H;
+// 战场存活部队候选上限：双方各 21 槽。
+static const int STATUS_UNIT_CAP = 42;
+
+// 下拉列表展开几何（纯函数，单测可钉）：在内容区 [area_top, area_bottom] 内，
+// 以收起框 (box_y, box_h) 为基准，优先向下展开；下方能放的行数比上方少时改成
+// 向上展开，可见行数取两者较大的那个。末几行（保持状态页第 3、4 行）向下只剩
+// 0~1 行，若不翻上去就会出现"点开是空的、选项也点不中"。绘制、命中与滚轮共用。
+inline int ListVisibleRowsInArea_(int box_y, int box_h, int item_h, int count,
+    int area_top, int area_bottom, bool* open_up)
+{
+    if (open_up) *open_up = false;
+    if (item_h <= 0 || count <= 0) return 0;
+    int below = (area_bottom - (box_y + box_h)) / item_h;
+    int above = (box_y - area_top) / item_h;
+    if (below < 0) below = 0;
+    if (above < 0) above = 0;
+    if (below > count) below = count;
+    if (above > count) above = count;
+    const bool up = above > below;
+    if (open_up) *open_up = up;
+    return up ? above : below;
+}
+
+inline int ListOriginYInArea_(int box_y, int box_h, int item_h, int count,
+    int area_top, int area_bottom)
+{
+    bool up = false;
+    const int rows = ListVisibleRowsInArea_(box_y, box_h, item_h, count,
+        area_top, area_bottom, &up);
+    return up ? box_y - rows * item_h : box_y + box_h;
+}
 
 // 阈值行（说明行下方、槽位上方）：框内数字 1..9（默认 1）——任一已
 // 配置增益/减速在任一队上剩余回合 ≤ 它就补施该法术（多达标取剩余
@@ -232,7 +283,7 @@ static const int STATUS_TH_MAX_DIGITS = 1; // 1..9
 static const int STATUS_ROW0_Y =
     STATUS_TH_ROW_Y + STATUS_TH_ROW_H + 10;
 
-// 阈值下固定预留五行（每行4个状态槽），保持状态页布局上限。
+// 状态槽区下界（槽位与其展开列表都收在这条线以上）。
 static const int MAGIC_LIST_BOTTOM = 448;
 // 攻击魔法页（PAGE_ATTACK）独立布局：没有力盾行/状态槽，说明行从停止
 // 行下方开始；标题与列表为独立常量，不再由状态槽位置推导。

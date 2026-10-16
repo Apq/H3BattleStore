@@ -115,7 +115,7 @@ static bool AttackMagicWheel_(int delta) {
     return true;
 }
 static bool HandleAttackMagicMouse_(int command, int px, int py) {
-    if (s_p.active_page != PAGE_ATTACK || s_panel_hidden_for_pick || s_battle_dd_open || s_status_dd_open >= 0) return false;
+    if (s_p.active_page != PAGE_ATTACK || s_panel_hidden_for_pick || s_battle_dd_open || StatusAnyDropdownOpen_()) return false;
     if (command == 8) s_attack_gesture = {};
     if (command == 16 && s_attack_gesture.held) {
         const H3AutoPolicy::MagicChannelGesture gesture = s_attack_gesture;

@@ -1,4 +1,5 @@
 #include "../modules/PolicyCore.hpp"
+#include "../modules/PanelLayout.hpp"
 #include "../modules/SpellRulesCore.hpp"
 #include "../modules/BattleStoreCoop.hpp"
 #include "../modules/CrashGuardCore.hpp"
@@ -1162,23 +1163,102 @@ void TestStatusAndAutoStop()
         "blind: two turns left above threshold one is left alone");
     Check(ChooseBlindTarget(blind_dur_two, enemy_hexes, threat, 2, 3).spell_id == 62,
         "blind: wider threshold recasts at two turns left");
-    // 下拉候选资格（2026-10-16 用户裁定：会不会"以魔法书的显示为准"）：
-    // book=HasSpell（learnedSpells|availableSpell）；学校等级只决定群体版，
-    // 不构成资格——exp=0 一样能施放（baseValue[0]）。失明是单体，book 就够；
-    // 减速要专家级；其余仍要专家级群体增益。
-    Check(IsStatusCandidateSpell(62, 0x0004 | 0x0010, 0, true),
-        "candidate: blind needs the spellbook only, not school level");
-    Check(!IsStatusCandidateSpell(62, 0, 0, false)
-        && !IsStatusCandidateSpell(62, 0, 3, false),
-        "candidate: not in the spellbook stays out, whatever the school");
-    Check(IsStatusCandidateSpell(54, 0, 3, true) && !IsStatusCandidateSpell(54, 0, 2, true),
-        "candidate: slow needs expert school plus the spellbook");
-    Check(!IsStatusCandidateSpell(27, 0, 3, false),
-        "candidate: expert school without the spell is not offered");
-    Check(IsStatusCandidateSpell(27, H3AutoPolicy::kSpellFlagFriendlyMass, 3, true),
-        "candidate: buffs need mass version plus the spellbook");
-    Check(!IsStatusCandidateSpell(0, 0x800, 3, true) && !IsStatusCandidateSpell(81, 0x800, 3, true),
+    // 下拉候选资格（2026-10-16 用户最终裁定）：**唯一门槛是会不会**——
+    // has_spell＝HasSpell（learnedSpells|availableSpell），"不区分全体了"：
+    // 不再要求法术表带群体版、减速也不再要求专家级（群体与否由每槽的第二小列
+    // 决定，等级做不到时执行端按能做到的方式施放）。
+    Check(IsStatusCandidateSpell(62, true),
+        "candidate: blind only needs the spellbook");
+    Check(!IsStatusCandidateSpell(62, false)
+        && !IsStatusCandidateSpell(27, false),
+        "candidate: not in the spellbook stays out");
+    Check(IsStatusCandidateSpell(54, true),
+        "candidate: slow is offered at any school level now");
+    Check(IsStatusCandidateSpell(27, true) && IsStatusCandidateSpell(58, true),
+        "candidate: buffs no longer require a mass version");
+    Check(!IsStatusCandidateSpell(0, true) && !IsStatusCandidateSpell(81, true),
         "candidate: empty and out-of-range ids are rejected");
+    Check(!IsStatusCandidateSpell(17, true),
+        "candidate: non-status spells stay out even when learned");
+    // 是不是状态魔法只看 id 白名单（与是否已学、等级无关）。
+    Check(IsStatusSpellId(27) && IsStatusSpellId(54) && IsStatusSpellId(62)
+        && !IsStatusSpellId(17) && !IsStatusSpellId(0),
+        "status spell id whitelist");
+    // 群体可行性＝原版 SingleTarget 的互补判据：
+    //   失明 62 带 0x10（永远单体）；减速 54 要专家级；0x40 要 exp>=3；
+    //   0x20 要 exp>=2；两者都没有（如 55）永远没有群体版。
+    Check(!StatusSpellCanMass(62, 0x0004 | 0x0010, 3),
+        "mass: blind has no mass version at any school level");
+    Check(!StatusSpellCanMass(54, 0x0004 | 0x0040, 2)
+        && StatusSpellCanMass(54, 0x0004 | 0x0040, 3),
+        "mass: slow needs expert school");
+    Check(!StatusSpellCanMass(27, kSpellFlagExpertMass, 2)
+        && StatusSpellCanMass(27, kSpellFlagExpertMass, 3),
+        "mass: expert mass version needs school 3");
+    Check(!StatusSpellCanMass(31, kSpellFlagAdvancedMass, 1)
+        && StatusSpellCanMass(31, kSpellFlagAdvancedMass, 2),
+        "mass: advanced mass version needs school 2");
+    Check(!StatusSpellCanMass(55, 0x40815, 3),
+        "mass: single-only flag (Slayer) is never mass at any school level");
+    Check(StatusSpellCanMass(27, 0, 3),
+        "mass: no mass-restricting flag means non-single (与原版 SingleTarget 一致)");
+    Check(!StatusSpellCanMass(17, 0x800, 3),
+        "mass: non-status spell is never offered as mass");
+    // 与旧口径 MagicHasMassVersion 在状态法术上必须逐样本一致，避免两套群体
+    // 判据漂移（exp 上限 3：调用方已把 expertise 夹在 0..3）。
+    for (unsigned mass_flags : {0u, 0x10u, 0x20u, 0x40u, 0x800u, 0x10u | 0x40u,
+            0x800u | 0x10u, 0x20u | 0x40u}) {
+        for (int exp = 0; exp <= 3; ++exp) {
+            Check(H3AutoPolicy::StatusSpellCanMass(54, mass_flags, exp)
+                    == H3AutoPolicy::MagicHasMassVersion(mass_flags, exp),
+                "mass: new rule matches the legacy MagicHasMassVersion");
+        }
+    }
+    Check(StatusDefaultTargetMode(62, 0x0010, 3) == kStatusTargetPick
+        && StatusDefaultTargetMode(54, 0x0040, 3) == kStatusTargetAll
+        && StatusDefaultTargetMode(54, 0x0040, 2) == kStatusTargetPick,
+        "target mode default follows the school level");
+    // 每槽目标（三小列布局）：全体/指定的归一与槽位压缩时的同步搬移。
+    {
+        StatusProfileFields st = MakeDefaultStatusFields();
+        st.slots[0] = 27; st.target_mode[0] = kStatusTargetAll; st.target_hex[0] = 99;
+        st.slots[1] = 0;  st.target_mode[1] = kStatusTargetPick; st.target_hex[1] = 12;
+        st.slots[2] = 62; st.target_mode[2] = kStatusTargetPick; st.target_hex[2] = 34;
+        st.slot_count = 3;
+        NormalizeStatusFields(&st);
+        Check(st.slot_count == 2 && st.slots[0] == 27 && st.slots[1] == 62,
+            "normalize: empty slot drops out");
+        Check(st.target_mode[0] == kStatusTargetAll && st.target_hex[0] == -1,
+            "normalize: 全体 clears the stale target hex");
+        Check(st.target_mode[1] == kStatusTargetPick && st.target_hex[1] == 34,
+            "normalize: 指定 target follows its spell when slots compact");
+        Check(st.target_mode[2] == kStatusTargetAll && st.target_hex[2] == -1,
+            "normalize: tail slots return to defaults");
+        StatusProfileFields bad = MakeDefaultStatusFields();
+        bad.slots[0] = 27; bad.target_mode[0] = 7; bad.target_hex[0] = 999;
+        bad.slot_count = 1;
+        NormalizeStatusFields(&bad);
+        Check(bad.target_mode[0] == kStatusTargetAll && bad.target_hex[0] == -1,
+            "normalize: out-of-range mode and hex fall back");
+    }
+    // 单体（指定）目标选择：优先玩家点过的那一格，失效就退回剩余最少者。
+    {
+        const int single_dur[] = {3, 1, 2};
+        const int single_hex[] = {10, 20, 30};
+        Check(ChooseSingleStatusTarget(single_dur, single_hex, 3, 20) == 1,
+            "single: preferred hex wins");
+        Check(ChooseSingleStatusTarget(single_dur, single_hex, 3, 99) == 1,
+            "single: dead preference falls back to the least remaining turns");
+        // 不可接受（-1）的队即使被指定也不选它。
+        const int single_dur_x[] = {-1, 2, 1};
+        Check(ChooseSingleStatusTarget(single_dur_x, single_hex, 3, 10) == 2,
+            "single: unacceptable preferred hex is skipped");
+        const int single_dur_none[] = {-1, -1};
+        Check(ChooseSingleStatusTarget(single_dur_none, single_hex, 2, 10) == -1,
+            "single: no acceptable stack means no cast");
+        Check(ChooseSingleStatusTarget(nullptr, nullptr, 0, 10) == -1,
+            "single: empty input means no cast");
+    }
 }
 
 void TestSummonChannel()
@@ -1561,4 +1641,68 @@ TEST_CASE("policy: 召唤通道", "[policy]") { TestSummonChannel(); }
 TEST_CASE("policy: 召唤移动落点", "[policy]") { TestSummonMoveHex(); }
 TEST_CASE("policy: 召唤规则归一化", "[policy]") { TestSummonRuleNormalization(); }
 TEST_CASE("policy: 状态与自动停止", "[policy]") { TestStatusAndAutoStop(); }
+// 保持状态页三小列几何（2026-10-16 重排）：能力上限与版面必须自洽——少一行/
+// 少一列就有槽画不出也点不到，横竖越界就会被下一块内容盖掉。绘制与命中用同一
+// 组映射函数（PanelDraw 的 StatusSlotRect_/StatusMagicX_/StatusModeX_/
+// StatusUnitX_），这些常量是那组函数的唯一来源，所以在这里钉住。
+void TestStatusPageGeometry()
+{
+    static_assert(STATUS_BIG_COLS * STATUS_ROWS
+        >= H3AutoPolicy::kStatusSlotCapacity,
+        "两大列×四行必须装得下全部状态槽");
+    static_assert(STATUS_MAGIC_W + STATUS_MODE_W + STATUS_UNIT_W
+        + 2 * STATUS_SUB_GAP == STATUS_BIG_W,
+        "三小列宽度加间隙必须正好等于大列宽");
+    static_assert(STATUS_BIG_COLS * STATUS_BIG_W
+        + (STATUS_BIG_COLS - 1) * STATUS_BIG_GAP <= GRID_FRAME_W,
+        "两大列合计不得超过内容区宽");
+    static_assert(STATUS_ROW0_Y + STATUS_ROWS * STATUS_SLOT_H
+        + (STATUS_ROWS - 1) * STATUS_ROW_GAP <= MAGIC_LIST_BOTTOM,
+        "四行槽位（含行间隙）必须收在内容区底之上");
+    static_assert(STATUS_SLOT_H >= STATUS_ICON_H,
+        "行高按部队头像高算，至少要放下头像");
+    // 魔法下拉收起框按 4 个汉字宽：中文字宽约 13px + 左边距 6 + 箭头 14。
+    Check(STATUS_MAGIC_W >= 4 * 13 + 20, "magic combo fits four CJK glyphs");
+    Check(STATUS_MODE_W >= 2 * 13 + 20, "mode combo fits two CJK glyphs");
+    // 部队列要装下头像 + 位置(A01≈24px) + 数量(最多 5 位数字≈40px) + 边距。
+    Check(STATUS_UNIT_W >= STATUS_ICON_W + 6 + 24 + 40,
+        "unit combo fits portrait, position and count");
+    Check(STATUS_UNIT_ITEM_H == STATUS_SLOT_H,
+        "unit dropdown rows use the same height as the slot rows");
+    Check(STATUS_ROW0_Y > STATUS_TH_ROW_Y + STATUS_TH_ROW_H,
+        "slot rows start below the threshold row");
+    // 每个槽行的三个下拉都必须至少能看到 1 项（否则"点开是空的、还点不中"），
+    // 且列表原点必须落在内容区内。18＝魔法/全体·指定项高，60＝部队项高。
+    for (int row = 0; row < STATUS_BIG_COLS * STATUS_ROWS; ++row) {
+        const int y = STATUS_ROW0_Y + (row % STATUS_ROWS)
+            * (STATUS_SLOT_H + STATUS_ROW_GAP);
+        for (int item_h : {STATUS_ITEM_H, STATUS_MODE_ITEM_H, STATUS_UNIT_ITEM_H}) {
+            for (int count = 1; count <= 18; ++count) {
+                bool up = false;
+                const int rows = ListVisibleRowsInArea_(y, STATUS_SLOT_H, item_h,
+                    count, GRID_FRAME_Y, MAGIC_LIST_BOTTOM, &up);
+                Check(rows >= 1, "every status dropdown shows at least one row");
+                const int origin = ListOriginYInArea_(y, STATUS_SLOT_H, item_h,
+                    count, GRID_FRAME_Y, MAGIC_LIST_BOTTOM);
+                Check(origin >= GRID_FRAME_Y
+                        && origin + rows * item_h <= MAGIC_LIST_BOTTOM,
+                    "status dropdown list stays inside the content area");
+                Check(up == (origin < y), "list origin matches the flip decision");
+            }
+        }
+    }
+    // 末行（y=382）向下放不下，必须翻到上方展开；首行向下充裕，仍向下展开。
+    {
+        const int last_y = STATUS_ROW0_Y + (STATUS_ROWS - 1)
+            * (STATUS_SLOT_H + STATUS_ROW_GAP);
+        bool up = false;
+        ListVisibleRowsInArea_(last_y, STATUS_SLOT_H, STATUS_UNIT_ITEM_H, 6,
+            GRID_FRAME_Y, MAGIC_LIST_BOTTOM, &up);
+        Check(up, "last slot row opens its lists upward");
+        ListVisibleRowsInArea_(STATUS_ROW0_Y, STATUS_SLOT_H, STATUS_UNIT_ITEM_H, 6,
+            GRID_FRAME_Y, MAGIC_LIST_BOTTOM, &up);
+        Check(!up, "first slot row opens its lists downward");
+    }
+}
+TEST_CASE("policy: 保持状态页三列几何", "[policy]") { TestStatusPageGeometry(); }
 TEST_CASE("policy: 铠甲核心（异常过滤/环形缓冲/力盾表）", "[policy]") { TestCrashGuardCore(); }

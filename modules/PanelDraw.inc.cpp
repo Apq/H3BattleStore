@@ -938,27 +938,184 @@ static const char* StatusSpellName_(int spell_id, char* out, int out_size)
     return out;
 }
 
+// 槽位矩形（2026-10-16 用户要求重排）：**两大列**，每大列 4 行，共 8 槽
+// ＝kStatusSlotCapacity。列内三小列的 X 由下面同一组函数给出，绘制与命中
+// 都调它们（技能 h3auto-panel-dropdown-store：几何必须同源）。
 static void StatusSlotRect_(int index, int* x, int* y)
 {
-    const int col = index % STATUS_COLS;
-    const int row = index / STATUS_COLS;
-    if (x) *x = GRID_FRAME_X + col * (STATUS_DD_W + STATUS_GAP);
-    if (y) *y = STATUS_ROW0_Y + row * (SmallFontRowHeight_(STATUS_DD_H) + 8);
+    const int big = index / STATUS_ROWS;
+    const int row = index % STATUS_ROWS;
+    if (x) *x = GRID_FRAME_X + big * (STATUS_BIG_W + STATUS_BIG_GAP);
+    if (y) *y = STATUS_ROW0_Y + row * (STATUS_SLOT_H + STATUS_ROW_GAP);
 }
 
-static const char* StatusSpellLabel_(int spell_id, char* buf, int cap)
+static int StatusRowY_(int index)
 {
-    char name[256] = {};
-    StatusSpellName_(spell_id, name, sizeof(name));
-    // 对敌法术统一带「（敌方）」后缀：减速（54）是群体对敌，
-    // 失明（62）是单体对敌。
-    if (spell_id == H3AutoPolicy::kSlowSpellId
-            || spell_id == H3AutoPolicy::kBlindSpellId)
-        _snprintf(buf, cap, "%s（敌方）", name);
-    else
-        _snprintf(buf, cap, "%s", name);
-    if (cap > 0) buf[cap - 1] = 0;
-    return buf;
+    int x = 0, y = 0;
+    StatusSlotRect_(index, &x, &y);
+    return y;
+}
+
+static int StatusMagicX_(int index)
+{
+    int x = 0, y = 0;
+    StatusSlotRect_(index, &x, &y);
+    return x;
+}
+
+static int StatusModeX_(int index)
+{
+    return StatusMagicX_(index) + STATUS_MAGIC_W + STATUS_SUB_GAP;
+}
+
+static int StatusUnitX_(int index)
+{
+    return StatusModeX_(index) + STATUS_MODE_W + STATUS_SUB_GAP;
+}
+
+// 列表展开方向与可见行数（下拉在内容区里按空间上下择一展开）：优先向下，
+// 下方装不下就向上——第 3/4 行（y=318/382）向下只剩 0~1 行，若不翻上去会
+// "点开是空的、还点不中"。绘制与命中都读同一组函数，不允许各写一份。
+// 几何判据在 ListVisibleRowsInArea_/ListOriginYInArea_（PanelLayout.hpp，纯函数）。
+static int StatusListVisibleRows_(int index, int item_h, int count)
+{
+    if (index < 0) return 0;
+    return ListVisibleRowsInArea_(StatusRowY_(index), STATUS_SLOT_H, item_h,
+        count, GRID_FRAME_Y, MAGIC_LIST_BOTTOM, nullptr);
+}
+
+static int StatusListOriginY_(int index, int item_h, int count)
+{
+    return ListOriginYInArea_(StatusRowY_(index), STATUS_SLOT_H, item_h, count,
+        GRID_FRAME_Y, MAGIC_LIST_BOTTOM);
+}
+
+// 第一小列展开列表：项宽用 STATUS_MAGIC_LIST_W（比收起框宽，列表里读全名），
+// 浮层不占列宽。第二小列两项固定「全体/指定」。
+static void StatusMagicItemRect_(int visual_row, int* x, int* y, int* w, int* h)
+{
+    const int row_h = SmallFontRowHeight_(STATUS_ITEM_H);
+    if (x) *x = StatusMagicX_(s_status_dd_open);
+    if (y) *y = StatusListOriginY_(s_status_dd_open, row_h, s_status_dd_count)
+        + visual_row * row_h;
+    if (w) *w = STATUS_MAGIC_LIST_W;
+    if (h) *h = row_h;
+}
+
+static void StatusModeItemRect_(int item, int* x, int* y, int* w, int* h)
+{
+    const int row_h = SmallFontRowHeight_(STATUS_MODE_ITEM_H);
+    if (x) *x = StatusModeX_(s_status_mode_open);
+    if (y) *y = StatusListOriginY_(s_status_mode_open, row_h,
+        H3AutoPolicy::kStatusTargetModeCount) + item * row_h;
+    if (w) *w = STATUS_MODE_W;
+    if (h) *h = row_h;
+}
+
+static void StatusUnitItemRect_(int visual_row, int* x, int* y, int* w, int* h)
+{
+    if (x) *x = StatusUnitX_(s_status_unit_open);
+    if (y) *y = StatusListOriginY_(s_status_unit_open, STATUS_UNIT_ITEM_H,
+        s_status_unit_count) + visual_row * STATUS_UNIT_ITEM_H;
+    if (w) *w = STATUS_UNIT_W;
+    if (h) *h = STATUS_UNIT_ITEM_H;
+}
+
+static const char* StatusTargetModeLabel_(int mode)
+{
+    return mode == H3AutoPolicy::kStatusTargetPick
+        ? T("panel.status_target_pick") : T("panel.status_target_all");
+}
+
+// 部队头像：TwCrPort 原图（60×66 框内 58×64）先按原尺寸画进面板表面，再原地
+// 降采样到 STATUS_ICON_W×STATUS_ICON_H，最后把缩不到的右边/下边残条用底色补掉
+// ——与部队页卡片同款做法（先画后缩，不需要额外的缩放缓冲）。
+static void DrawStatusUnitIcon_(H3LoadedPcx16* scr, int creature_id, int x, int y,
+    BYTE bg_r, BYTE bg_g, BYTE bg_b)
+{
+    if (!scr || creature_id < 0) return;
+    H3LoadedDef* def = CellControl_GetPortraitDef();
+    if (!def) return;
+    const int group = 0;
+    const int frame = creature_id + 2;
+    if (!def->groups || def->groupsCount <= group) return;
+    if (!def->activeGroups || !def->activeGroups[group]) return;
+    H3LoadedDef::DefGroup* grp = def->groups[group];
+    if (!grp || grp->count <= frame || !grp->frames || !grp->frames[frame]) return;
+    const int frame_w = STATUS_ICON_FRAME_W;
+    const int frame_h = STATUS_ICON_FRAME_H;
+    const int dst_w = STATUS_ICON_W;
+    const int dst_h = STATUS_ICON_H;
+    Fill(scr, x, y, frame_w, frame_h, bg_r, bg_g, bg_b);
+    __try {
+        def->DrawToPcx16(group, frame, scr, x, y);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    const int bytes = H3BitMode::Get() == 4 ? 4 : 2;
+    for (int yy = 0; yy < dst_h; ++yy) {
+        const int sy = y + yy * frame_h / dst_h;
+        for (int xx = 0; xx < dst_w; ++xx) {
+            const int sx = x + xx * frame_w / dst_w;
+            BYTE* dst = scr->buffer + (y + yy) * scr->scanlineSize + (x + xx) * bytes;
+            const BYTE* src = scr->buffer + sy * scr->scanlineSize + sx * bytes;
+            for (int b = 0; b < bytes; ++b) dst[b] = src[b];
+        }
+    }
+    Fill(scr, x + dst_w, y, frame_w - dst_w, frame_h, bg_r, bg_g, bg_b);
+    Fill(scr, x, y + dst_h, frame_w, frame_h - dst_h, bg_r, bg_g, bg_b);
+}
+
+// 一项部队内容：生物头像 + 位置（A01 样式）+ 数量。
+static void DrawStatusUnitItem_(H3LoadedPcx16* scr, int x, int y, int entry,
+    bool highlight)
+{
+    const BYTE bg_r = highlight ? 104 : 74;
+    const BYTE bg_g = highlight ? 70 : 52;
+    const BYTE bg_b = highlight ? 28 : 24;
+    Fill(scr, x, y, STATUS_UNIT_W, STATUS_UNIT_ITEM_H, bg_r, bg_g, bg_b);
+    if (entry < 0 || entry >= s_status_unit_count) return;
+    DrawStatusUnitIcon_(scr, s_status_unit_cid[entry], x + 3, y + 2,
+        bg_r, bg_g, bg_b);
+    H3Font* font = GetSmallFont();
+    const int text_x = x + STATUS_ICON_W + 6;
+    const int text_w = STATUS_UNIT_W - (STATUS_ICON_W + 6) - 4;
+    const int text_h = STATUS_ICON_H / 2;
+    char pos[12] = {};
+    CellControl_FormatPosition(pos, sizeof(pos), s_status_unit_hex[entry]);
+    DrawTxt(scr, font, pos, text_x, y + 2, text_w, text_h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    char cnt[24] = {};
+    _snprintf(cnt, sizeof(cnt), "%d", s_status_unit_count_alive[entry]);
+    DrawTxt(scr, font, cnt, text_x, y + 2 + text_h, text_w, text_h,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+}
+
+// 第三小列：部队下拉。只有目标模式是「指定」时才出现（用户要求）；收起态里
+// 就是当前指定部队的头像+位置+数量（＝第三个下拉框，行高按它的图片高算）。
+static void DrawStatusUnitCombo_(H3LoadedPcx16* scr, int index,
+    const StatusProfileFields& status)
+{
+    if (status.target_mode[index] != H3AutoPolicy::kStatusTargetPick) return;
+    const int x = StatusUnitX_(index);
+    const int y = StatusRowY_(index);
+    const bool open = (s_status_unit_open == index);
+    Fill(scr, x, y, STATUS_UNIT_W, STATUS_SLOT_H,
+        open ? 104 : 74, open ? 70 : 52, open ? 28 : 24);
+    scr->DrawFrame(x, y, STATUS_UNIT_W, STATUS_SLOT_H,
+        (BYTE)210, (BYTE)170, (BYTE)72);
+    const int entry = FindStatusUnitByHex_(status.target_hex[index]);
+    if (entry < 0) {
+        DrawTxt(scr, GetSmallFont(), T("panel.status_unit_none"), x + 6, y,
+            STATUS_UNIT_W - 24, STATUS_SLOT_H,
+            (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    } else {
+        DrawStatusUnitItem_(scr, x, y, entry, false);
+        scr->DrawFrame(x, y, STATUS_UNIT_W, STATUS_SLOT_H,
+            (BYTE)210, (BYTE)170, (BYTE)72);
+    }
+    CellControl_DrawArrow(scr, x + STATUS_UNIT_W - 14,
+        y + STATUS_SLOT_H / 2 - 2, !open);
 }
 
 static void DrawStatusPage_(H3LoadedPcx16* scr)
@@ -972,12 +1129,20 @@ static void DrawStatusPage_(H3LoadedPcx16* scr)
     const StatusProfileFields& status =
         s_p.draft_status[s_p.selected_profile];
     for (int i = 0; i < status.slot_count; ++i) {
-        int x = 0, y = 0;
-        StatusSlotRect_(i, &x, &y);
+        const int y = StatusRowY_(i);
         char label[96] = {};
-        DrawSummonCombo_(scr, small_font, x, y, STATUS_DD_W, STATUS_DD_H,
-            StatusSpellLabel_(status.slots[i], label, sizeof(label)),
+        // 第一小列：魔法（只用法术表名，超宽由 DrawTxt 裁掉）。
+        DrawSummonCombo_(scr, small_font, StatusMagicX_(i), y,
+            STATUS_MAGIC_W, STATUS_SLOT_H,
+            StatusSpellName_(status.slots[i], label, sizeof(label)),
             s_status_dd_open == i);
+        // 第二小列：全体/指定（两项固定，默认取当前等级真能做到的那个）。
+        DrawSummonCombo_(scr, small_font, StatusModeX_(i), y,
+            STATUS_MODE_W, STATUS_SLOT_H,
+            StatusTargetModeLabel_(status.target_mode[i]),
+            s_status_mode_open == i);
+        // 第三小列：部队（选了「指定」才出现）。
+        DrawStatusUnitCombo_(scr, i, status);
     }
     if (status.slot_count < H3AutoPolicy::kStatusSlotCapacity) {
         int x = 0, y = 0;
@@ -1197,27 +1362,75 @@ static void DrawPanelToBuffer_()
 
     } else if (s_p.active_page == PAGE_STATUS) {
         DrawStatusPage_(scr);
+        H3Font* small_font = GetSmallFont();
+        // 第一小列：魔法列表（宽于收起框，读全名；已选项与悬停项各一底色）。
         if (s_status_dd_open >= 0) {
-            int x = 0, y = 0;
-            StatusSlotRect_(s_status_dd_open, &x, &y);
+            const StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
             const int first = StatusDropdownFirstRow_();
             const int rows = StatusDropdownVisibleRows_();
             for (int v = 0; v < rows; ++v) {
                 const int i = first + v;
-                const int iy = y + STATUS_DD_H + v * SmallFontRowHeight_(STATUS_ITEM_H);
-                BYTE bg_r = 68, bg_g = 42, bg_b = 18;
+                int x = 0, y = 0, w = 0, h = 0;
+                StatusMagicItemRect_(v, &x, &y, &w, &h);
+                const bool selected = s_status_dd_ids[i] == status.slots[s_status_dd_open];
+                const bool hovered = (i == s_status_dd_hover);
+                BYTE bg_r = selected ? 104 : 68, bg_g = selected ? 70 : 42;
+                BYTE bg_b = selected ? 28 : 18;
                 BYTE fr = 166, fg = 112, fb = 40;
-                if (i == s_status_dd_hover) {
+                if (hovered) {
                     bg_r = 184; bg_g = 136; bg_b = 48;
                     fr = 246; fg = 214; fb = 116;
                 }
-                Fill(scr, x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H), bg_r, bg_g, bg_b);
-                scr->DrawFrame(x, iy, STATUS_DD_W, SmallFontRowHeight_(STATUS_ITEM_H), fr, fg, fb);
+                Fill(scr, x, y, w, h, bg_r, bg_g, bg_b);
+                scr->DrawFrame(x, y, w, h, fr, fg, fb);
                 char label[96] = {};
-                DrawTxt(scr, GetSmallFont(),
-                    StatusSpellLabel_(s_status_dd_ids[i], label, sizeof(label)),
-                    x + 6, iy, STATUS_DD_W - 12, SmallFontRowHeight_(STATUS_ITEM_H),
+                DrawTxt(scr, small_font,
+                    StatusSpellName_(s_status_dd_ids[i], label, sizeof(label)),
+                    x + 6, y, w - 12, h,
                     (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            }
+        }
+        // 第二小列：全体/指定列表（固定两项）。
+        if (s_status_mode_open >= 0) {
+            const StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
+            for (int i = 0; i < H3AutoPolicy::kStatusTargetModeCount; ++i) {
+                int x = 0, y = 0, w = 0, h = 0;
+                StatusModeItemRect_(i, &x, &y, &w, &h);
+                const bool selected = status.target_mode[s_status_mode_open] == i;
+                const bool hovered = (i == s_status_mode_hover);
+                BYTE bg_r = selected ? 104 : 68, bg_g = selected ? 70 : 42;
+                BYTE bg_b = selected ? 28 : 18;
+                BYTE fr = 166, fg = 112, fb = 40;
+                if (hovered) {
+                    bg_r = 184; bg_g = 136; bg_b = 48;
+                    fr = 246; fg = 214; fb = 116;
+                }
+                Fill(scr, x, y, w, h, bg_r, bg_g, bg_b);
+                scr->DrawFrame(x, y, w, h, fr, fg, fb);
+                DrawTxt(scr, small_font, StatusTargetModeLabel_(i),
+                    x + 6, y, w - 12, h,
+                    (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            }
+        }
+        // 第三小列：部队列表（头像+位置+数量；项高＝行高，滑块按滚轮）。
+        if (s_status_unit_open >= 0) {
+            const StatusProfileFields& status =
+                s_p.draft_status[s_p.selected_profile];
+            const int first = StatusUnitFirstRow_();
+            const int rows = StatusUnitVisibleRows_();
+            for (int v = 0; v < rows; ++v) {
+                const int i = first + v;
+                int x = 0, y = 0, w = 0, h = 0;
+                StatusUnitItemRect_(v, &x, &y, &w, &h);
+                const bool selected =
+                    s_status_unit_hex[i] == status.target_hex[s_status_unit_open];
+                const bool hovered = (i == s_status_unit_hover);
+                BYTE fr = 166, fg = 112, fb = 40;
+                if (hovered) { fr = 246; fg = 214; fb = 116; }
+                DrawStatusUnitItem_(scr, x, y, i, selected || hovered);
+                scr->DrawFrame(x, y, w, h, fr, fg, fb);
             }
         }
     } else if (s_p.active_page == PAGE_ATTACK) {

@@ -148,14 +148,34 @@ inline AutoStackRule MakeDefaultRule()
     return r;
 }
 
-// 原版友方范围增益。下拉还要同时满足：英雄已学会，且法术表带
-// friendlyMass(0x800) 或 expertMassVersion(0x40)。没有范围版的不列。
+// 原版友方范围增益白名单（法术 id）。2026-10-16 用户裁定「状态保持列出的
+// 魔法改为英雄已学会的状态魔法吧（不区分全体了）」——白名单继续界定"哪些
+// 算状态魔法"，但**不再要求法术表带群体版**：会不会以魔法书为准，全体还是
+// 指定由每槽的目标模式（+当前学校等级）决定。
 static constexpr int kBuffSpellCount = 16;
 static constexpr int kBuffSpellIds[kBuffSpellCount] = {
     27, 28, 30, 31, 32, 33, 41, 43, 44, 46, 48, 49, 51, 53, 55, 58,
 };
 static constexpr int kSpellFlagFriendlyMass = 0x800;
 static constexpr int kSpellFlagExpertMass = 0x40;
+// 法术表 flags 的群体相关位（与 H3Spell::SingleTarget = 0x59E360 同口径）：
+//   0x10 singleOnly：永远单体（失明 62）；0x40：专家级才有群体版；
+//   0x20：高级（学校等级 ≥2）才有群体版。见 H3Note\英雄魔法禁施与目标免疫.md。
+static constexpr unsigned kSpellFlagSingleOnly   = 0x10u;
+static constexpr unsigned kSpellFlagAdvancedMass = 0x20u;
+static constexpr int kSlowSpellId = 54;
+// 敌方失明（法术 62，单体、心智类，H3CstSpells.hpp:111 BLIND=62）：
+// 保持状态里的单体对敌选项。
+static constexpr int kBlindSpellId = 62;
+
+// 「这是不是一个状态魔法」——只看法术 id 白名单，与是否已学、等级、群体无关。
+inline bool IsStatusSpellId(int spell_id)
+{
+    if (spell_id == kSlowSpellId || spell_id == kBlindSpellId) return true;
+    for (int id : kBuffSpellIds)
+        if (id == spell_id) return true;
+    return false;
+}
 
 inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
 {
@@ -168,28 +188,41 @@ inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
     return (spell_flags & kSpellFlagFriendlyMass) != 0
         || (spell_flags & kSpellFlagExpertMass) != 0;
 }
-static constexpr int kSlowSpellId = 54;
-// 敌方失明（法术 62，单体、心智类，H3CstSpells.hpp:111 BLIND=62）：
-// 保持状态里唯一的单体对敌选项，前提同样是英雄已学会（学校等级 > 0）。
-static constexpr int kBlindSpellId = 62;
 
-// 保持状态下拉候选资格（2026-10-16 用户裁定："这不属于全体范围，英雄会下拉选项里
-// 就要添加这个魔法"；同日再定：「会不会以魔法书的显示为准」）：
-//   **资格只看 has_spell**（HasSpell = learnedSpells|availableSpell，穿戴装备
-//   赋予也算，与原版施法面板同口径，见 attack 通道 BuildAttackMagicCandidates_）；
-//   **学校技能等级（expertise 0..3）不构成资格**——它只决定群体版与效果强度，见
-//   H3Note\英雄魔法禁施与目标免疫.md"学校 expertise0 不等于未学魔法"。
-//   失明（62）＝单体对敌、无群体版，英雄会就列；
-//   减速（54）＝群体对敌，要专家级（学校等级 3）才有群体减速；
-//   其余必须是原版群体增益（kBuffSpellIds 内且带专家级群体版）。
-// 判定收敛成这一个函数：设置面板与单测共用同一口径，避免两侧漂移。
-inline bool IsStatusCandidateSpell(int spell_id, unsigned spell_flags,
-    int expertise, bool has_spell)
+// 该状态法术在当前学校等级下能不能群体施放（＝原版非单体）：
+//   单体位（失明）永远 false；专家群体位要等级 3；高级群体位要等级 ≥2；
+//   都没有群体位（如 55）也 false。与 StatusSpellCanMass 互补的
+//   "只能单体"就是 !can_mass（原版 SingleTarget 的等价判据）。
+inline bool StatusSpellCanMass(int spell_id, unsigned spell_flags, int expertise)
 {
-    if (spell_id <= 0 || !has_spell) return false;
-    if (spell_id == kSlowSpellId) return expertise >= 3;
-    if (spell_id == kBlindSpellId) return true;
-    return IsMassBuffSpell(spell_id, spell_flags);
+    if (!IsStatusSpellId(spell_id)) return false;
+    if (expertise < 0 || expertise > 3) return false;
+    if ((spell_flags & kSpellFlagSingleOnly) != 0) return false;
+    if ((spell_flags & kSpellFlagExpertMass) != 0 && expertise < 3) return false;
+    if ((spell_flags & kSpellFlagAdvancedMass) != 0 && expertise < 2) return false;
+    return true;
+}
+
+// 每槽的目标模式（2026-10-16 用户裁定：第二小列固定「全体/指定」两项）。
+static constexpr int kStatusTargetAll  = 0;  // 全体：能群体就群体，不能则按单体兜底
+static constexpr int kStatusTargetPick = 1;  // 指定：打 target_hex 那一队
+static constexpr int kStatusTargetModeCount = 2;
+
+inline int StatusDefaultTargetMode(int spell_id, unsigned spell_flags, int expertise)
+{
+    return StatusSpellCanMass(spell_id, spell_flags, expertise)
+        ? kStatusTargetAll : kStatusTargetPick;
+}
+
+// 保持状态下拉候选资格（2026-10-16 三轮定案）：**唯一门槛是英雄会不会**——
+// has_spell = hero->HasSpell（learnedSpells|availableSpell，穿戴装备赋予也算，
+// 与原版施法面板同口径，见 attack 通道 BuildAttackMagicCandidates_）。
+// 学校技能等级（GetSpellExpertise 0..3）不是资格：它只决定群体版/效果强度
+// （"学校 expertise0 不等于未学魔法"，见 H3Note\英雄魔法禁施与目标免疫.md）。
+// 判定收敛成这一个函数：设置面板与单测共用同一口径，避免两侧漂移。
+inline bool IsStatusCandidateSpell(int spell_id, bool has_spell)
+{
+    return spell_id > 0 && has_spell && IsStatusSpellId(spell_id);
 }
 static constexpr int kBlessSpellId = 41;
 static constexpr int kPrecisionSpellId = 44;
@@ -294,8 +327,12 @@ inline void NormalizeAttackMagicRule(AttackMagicRule* rule)
 }
 
 // 保持状态与攻击列表均为方案级。slots 空槽 0；slow 为专家群体减速开关。
+// target_mode/target_hex 是每槽的目标（2026-10-16 用户要求）：全体＝原版
+// 群体施放；指定＝打 target_hex 那一队（单体），-1 表示还没指定。
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
+    int target_mode[kStatusSlotCapacity];
+    int target_hex[kStatusSlotCapacity];
     int slot_count;
     int slow;
     int refresh_turns;
@@ -307,6 +344,8 @@ inline StatusProfileFields MakeDefaultStatusFields()
 {
     StatusProfileFields fields = {};
     fields.refresh_turns = kStatusRefreshTurns;
+    for (int i = 0; i < kStatusSlotCapacity; ++i)
+        fields.target_hex[i] = -1;
     for (int i = 0; i < kAttackMagicCapacity; ++i)
         fields.attacks[i] = MakeDefaultAttackMagicRule();
     return fields;
@@ -322,10 +361,25 @@ inline void NormalizeStatusFields(StatusProfileFields* fields)
     if (requested < 0) requested = 0;
     if (requested > kStatusSlotCapacity) requested = kStatusSlotCapacity;
     int count = 0;
-    for (int i = 0; i < requested; ++i)
-        if (fields->slots[i] > 0 && fields->slots[i] < 81)
-            fields->slots[count++] = fields->slots[i];
-    for (int i = count; i < kStatusSlotCapacity; ++i) fields->slots[i] = 0;
+    // 槽位压缩时空槽的 target_mode/target_hex 跟着一起搬，否则删除中间一槽
+    // 会把后面各槽的目标错位到前一槽上。
+    for (int i = 0; i < requested; ++i) {
+        if (fields->slots[i] <= 0 || fields->slots[i] >= 81) continue;
+        const int mode = fields->target_mode[i] == kStatusTargetPick
+            ? kStatusTargetPick : kStatusTargetAll;
+        int hex = fields->target_hex[i];
+        if (hex < 0 || hex > 186) hex = -1;
+        if (mode == kStatusTargetAll) hex = -1; // 全体不用目标格，清掉陈旧值
+        fields->slots[count] = fields->slots[i];
+        fields->target_mode[count] = mode;
+        fields->target_hex[count] = hex;
+        ++count;
+    }
+    for (int i = count; i < kStatusSlotCapacity; ++i) {
+        fields->slots[i] = 0;
+        fields->target_mode[i] = kStatusTargetAll;
+        fields->target_hex[i] = -1;
+    }
     fields->slot_count = count;
     if (fields->attack_count < 0) fields->attack_count = 0;
     if (fields->attack_count > kAttackMagicCapacity) fields->attack_count = kAttackMagicCapacity;
@@ -435,6 +489,27 @@ inline int ChooseBuffToRefresh(const int* durations, int count,
     int best = -1;
     for (int i = 0; i < count; ++i) {
         if (durations[i] < 0 || durations[i] > refresh_turns) continue;
+        if (best < 0 || durations[i] < durations[best]) best = i;
+    }
+    return best;
+}
+
+// 单体（「指定」）目标选择：durations/hexes 是已通过可接受性过滤的存活队
+// （durations < 0 = 该队不可接受，不参与）。preferred_hex ≥ 0 时优先用它
+// ——玩家在第三小列里明确点过的那一队；它已不在候选里（阵亡/不可接受/换算
+// 过场）就退回"剩余回合最少者"（并列取先出现的，即己方槽位在前）。
+// 返回选中下标，无候选返回 -1。
+inline int ChooseSingleStatusTarget(const int* durations, const int* hexes,
+    int count, int preferred_hex)
+{
+    if (!durations || !hexes || count <= 0) return -1;
+    if (preferred_hex >= 0) {
+        for (int i = 0; i < count; ++i)
+            if (durations[i] >= 0 && hexes[i] == preferred_hex) return i;
+    }
+    int best = -1;
+    for (int i = 0; i < count; ++i) {
+        if (durations[i] < 0) continue;
         if (best < 0 || durations[i] < durations[best]) best = i;
     }
     return best;

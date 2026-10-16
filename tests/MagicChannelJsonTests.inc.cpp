@@ -80,6 +80,12 @@ static void TestMagicChannelJson()
         status.slot_count = 2;
         status.slots[0] = 27;
         status.slots[1] = 41;
+        // 每槽目标（2026-10-16 三小列布局）：第 1 槽「指定」某一格，
+        // 第 2 槽「全体」（不带目标格）——两态都要过真实 JSON 往返。
+        status.target_mode[0] = kStatusTargetPick;
+        status.target_hex[0] = 50 + p;
+        status.target_mode[1] = kStatusTargetAll;
+        status.target_hex[1] = -1;
         status.slow = p % 2;
         status.refresh_turns = 1 + p;
         status.attack_count = 3;
@@ -115,6 +121,11 @@ static void TestMagicChannelJson()
         Check(decoded->status[p].attacks[0].position_count == 1
                 && decoded->status[p].attacks[0].positions[0] == 0,
             "area spell anchor survives each profile");
+        Check(decoded->status[p].target_mode[0] == kStatusTargetPick
+                && decoded->status[p].target_hex[0] == 50 + p
+                && decoded->status[p].target_mode[1] == kStatusTargetAll
+                && decoded->status[p].target_hex[1] == -1,
+            "per-slot 全体/指定 target survives production codec roundtrip");
         Check(decoded->rules[p][p].action == AA_MOVE
                 && decoded->rules[p][20 - p].target.meleePairCount == 2
                 && decoded->forcefield[p].anchor_hex[1] == 120 + p,
@@ -229,6 +240,48 @@ static void TestMagicChannelJson()
         attack = MagicJsonAttack_();
         attack.erase(missing);
         CheckMagicJsonRejected_(MagicJsonStatus_(attack), "missing attack field rejected");
+    }
+    // 每槽目标（2026-10-16）：序列化必带两个键；旧档缺键回默认（全体/-1），
+    // 越界模式/格按归一收敛而不是整档拒绝（NormalizeStatusFields 再兜一次）。
+    {
+        StatusProfileFields st = MakeDefaultStatusFields();
+        st.slot_count = 2;
+        st.slots[0] = 27;
+        st.slots[1] = 62;
+        st.target_mode[0] = kStatusTargetPick;
+        st.target_hex[0] = 33;
+        BattleJson json = StatusToJson_(st);
+        Check(json.contains("targetModes") && json["targetModes"].is_array()
+                && json["targetModes"].size() == 2
+                && json["targetModes"][0] == kStatusTargetPick
+                && json["targetModes"][1] == kStatusTargetAll,
+            "status JSON serializes per-slot target modes");
+        Check(json.contains("targetHexes") && json["targetHexes"].size() == 2
+                && json["targetHexes"][0] == 33 && json["targetHexes"][1] == -1,
+            "status JSON serializes per-slot target hexes");
+        StatusProfileFields decoded_status = MakeDefaultStatusFields();
+        Check(ParseStatusJson_(json, &decoded_status)
+                && decoded_status.target_mode[0] == kStatusTargetPick
+                && decoded_status.target_hex[0] == 33,
+            "status JSON target fields parse back");
+        json.erase("targetModes");
+        json.erase("targetHexes");
+        decoded_status = MakeDefaultStatusFields();
+        Check(ParseStatusJson_(json, &decoded_status)
+                && decoded_status.slot_count == 2
+                && decoded_status.target_mode[0] == kStatusTargetAll
+                && decoded_status.target_hex[0] == -1,
+            "status JSON without target fields falls back to 全体 and no hex");
+        json = StatusToJson_(st);
+        json["targetModes"] = BattleJson::array({9, -3});
+        json["targetHexes"] = BattleJson::array({999, -5});
+        decoded_status = MakeDefaultStatusFields();
+        Check(ParseStatusJson_(json, &decoded_status)
+                && decoded_status.target_mode[0] == kStatusTargetAll
+                && decoded_status.target_hex[0] == -1
+                && decoded_status.target_mode[1] == kStatusTargetAll
+                && decoded_status.target_hex[1] == -1,
+            "out-of-range target mode and hex normalize to 全体 without target");
     }
     BattleJson rule = RuleToJson_(MakeDefaultRule());
     rule["spells"] = BattleJson::array({1});

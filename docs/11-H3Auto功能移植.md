@@ -422,21 +422,41 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 - 版本号由用户手动维护（AGENTS.md 口径），agent 不自动 bump。
 - `README.md` 已同步为新口径（`Packs\热血插件\`、`D:\Heroes3\Heroes3_2026.10.09`，并列出 `pcx\HA_*.pcx` 与 `lang\zh-CN.ini`）；`使用说明.txt` 的安装节同批更新，并新增「不要再同时加载 H3Auto.dll」提示。
 
-### 7.6 保持状态通道：配置字段、优先级与敌方失明（2026-10-16）
+### 7.6 保持状态通道：配置字段、三小列布局与执行口径（2026-10-16）
 
 「保持状态」页的配置随方案存档（`Games\<地图>\Auto\*.json`），字段落在 `StatusProfileFields`（`PolicyCore.hpp`）：
 
 | 字段 | 含义 | 取值 |
 |---|---|---|
-| `buffs[]`（容量 8） | 保持的法术列表，空槽 = 0 | 法术 id 1..80 |
+| `slots[]`（容量 8，JSON 键 `buffs`） | 保持的法术列表，空槽 = 0 | 法术 id 1..80 |
+| `targetModes[]`（容量 8） | 每槽目标模式：0 = 全体，1 = 指定 | 0/1，**缺键 = 0** |
+| `targetHexes[]`（容量 8） | 「指定」时玩家点的那一队所在格 | -1（全体）/ 0..186，**缺键 = -1** |
 | `slow` | 敌方减速开关（历史保留字段） | 0/1 |
 | `refresh_turns` | 补状态阈值：剩余回合 ≤ 此值就补 | 1..9，默认 1 |
 
-**下拉候选（`BuildStatusCandidates_`，`SettingsDlg.inc.cpp`）**：失明、减速置顶，其后是 16 个群体增益（`kBuffSpellIds`）。**"会不会"一律以英雄魔法书为准**——`hero->HasSpell(spell)`（`learnedSpells|availableSpell`，+0x3EA/+0x430 位或，装备赋予也算，与原版施法面板同口径；2026-10-16 用户裁定「英雄装备了魔法书之后…会不会，你应该以魔法书的显示为准」，与 attack 通道同款）。学校技能等级（`GetSpellExpertise` 0..3，魔法系别熟练度）**不构成资格**，只决定群体版与效果强度：减速（54）与群体增益仍要专家级（≥3，那才有群体版，属于"槽位能不能生效"而非"会不会"）；失明（62）单体、有书即列。
-**候选资格统一在 `H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise, has_spell)`（`PolicyCore.hpp`）判定**（2026-10-16 定案）：`has_spell` 是唯一资格门槛，等级只作用于减速/增益的群体版要求；收敛成一个函数是为了让设置面板与单测共用同一口径，避免两侧漂移。**已选项剔除**（2026-10-16 最终口径：中间一轮曾按「下拉选项不用把已选择的去掉」改成不剔除，用户复核后定案改回——同一法术不重复占槽；正在编辑的槽不算已占）。
+`targetModes`/`targetHexes` 是 2026-10-16 新增键，**故意不升根版本号**（仍是 7）：旧档没有这两个键时按「全体 + 无目标格」读入，即改动前的行为，所以老方案照常可用（`ParseStatusJson_` 里这两个键是可选的，值域由 `NormalizeStatusFields` 兜底：模式钳到 0/1、格钳到 -1 或 0..186、全体强制清格、槽位压缩时与 `slots` 同步搬移、尾部槽复位）。
+
+**下拉候选（`BuildStatusCandidates_`，`SettingsDlg.inc.cpp`）**：失明、减速置顶，其后是 16 个群体增益（`kBuffSpellIds`）。**"会不会"一律以英雄魔法书为准**——`hero->HasSpell(spell)`（`learnedSpells|availableSpell`，+0x3EA/+0x430 位或，装备赋予也算，与原版施法面板同口径；2026-10-16 用户裁定「英雄装备了魔法书之后…会不会，你应该以魔法书的显示为准」，与 attack 通道同款）。学校技能等级（`GetSpellExpertise` 0..3，魔法系别熟练度）**不构成资格、也不影响列举**：2026-10-16 用户最终裁定「状态保持列出的魔法改为英雄已学会的状态魔法（不区分全体了）」——**资格只剩"魔法书里有它 + 是状态魔法"两条**，不再要求法术自带群体版（原来减速与群体增益要求专家级的那层门槛一并去掉）。
+**候选资格统一在 `H3AutoPolicy::IsStatusCandidateSpell(spell, has_spell)`（`PolicyCore.hpp`）判定**：`has_spell` 是唯一门槛（外加 `IsStatusSpellId` 白名单），收敛成一个函数是为了让设置面板与单测共用同一口径，避免两侧漂移。**已选项剔除**（2026-10-16 最终口径：中间一轮曾按「下拉选项不用把已选择的去掉」改成不剔除，用户复核后定案改回——同一法术不重复占槽；正在编辑的槽不算已占）。
 **候选顺序：失明、减速置顶**（2026-10-16 玩家反馈"失明没加出来"后调整；原实现把失明排在 18 个候选的末位）。「＋」新增槽的默认项跳过对敌两项，仍取第一个友方增益。
-**未学会时的界面提示：按玩家要求不做**（玩家原话「没学会时明说 这个不需要」）。取而代之的是**日志留痕**：`BuildStatusCandidates_` 构建时打一行头信息 + 每个候选一行 `[Panel] status cand spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d`（均 debug 级），"下拉里为什么没有 X"可从日志直接读出——`used=1`＝已被别的槽占用，`book=0`＝魔法书里没有，`book=1 exp<3`＝有书但等级不够群体版。
-**槽位文案**：`StatusSpellLabel_` 对所有对敌法术追加「（敌方）」后缀，减速（54）与失明（62）都显示为「xxx（敌方）」。
+**未学会时的界面提示：按玩家要求不做**（玩家原话「没学会时明说 这个不需要」）。取而代之的是**日志留痕**：`BuildStatusCandidates_` 构建时打一行头信息 + 每个候选一行 `[Panel] status cand spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d`（均 debug 级），"下拉里为什么没有 X"可从日志直接读出——`used=1`＝已被别的槽占用，`book=0`＝魔法书里没有。
+**槽位文案：只用游戏法术表里的名字**（2026-10-16 用户裁定去掉「（敌方）」后缀），过宽时截断——`StatusSpellLabel_` 已删除。
+
+#### 三小列布局（2026-10-16 用户裁定，`PanelLayout.hpp`）
+
+一大行 = 一个槽，**两大列 × 四行**装下 8 个槽（`STATUS_BIG_COLS=2` / `STATUS_ROWS=4`），每大列宽 `(531-10)/2 = 260`。每大列内分**三小列**：
+
+| 小列 | 宽度 | 内容 |
+|---|---|---|
+| ① 魔法 | `STATUS_MAGIC_W = 72`（按 4 个汉字宽 + 内边距 + 箭头） | 该槽的法术，展开列表宽 `STATUS_MAGIC_LIST_W = 122`（浮层，压到 660 边界之外不越界） |
+| ② 全体/指定 | `STATUS_MODE_W = 46`（按 2 个汉字宽） | 固定两项：`panel.status_target_all`（全体）/ `panel.status_target_pick`（指定） |
+| ③ 部队 | `STATUS_UNIT_W = 134`（剩余宽度） | **仅当②选了「指定」才存在**：下拉列出战场双方**存活**部队，每项＝生物头像 + 位置（`A01` 式，`CellControl_FormatPosition`）+ 数量，项高 = 行高 |
+
+- 行高 `STATUS_SLOT_H = 60`：按第三小列的图片高度定（头像帧 60×66 内取 56 行，再各留 2px 边距，即 `STATUS_ICON_H(56) + 4`），四行（含 `STATUS_ROW_GAP=4`）收在内容区底 `MAGIC_LIST_BOTTOM` 之上（`STATUS_ROW0_Y = 190`，末行底 442 ≤ 448）。
+- 部队候选：`BuildStatusUnitCandidates_` 按**己方优先、再敌方**遍历双方 21 槽，只收 `count_current > 0` 且 `position` 有效者；`target_hex` 存格号，模型换算由原版负责。
+- 第二小列的**默认值＝当前等级真能做到的那一项**（`StatusDefaultTargetModeHere_` → `StatusSpellCanMass`：能做到群体就默认「全体」，单体就默认「指定」）。玩家**选了做不到的那一项时按能做到的方式施放**，并在状态栏提示一次（`panel.status_target_fallback`，日志同款 info）——用户 2026-10-16 裁定的 B 方案：不禁止选择，也不静默。
+- 下拉**按空间上下择一展开**（`ListVisibleRowsInArea_`/`ListOriginYInArea_`，PanelLayout.hpp 纯函数）：优先向下，下方行数少于上方就改向上。第 3/4 行向下只剩 0~1 行，不翻上去会"点开是空的、选项还点不中"。可见行数、列表原点、命中矩形与滚轮共用同一组函数（`StatusMagicItemRect_`/`StatusModeItemRect_`/`StatusUnitItemRect_`）。
+- 部队列不可见（选了全体）时，点击该空白区不产生任何动作；右击整行（含空白区）删除该槽。
 
 **每回合最多补一个法术，优先级 = 友方增益 → 敌方失明 → 敌方减速**（`TryMaintainStatus_`）。失明排在减速之前是有意为之：失明通常只约一回合时长（被攻击即醒、到期就得续），减速是长时效群体法术；两者同时到期时先补失明。
 
@@ -447,13 +467,23 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 3. 取剩余最少者；并列时取威胁最大者：`单位价值 = aiValue > 0 ? aiValue : (fightValue > 0 ? fightValue : hitPoints)`，`威胁 = 单位价值 × 当前数量`（原版军队价值口径，见 H3Note）。
 4. 单体法术**不适用**减速那套「敌方任一队已覆盖即整体达标」的语义 A：一队到期、另一队还够时，仍然补到期的那队。无候选则不施放。
 
-**施放路径**：门槛 = `HeroMagicAllowed_`（魔法书 / 驻地 / 双方禁魔球 / 诅咒地 / 披风 / `hero->HasSpell` / 法力 / 本回合未施法）+ 学校等级 `> 0`。单体必须带目标格：先 `cm->CanCastSpellAtCoord(62, exp, hex)` 预检，再 `cm->CastSpell(62, hex, 0, -1, exp, spell_power)`（其余状态法术仍传 `-1` = 无目标群体施放）。施后验证**只看被选中那一队**的 `active_spell_duration[62]`：拿到即留 info，没拿到即认定全免疫/全抵抗，`g_status_immune_mask` 置位、本场跳过。
+**施放路径**：门槛 = `HeroMagicAllowed_`（魔法书 / 驻地 / 双方禁魔球 / 诅咒地 / 披风 / `hero->HasSpell` / 法力 / 本回合未施法）。**施法目标格由槽位决定**（2026-10-16 起统一成一个 `cast_hex`）：
 
-**日志**（排查玩家反馈直接可用）：`[Status] 失明目标 slot=… cid=… count=… remain=… th=… value=… hex=… turn=…`（info，含"为什么是它"）、`[Status] cast done spell=62 …`（info）、`[Status] blind branch want=… exp=… pick=… th=… turn=… cand=… living=… masked=…`（debug）、无候选时一次性 info「`[Status] spell=62 当前没有可接受失明的存活敌军，不施放`」。
+| 情形 | 群体可行性 | 实际施放 |
+|---|---|---|
+| 模式＝全体，当前等级有群体版 | `StatusSpellCanMass` 真 | `CastSpell(spell, -1, …)` 无目标群体施放 |
+| 模式＝全体，当前等级没有群体版（如非专家减速、失明） | 假 | 按**单体**施放：`CanCastSpellAtCoord(spell, exp, hex)` 预检 → `CastSpell(spell, hex, …)`，目标格取候选里的那一队；info 提示"选了全体但当前等级没有群体版，已按单体施放"（每场每法术一次） |
+| 模式＝指定，该队有效 | 假（单体） | 单体打玩家点的那一格（`target_hex`）；该队已阵亡/不可接受/剩余还够则本回合不施放（debug 留痕） |
+| 模式＝指定，但当前等级只有群体版 | 真 | 原版会强制群体施放，**按全体施放**（`cast_hex = -1`）+ info 提示"选了指定但当前等级只有群体版，已按全体施放" |
+| 单体法术（失明 / 指定）候选里没有可接受部队 | — | 不施放（不空放、不弹阻止框） |
 
-**测试**：`tests\PolicyCoreTests.cpp` 覆盖 `CreatureCanReceiveStatusSpell(62, …)`（亡灵 / 心智免疫拒绝、普通生物接受）与 `ChooseBlindTarget` 的选择序（同剩余取威胁最大且 `mass == 0`、阈值 0 忽略未到期、还够的不动、单体无整体覆盖规则、`-1` 不参与、空指针容错、无敌人不施放）。策略层为生产与单测共用文件，故两侧同源。
+技能等级只作**施法实参**（0..3 截断，等级交原版内部重算），不再作资格；群体与否最终由原版 `H3Spell::SingleTarget(spell, expertise)` 决定，插件的 `StatusSpellCanMass` 与它互补（同一套 flags 判据，单测里与旧口径 `MagicHasMassVersion` 逐样本对拍）。施后验证**只看本次施放的目标**（单体看被选中那一队，群体看该侧所有存活队）的 `active_spell_duration[spell]`：拿到即留 info，没拿到即认定全免疫/全抵抗，`g_status_immune_mask` 置位、本场跳过。
 
-**已知边界（待游戏内验收）**：失明的实际命中与"醒来"由原版处理，插件只按 `active_spell_duration` 记剩余；被抵抗时按上面的整场跳过机制处理，不做逐次重试。
+**日志**（排查玩家反馈直接可用）：`[Status] 失明目标 slot=… cid=… count=… remain=… th=… value=… hex=… turn=…`（info，含"为什么是它"）、`[Status] cast done spell=… hex=… …`（info，`hex=-1` 即无目标群体施放）、`[Status] buff pick spell=… remain=… th=… turn=… hex=…` / `[Status] blind branch want=… exp=… pick=… …` / `[Status] slow branch want=… mode=… mass=… exp=… …`（debug）、无候选时一次性 info「`[Status] spell=… 当前没有可接受的存活部队，不施放`」。
+
+**测试**：`tests\PolicyCoreTests.cpp` 覆盖 `CreatureCanReceiveStatusSpell`（60/62 的亡灵与心智免疫拒绝、普通生物接受）、`ChooseBlindTarget` 的选择序（同剩余取威胁最大且 `mass == 0`、阈值 0 忽略未到期、还够的不动、单体无整体覆盖规则、`-1` 不参与、空指针容错、无敌人不施放）、新增的 `IsStatusCandidateSpell`（只看魔法书 + 白名单）、`StatusSpellCanMass`/`StatusDefaultTargetMode`（群体可行性 + 默认模式）、`ChooseSingleStatusTarget`（优先指定格、失效退回剩余最少、不可接受不选）与 `NormalizeStatusFields` 的模式/格同步压缩，以及保持状态页几何（两列四行容量、三小列宽度自洽、四行不越底、**每个槽行的三个下拉都至少能看到 1 行且列表原点在内容区内**）。策略层为生产与单测共用文件，故两侧同源。
+
+**已知边界（待游戏内验收）**：失明的实际命中与"醒来"由原版处理，插件只按 `active_spell_duration` 记剩余；被抵抗时按上面的整场跳过机制处理，不做逐次重试。第三小列的部队候选含敌方，**不代表该法术对敌人有效**（如增益选中敌军仍会被原版阻止）——候选只保证"活着且位置有效"，可施与否交 `CanCastSpellAtCoord` 与原版。
 
 ### 7.7 打铁帮助模态（右上角「?」）的现行内容（2026-10-16）
 
