@@ -357,7 +357,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 保持状态与攻击魔法两个 Tab 的魔法下拉项，在法术名称后追加「(等级系别)」，例如 `迟缓 (高级土系)`。
 
-- 系别从游戏 `H3Spell` 表的 `school` 字段读取（气/火/水/土），不使用固定法术编号映射。
+- 系别从游戏 `H3Spell` 表的 `school` 位掩码读取（气/火/水/土），不使用固定法术编号映射；魔法神箭（`MAGIC_ARROW`）为四系特殊法术，按英雄四系魔法技能最高等级及对应系别显示。
 - 等级通过当前战场英雄 `GetSpellExpertise(spell, specialTerrain)` 实时读取，按 0..3 显示「无/初级/高级/专家」。
 - 两个 Tab 共用 `StatusSpellNameWithExpertise_`，只改变下拉显示，不改变魔法资格、群体判定、目标选择或施法参数。
 - 中文内置文案与 `lang/zh-CN.ini` 同步；较长下拉名称使用现有宽下拉区域，游戏内字体与实际显示仍由用户验收。

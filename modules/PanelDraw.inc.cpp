@@ -1057,24 +1057,48 @@ static const char* StatusSpellNameWithExpertise_(int spell_id, char* out, int ou
     int school = 0;
     int expertise = 0;
     __try {
-        // H3Spell: name +0x10, shortName +0x14, level +0x18, school +0x1C。
-        school = *reinterpret_cast<const int*>(table + spell_id * 0x88 + 0x1C);
+        const H3Spell& spell = H3Spell::Get()[spell_id];
+        school = static_cast<int>(spell.school);
         _BattleMgr_* mgr = o_BattleMgr;
         H3CombatManager* cm = H3CombatManager::Get();
         const int side = mgr ? ResolveHumanSide_(mgr) : -1;
-        if (cm && mgr && side >= 0 && side <= 1 && cm->hero[side])
+        const bool all_schools = spell_id == h3::NH3Spells::NSpells::MAGIC_ARROW;
+        if (all_schools) {
+            // 魔法神箭是四系法术：取英雄四系魔法技能中的最高等级。
+            static const int kSchools[] = {
+                h3::NH3Spells::NSchool::AIR, h3::NH3Spells::NSchool::FIRE,
+                h3::NH3Spells::NSchool::WATER, h3::NH3Spells::NSchool::EARTH};
+            static const int kSkills[] = {
+                h3::eSecondary::AIR_MAGIC, h3::eSecondary::FIRE_MAGIC,
+                h3::eSecondary::WATER_MAGIC, h3::eSecondary::EARTH_MAGIC};
+            school = kSchools[0];
+            expertise = 0;
+            if (cm && mgr && side >= 0 && side <= 1 && cm->hero[side]) {
+                H3Hero* hero = reinterpret_cast<H3Hero*>(cm->hero[side]);
+                for (int i = 0; i < 4; ++i) {
+                    const int level = hero->secSkill[kSkills[i]];
+                    if (i == 0 || level > expertise) {
+                        expertise = level;
+                        school = kSchools[i];
+                    }
+                }
+            }
+        } else if (cm && mgr && side >= 0 && side <= 1 && cm->hero[side]) {
             expertise = reinterpret_cast<H3Hero*>(cm->hero[side])->GetSpellExpertise(
                 spell_id, cm->specialTerrain);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         school = 0;
         expertise = 0;
     }
     if (expertise < 0 || expertise > 3) expertise = 0;
+    const int known_school = school & h3::NH3Spells::NSchool::ALL;
     const char* school_text = nullptr;
-    if (school == h3::NH3Spells::NSchool::AIR) school_text = T("magic.school_air");
-    else if (school == h3::NH3Spells::NSchool::FIRE) school_text = T("magic.school_fire");
-    else if (school == h3::NH3Spells::NSchool::WATER) school_text = T("magic.school_water");
-    else if (school == h3::NH3Spells::NSchool::EARTH) school_text = T("magic.school_earth");
+    // school 是位掩码；普通法术通常只有一位，取设置的那一系，避免等值判断漏掉组合值。
+    if (known_school & h3::NH3Spells::NSchool::AIR) school_text = T("magic.school_air");
+    else if (known_school & h3::NH3Spells::NSchool::FIRE) school_text = T("magic.school_fire");
+    else if (known_school & h3::NH3Spells::NSchool::WATER) school_text = T("magic.school_water");
+    else if (known_school & h3::NH3Spells::NSchool::EARTH) school_text = T("magic.school_earth");
     if (!school_text) {
         _snprintf(out, out_size, "%s", name);
         return out;
