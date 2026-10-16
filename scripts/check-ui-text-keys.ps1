@@ -4,10 +4,11 @@
 # 上直接可见的占位串。cell.siege_hint 曾经因为「代码在用、内置表和 lang 文件都
 # 没有」而在面板上显示这行（H3Auto 源插件就漏了这个键，移植时一并带过来）。
 #
-# 本脚本核对三处：
+# 本脚本核对四处：
 #   1) modules 下 T("...") 的字面量引用
 #   2) UiTexts.inc.cpp 内置表 kUiTextDefaults
 #   3) lang\<语言>.ini（默认 zh-CN，可用 -Lang 换）
+#   4) 单行文案宽度门禁：画在固定单行框里的键不许超宽（超了只会被裁掉右半截）
 #
 # 用法（任意目录）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-ui-text-keys.ps1
@@ -96,5 +97,48 @@ if ($unused.Count -gt 0) {
     Write-Output ('[提示] 内置表有、代码未直接引用的键 {0} 个（可能由其它机制/数组使用，仅提示）' -f $unused.Count)
 }
 
-if ($undefined.Count -gt 0) { exit 1 }
+# ---- 4) 单行文案宽度门禁（超长只会被裁，不会换行）----
+#
+# 背景：面板上有几句文案画在**固定高度的单行框**里，例如保持状态页力盾落点下面
+# 那行 —— DrawTxt(scr, small_font, T("panel.status_note"), GRID_FRAME_X,
+# STATUS_NOTE_Y, GRID_FRAME_W, 18, ...)。超长不会换行、只会把右半截裁掉：
+# 2026-10-16 用户实测报过（我当时把这句从 37.5 全角宽改到 65.5 全角宽）。
+#
+# 判据用「半角单位」：全角字符 = 2，其余 = 1。上限来源：panel.status_note 的框宽
+# GRID_FRAME_W = 531；本机小字体实测约 13px/全角，而旧版 37.5 全角宽（≈488px）
+# 经用户实机确认完整可见 ⇒ 取 37 全角 = 74 半角为上限（还留了余量）。
+# 新增条目：凡是画在 `DrawTxt(..., <宽>, <小高度>)` 单行框里的键，按同法量一次再登记。
+$singleLineBudget = @{
+    'panel.status_note' = 74
+}
+
+$fullWidthRe = '[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]'
+$overWide = @()
+foreach ($key in ($singleLineBudget.Keys | Sort-Object)) {
+    $budget = $singleLineBudget[$key]
+    $m = [Regex]::Match($texts, '\{\s*"' + [Regex]::Escape($key) + '"\s*,\s*"([^"]*)"')
+    if (-not $m.Success) {
+        $overWide += ('{0}：内置表里找不到这个键' -f $key)
+        continue
+    }
+    $val = $m.Groups[1].Value
+    $fw = ([Regex]::Matches($val, $fullWidthRe)).Count
+    $half = $fw * 2 + ($val.Length - $fw)
+    if ($half -gt $budget) {
+        $overWide += ('{0}：{1} 半角宽 > 上限 {2}（{3}）' -f $key, $half, $budget, $val)
+    } else {
+        Write-Output ('  ok {0}：{1} / {2} 半角宽' -f $key, $half, $budget)
+    }
+}
+
+Write-Output ''
+if ($overWide.Count -gt 0) {
+    Write-Output ('[失败] 单行文案超宽（画面只显示前半截，静默截断）共 {0} 个：' -f $overWide.Count)
+    $overWide | ForEach-Object { Write-Output ('  x ' + $_) }
+    Write-Output '  修法：缩短文案，或改成两行/加宽框；别只加大框高。'
+} else {
+    Write-Output '[通过] 已登记的单行文案都在宽度预算内'
+}
+
+if ($undefined.Count -gt 0 -or $overWide.Count -gt 0) { exit 1 }
 exit 0

@@ -37,7 +37,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "tips.tab_status", "保持状态：力盾落点、己方增益与敌方减益（下拉按目标分两大类）" },
     { "tips.tab_attack", "攻击魔法：智能攻击配置，一行两条、控件按魔法类别出现" },
     { "tips.forcefield_pick", "力盾落点：点＋新增，点已有格重选，右键删除；最多两个。点选中右键或 ESC 取消。盾在不补，消失后最高优先补施；每回合只能补一个" },
-    { "panel.status_note", "下拉按英雄魔法书列，分「己方」（可持续增益）与「敌方」（持续减益）两大类；每槽选法术、全体/指定，指定后按该法术目标选己方或敌方部队" },
+    { "panel.status_note", "下拉按英雄魔法书列，分己方/敌方；每槽选法术、全体/指定，指定后选部队" },
     { "panel.status_group_friendly", "—— 己方 ——" },
     { "panel.status_group_enemy", "—— 敌方 ——" },
     { "panel.status_add", "+" },

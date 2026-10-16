@@ -448,6 +448,7 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 **"会不会"一律以英雄魔法书为准**——`hero->HasSpell(spell)`（`learnedSpells|availableSpell`，+0x3EA/+0x430 位或，装备赋予也算，与原版施法面板同口径；2026-10-16 用户裁定「英雄装备了魔法书之后…会不会，你应该以魔法书的显示为准」，与 attack 通道同款）。学校技能等级（`GetSpellExpertise` 0..3，魔法系别熟练度）**不构成资格、也不影响列举**：2026-10-16 用户最终裁定「状态保持列出的魔法改为英雄已学会的状态魔法（不区分全体了）」——**资格只剩"魔法书里有它 + 是状态魔法"两条**，不再要求法术自带群体版（原来减速与群体增益要求专家级的那层门槛一并去掉）。
 **候选资格统一在 `H3AutoPolicy::IsStatusCandidateSpell(spell, has_spell)`（`PolicyCore.hpp`）判定**：`has_spell` 是唯一门槛（外加 `IsStatusSpellId` 白名单，即 `IsFriendlyStatusSpell || IsEnemyStatusSpell`），收敛成一个函数是为了让设置面板与单测共用同一口径，避免两侧漂移。**已选项剔除**（2026-10-16 最终口径：中间一轮曾按「下拉选项不用把已选择的去掉」改成不剔除，用户复核后定案改回——同一法术不重复占槽；正在编辑的槽不算已占）。
 **未学会时的界面提示：按玩家要求不做**（玩家原话「没学会时明说 这个不需要」）。取而代之的是**日志留痕**：`BuildStatusCandidates_` 构建时每个候选一行 `[Panel] status cand grp=%d spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d`（debug 级，`grp` = 1 己方 / 2 敌方），"下拉里为什么没有 X"可从日志直接读出——`used=1`＝已被别的槽占用，`book=0`＝魔法书里没有。
+**说明文案受宽度约束**（2026-10-16 用户实测报「力盾落点 下面那行的文本过长…没显示全」后定）：力盾落点下面那行 `panel.status_note` 画在**固定高度的单行框**里（`DrawTxt(…, GRID_FRAME_W, 18, …)`，`PanelDraw.inc.cpp`），超长不换行、只裁右半截；它与阈值行之间只有 26px，塞不下第二行。现值 `下拉按英雄魔法书列，分己方/敌方；每槽选法术、全体/指定，指定后选部队` = 34 全角宽（≈443px / 框宽 531）；**上限锚在"实机确认可见"的 37.5 全角宽**，并由 `scripts\check-ui-text-keys.ps1` 的 `$singleLineBudget`（`panel.status_note = 74 半角宽`）把关。改这句话前先量宽度。注意面板底部的 `tips.*` 提示**不受**此约束——它们经 `tips.color_wrap` 进状态栏（富文本）。
 **槽位文案：只用游戏法术表里的名字**（2026-10-16 用户裁定去掉「（敌方）」后缀），过宽时截断——`StatusSpellLabel_` 已删除。分组由**标题行**承担，不再往法术名后面挂后缀。
 
 #### 三小列布局（2026-10-16 用户裁定，`PanelLayout.hpp`）
