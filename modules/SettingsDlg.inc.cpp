@@ -516,6 +516,30 @@ static int FindCastTimingCandidate_(const SpellCastTimingFields& f)
     return -1;
 }
 
+// 切换「等待后」勾选（默认不勾）。勾选语义：该部队先「等待」，等本轮它再次
+// 被交权时才施法（执行端见 AutoExecute 的施法时机门闸）。
+static void ToggleCastTimingWait_()
+{
+    SpellCastTimingFields& ct = s_p.draft_cast_timing[s_p.selected_profile];
+    ct.after_wait = ct.after_wait ? 0 : 1;
+    H3AutoPolicy::NormalizeSpellCastTiming(&ct);
+    LogInfo("[Panel] 施法时机等待后=%d 部队 kind=%d side=%d val=%d occ=%d (方案%d)",
+        (int)ct.after_wait, (int)ct.target_kind, (int)ct.target_side,
+        (int)ct.target_value, (int)ct.target_occurrence,
+        s_p.selected_profile + 1);
+}
+
+// 「等待后」复选框命中区（方框 + 文字，整行按部队框高 60 取，点哪儿都算）。
+// 只在「指定部队」模式存在——「首次行动」没有"该部队"可等，控件同时不画。
+// 几何与绘制同源：都用 PanelLayout 里的 ARMY_TIMING_WAIT_* 常量。
+static bool CastTimingWaitCheckboxHit_(int px, int py)
+{
+    if (s_p.draft_cast_timing[s_p.selected_profile].mode != CAST_TIMING_UNIT)
+        return false;
+    return PointInRect_(px, py, ARMY_TIMING_WAIT_X, ARMY_TIMING_Y,
+        ARMY_TIMING_WAIT_HIT_W, STATUS_UNIT_ITEM_H);
+}
+
 static void StatusResetDropdowns_()
 {
     s_status_dd_open = -1;
@@ -2187,6 +2211,14 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                 return;
             }
             if (s_cast_timing_dd_kind == 2) {
+                // 「等待后」复选框：展开态下也可见可点（部队列表画在 60px 框下方，
+                // 盖不到它）；点它切勾选并顺手收起列表。
+                if (CastTimingWaitCheckboxHit_(px, py)) {
+                    ToggleCastTimingWait_();
+                    ResetCastTimingDropdown_();
+                    DrawPanelToBuffer_();
+                    return;
+                }
                 if (s_cast_timing_unit_count > 0) {
                     const int first = CastTimingFirstRow_();
                     const int rows = CastTimingListRows_();
@@ -2196,11 +2228,17 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         if (!PointInRect_(px, py, ARMY_TIMING_UNIT_X, y,
                                 ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H))
                             continue;
+                        // 换部队只换身份，保留「等待后」勾选（它是时机开关，不是
+                        // 部队属性）：候选模板里该位恒为 0，直接赋值会把勾选抹掉。
+                        const uint8_t keep_after_wait = ct.after_wait;
                         ct = s_cast_timing_unit_id[i];
                         ct.mode = CAST_TIMING_UNIT;
-                        LogInfo("[Panel] 施法时机指定部队 kind=%d side=%d val=%d occ=%d (方案%d)",
+                        ct.after_wait = keep_after_wait;
+                        H3AutoPolicy::NormalizeSpellCastTiming(&ct);
+                        LogInfo("[Panel] 施法时机指定部队 kind=%d side=%d val=%d occ=%d wait=%d (方案%d)",
                             (int)ct.target_kind, (int)ct.target_side,
                             (int)ct.target_value, (int)ct.target_occurrence,
+                            (int)ct.after_wait,
                             s_p.selected_profile + 1);
                         ResetCastTimingDropdown_();
                         DrawPanelToBuffer_();
@@ -2675,6 +2713,12 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
 
         // ---- Army 首行：施法时机下拉（收起态点击展开）----
         if (s_p.active_page == PAGE_ARMY) {
+            // 「等待后」复选框（只在指定部队模式）：点方框或文字都切换勾选。
+            if (CastTimingWaitCheckboxHit_(px, py)) {
+                ToggleCastTimingWait_();
+                DrawPanelToBuffer_();
+                return;
+            }
             if (PointInRect_(px, py, ARMY_TIMING_MODE_X, ARMY_TIMING_Y,
                     ARMY_TIMING_MODE_W, ARMY_TIMING_H)) {
                 BuildCastTimingCandidates_();

@@ -113,6 +113,10 @@ $singleLineBudget = @{
     # 部队页首行标签框 ARMY_TIMING_LABEL_W = 86：2026-10-17 用户实测「每回合施法时机」
     # （6 全角 = 12 半角）会被裁成「每回合施法时」，5 全角 = 10 半角完整可见 ⇒ 上限取 10。
     'panel.cast_timing_label' = 10
+    # 「等待后」复选框文字框 ARMY_TIMING_WAIT_TEXT_W = 56：3 全角 = 6 半角。
+    # 同款复选框（停止行的「敌方魔力≤」5 字）用 72px 框 ⇒ 约 8px/半角宽，
+    # 56px 容得下 6 半角（≈48px）且留余量；上限按实际字数取 6。
+    'panel.cast_timing_after_wait' = 6
 }
 
 $fullWidthRe = '[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]'

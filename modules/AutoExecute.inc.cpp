@@ -1472,25 +1472,76 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
 // 口径的 StableStackIdentity（本体按军队槽、召唤物按生物 id+出现序），不存
 // 会移动的 hex。指定身份已不在场（阵亡/重打丢召唤物）时本回合不施法，等
 // 它再次出现或玩家改配置。
+//
+// 勾了「等待后」（ct.after_wait）时，指定部队**本轮第一次**被交权也不施法，
+// 必须等它先「等待」、本轮再次被交权才施。判定用两条证据之一：
+//   1) 玩家按过等待 → 游戏在 creature+0x84 置 waiting 位（0x2000000）；
+//   2) 本轮该部队已被交权 ≥2 次（等待后必然再轮一次；同一次交权里被反复
+//      询问不会重复计数，见 PolicyCore 的 NoteCastTimingHandoff）。
+// 两条都拿不到（既没等到 waiting 位、也还是第一次交权）时不施法——本功能
+// 就是"等"，宁可漏施也不能提前施。
 static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr); // 定义在本文件后部
+static H3AutoPolicy::CastTimingWaitState s_cast_wait_state = { -1, 0, false };
+
+// 该部队本回合是否已「等待」。H3API：H3CreatureInformation 大小 0x74，字段序
+// 为 town(0)/level(4)/soundName(8)/defName(0xC)/flags(0x10)；H3CombatCreature::info
+// 在 +0x74 ⇒ flags 落在 creature+0x84，waiting = 位 0x2000000（IsWaiting() 即读
+// 这一位）。机器码同口径：游戏在 creature+0x84 上置位 0x2000000（等待动作），
+// 清位 0x2000000 只出现在收尾路径。
+static bool StackWaitedThisRound_(_BattleStack_* st)
+{
+    if (!st) return false;
+    __try {
+        return reinterpret_cast<const H3CombatCreature*>(st)->IsWaiting() != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
 {
     const SpellCastTimingFields& ct = g_cast_timing[g_active_profile];
     if (ct.mode != H3AutoPolicy::CAST_TIMING_UNIT) return true; // 默认时机
-    _BattleStack_* self = CurrentTurnStack_(mgr);
-    if (!self || self->def_group_ix != side) return false;
-    const int idx = self->army_slot_ix;
-    if (idx < 0 || idx >= 21) return false;
-    H3AutoPolicy::StableStackIdentity ids[21] = {};
-    BuildStableIdentitiesFromBattle_(mgr, side, ids);
-    if (ids[idx].kind == H3AutoPolicy::STACK_ID_NONE) return false;
+    const int turn = GetCurrentBattleTurn_(mgr);
+
     H3AutoPolicy::StableStackIdentity want = {};
     want.kind = static_cast<H3AutoPolicy::StableStackIdentityKind>(
         ct.target_kind);
     want.side = ct.target_side;
     want.value = ct.target_value;
     want.occurrence = ct.target_occurrence;
-    return H3AutoPolicy::StableStackIdentityEquals(want, ids[idx]);
+
+    _BattleStack_* self = nullptr;
+    bool is_target = false;
+    if (side >= 0 && side <= 1) {
+        self = CurrentTurnStack_(mgr);
+        if (self && self->def_group_ix == side) {
+            const int idx = self->army_slot_ix;
+            if (idx >= 0 && idx < 21) {
+                H3AutoPolicy::StableStackIdentity ids[21] = {};
+                BuildStableIdentitiesFromBattle_(mgr, side, ids);
+                if (ids[idx].kind != H3AutoPolicy::STACK_ID_NONE)
+                    is_target =
+                        H3AutoPolicy::StableStackIdentityEquals(want, ids[idx]);
+            }
+        }
+    }
+    // 每次交权都要喂状态机：只有"别的部队 → 目标部队"的切换才算新的一次行动。
+    const bool second_handoff = H3AutoPolicy::NoteCastTimingHandoff(
+        &s_cast_wait_state, turn, is_target);
+    if (!is_target) return false;
+    if (!ct.after_wait) return true; // 未勾选：老行为，轮到它就施
+    if (turn < 0) return StackWaitedThisRound_(self);
+    const bool waited = StackWaitedThisRound_(self);
+    if (second_handoff || waited) {
+        LogDebug("[CastWait] 等待后放行 second=%d waited=%d turn=%d slot=%d",
+            second_handoff ? 1 : 0, waited ? 1 : 0, turn,
+            self ? self->army_slot_ix : -1);
+        return true;
+    }
+    LogDebug("[CastWait] 等待后拦截：尚未等待且本轮首次交权 turn=%d slot=%d",
+        turn, self ? self->army_slot_ix : -1);
+    return false;
 }
 
 static bool TryProtectCast_(_BattleMgr_* mgr)

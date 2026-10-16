@@ -355,12 +355,20 @@ inline void NormalizeAttackMagicRule(AttackMagicRule* rule)
 // 以 creature id + occurrence 标识，跨战斗不可匹配时自然回退为不施法。
 static constexpr int CAST_TIMING_DEFAULT = 0;
 static constexpr int CAST_TIMING_UNIT = 1;
+// 字段顺序刻意「先单字节、后 16 位」：int16_t 若排在单字节字段之间，自然对齐下
+// 会插入 1 字节隐式填充，而生产插件用 /Zp1、单测的 cl 命令不带 /Zp1，两侧
+// sizeof 与布局就会不一致。这样排下来两种对齐下都是 8 字节、零隐式填充，
+// 记录比较用的 bytes_equal(sizeof) 不会碰到未初始化字节。
 struct SpellCastTimingFields {
     uint8_t mode;       // CAST_TIMING_DEFAULT / CAST_TIMING_UNIT
     int8_t target_kind; // StableStackIdentityKind
     int8_t target_side;
-    int16_t target_value;
     int8_t target_occurrence;
+    // 「等待后」：仅对「指定部队」有意义（2026-10-17 用户需求）。置 1 表示该部队
+    // 先「等待」、等本轮它再次被交权时才施法；置 0 = 老行为（轮到它就施法）。
+    uint8_t after_wait;
+    uint8_t _reserved;  // 只为把结构体凑成 8 字节，恒为 0，不参与语义
+    int16_t target_value;
 };
 
 inline SpellCastTimingFields MakeDefaultSpellCastTiming()
@@ -371,6 +379,8 @@ inline SpellCastTimingFields MakeDefaultSpellCastTiming()
     f.target_side = -1;
     f.target_value = -1;
     f.target_occurrence = 0;
+    f.after_wait = 0;
+    f._reserved = 0;
     return f;
 }
 
@@ -385,7 +395,42 @@ inline void NormalizeSpellCastTiming(SpellCastTimingFields* f)
         || f->target_kind <= 0 || f->target_kind > 3
         || f->target_value < 0 || f->target_occurrence < 0) {
         *f = MakeDefaultSpellCastTiming();
+        return;
     }
+    f->after_wait = f->after_wait ? 1 : 0;
+    f->_reserved = 0;
+}
+
+// 「等待后」判定状态机（纯逻辑，PolicyCoreTests 直接钉住）：
+// 只在「从别的部队交权 → 交权给目标部队」时记一次行动，因此同一次行动里被
+// 反复询问（施法动画期间消息循环会重入同一交权）不会重复计数。
+// 本轮第二次被交权（＝该部队等待过、或中了士气额外行动）才放行。
+struct CastTimingWaitState {
+    int turn;
+    int acts;
+    bool on_self;
+};
+
+inline void ResetCastTimingWaitState(CastTimingWaitState* s)
+{
+    if (!s) return;
+    s->turn = -1;
+    s->acts = 0;
+    s->on_self = false;
+}
+
+// 返回 true = 本轮已是目标部队的第二次（或更多）交权。
+inline bool NoteCastTimingHandoff(CastTimingWaitState* s, int turn, bool is_target)
+{
+    if (!s) return false;
+    if (s->turn != turn) {
+        s->turn = turn;
+        s->acts = 0;
+        s->on_self = false;
+    }
+    if (is_target && !s->on_self) ++s->acts;
+    s->on_self = is_target;
+    return s->acts >= 2;
 }
 
 struct StatusProfileFields {
@@ -1798,6 +1843,9 @@ using H3AutoPolicy::StableStackIdentity;
 using H3AutoPolicy::MakeStableStackIdentity;
 using H3AutoPolicy::CAST_TIMING_DEFAULT;
 using H3AutoPolicy::CAST_TIMING_UNIT;
+using H3AutoPolicy::CastTimingWaitState;
+using H3AutoPolicy::ResetCastTimingWaitState;
+using H3AutoPolicy::NoteCastTimingHandoff;
 using H3AutoPolicy::MakeDefaultStatusFields;
 using H3AutoPolicy::kStatusSlotCapacity;
 using H3AutoPolicy::kBuffSpellIds;

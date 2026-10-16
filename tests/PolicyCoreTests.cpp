@@ -333,12 +333,19 @@ void TestSpellCastTiming()
     using H3AutoPolicy::MakeStableStackIdentity;
     using H3AutoPolicy::StableStackIdentityEquals;
 
-    // 默认：首次轮到玩家行动，目标身份全空。
+    // 默认：首次轮到玩家行动，目标身份全空，「等待后」不勾选。
     const SpellCastTimingFields def = MakeDefaultSpellCastTiming();
     Check(def.mode == CAST_TIMING_DEFAULT, "cast timing default mode");
     Check(def.target_kind == 0 && def.target_side == -1
         && def.target_value == -1 && def.target_occurrence == 0,
         "cast timing default clears target identity");
+    Check(def.after_wait == 0, "cast timing default leaves after-wait unchecked");
+    // 结构体必须无隐式填充：记录比较是 bytes_equal(sizeof)，隐式填充字节可能是
+    // 未初始化的垃圾，会把「没改」误判成「改过」（确认/存档往返都会被带偏）。
+    Check(sizeof(SpellCastTimingFields) == 8
+        && def._reserved == 0 && def.after_wait == 0
+        && def.mode == CAST_TIMING_DEFAULT,
+        "cast timing struct is padding-free and reserved byte is cleared");
     NormalizeSpellCastTiming(nullptr);
 
     // 单位模式 + 合法身份（本体军队槽）→ 保留，且幂等。
@@ -362,6 +369,18 @@ void TestSpellCastTiming()
         && ct.target_value == normalized_once.target_value,
         "unit timing normalization is idempotent");
 
+    // 「等待后」勾选态：合法部队模式下保留；非 0 归一成 1（只 0/1 两态）；
+    // 保留字节始终清零（它只为对齐存在，不参与语义）。
+    ct.after_wait = 7;
+    ct._reserved = 0xFF;
+    NormalizeSpellCastTiming(&ct);
+    Check(ct.mode == CAST_TIMING_UNIT && ct.after_wait == 1,
+        "after-wait flag survives unit timing and normalizes to 1");
+    Check(ct._reserved == 0, "reserved padding byte is always cleared");
+    ct.after_wait = 0;
+    NormalizeSpellCastTiming(&ct);
+    Check(ct.after_wait == 0, "after-wait flag can be turned off again");
+
     // 召唤物身份（type+occurrence）同样合法。
     const StableStackIdentity summon =
         MakeStableStackIdentity(1, -1, 10, 2);
@@ -378,36 +397,82 @@ void TestSpellCastTiming()
         "summon timing survives normalization");
 
     // 单位模式 + 非法身份（side/kind/value/occurrence 越界）→ 回默认。
-    const SpellCastTimingFields bad_inputs[] = {
-        {CAST_TIMING_UNIT, 0, 0, 5, 0},      // kind=NONE
-        {CAST_TIMING_UNIT, 4, 0, 5, 0},      // kind 越界
-        {CAST_TIMING_UNIT, 1, -1, 5, 0},     // side 越界
-        {CAST_TIMING_UNIT, 1, 2, 5, 0},      // side 越界
-        {CAST_TIMING_UNIT, 1, 0, -1, 0},     // value 负
-        {CAST_TIMING_UNIT, 1, 0, 5, -1},     // occurrence 负
-        {CAST_TIMING_UNIT, 9, 7, 5, 3},      // 多字段组合
+    // 刻意用命名赋值而不是聚合初始化：结构体字段顺序为了消除隐式填充调整过，
+    // 位置初始化会在下次排字段时静默换掉每个用例的含义。
+    struct BadCase { int kind; int side; int value; int occurrence; };
+    const BadCase bad_cases[] = {
+        {0, 0, 5, 0},      // kind=NONE
+        {4, 0, 5, 0},      // kind 越界
+        {1, -1, 5, 0},     // side 越界
+        {1, 2, 5, 0},      // side 越界
+        {1, 0, -1, 0},     // value 负
+        {1, 0, 5, -1},     // occurrence 负
+        {9, 7, 5, 3},      // 多字段组合
     };
-    for (const SpellCastTimingFields& input : bad_inputs) {
-        ct = input;
+    for (const BadCase& c : bad_cases) {
+        ct = MakeDefaultSpellCastTiming();
+        ct.mode = CAST_TIMING_UNIT;
+        ct.target_kind = static_cast<int8_t>(c.kind);
+        ct.target_side = static_cast<int8_t>(c.side);
+        ct.target_value = static_cast<int16_t>(c.value);
+        ct.target_occurrence = static_cast<int8_t>(c.occurrence);
+        ct.after_wait = 1; // 身份非法时勾选态也要一起清零
         NormalizeSpellCastTiming(&ct);
         Check(ct.mode == CAST_TIMING_DEFAULT && ct.target_kind == 0
             && ct.target_value == -1,
             "invalid unit identity falls back to default timing");
+        Check(ct.after_wait == 0,
+            "invalid unit identity also clears the after-wait flag");
     }
 
-    // 非单位模式 → 一律回默认（残留身份清零）。
+    // 非单位模式 → 一律回默认（残留身份与勾选态清零）。
     for (int mode = 2; mode < 6; ++mode) {
         ct = def;
         ct.mode = (uint8_t)mode;
         ct.target_kind = 1;
         ct.target_side = 0;
         ct.target_value = 4;
+        ct.after_wait = 1;
         NormalizeSpellCastTiming(&ct);
         Check(ct.mode == CAST_TIMING_DEFAULT && ct.target_kind == 0,
             "unknown mode resets to default timing");
+        Check(ct.after_wait == 0,
+            "unknown mode clears the after-wait flag");
     }
 
-    // 记录去重：任一方案的施法时机变化都算内容变化。
+    // 「等待后」判定状态机：只有「别的部队 → 目标部队」的切换才算新一次行动。
+    {
+        CastTimingWaitState st;
+        ResetCastTimingWaitState(&st);
+        Check(!NoteCastTimingHandoff(&st, 5, false),
+            "non-target handoff never allows the after-wait cast");
+        Check(!NoteCastTimingHandoff(&st, 5, false),
+            "repeated non-target handoffs stay harmless");
+        Check(!NoteCastTimingHandoff(&st, 5, true),
+            "first handoff to the target denies the after-wait cast");
+        // 同一次行动里被反复询问（施法动画期间消息循环重入同一交权）不重复计数。
+        Check(!NoteCastTimingHandoff(&st, 5, true),
+            "repeated queries inside one activation do not count twice");
+        Check(!NoteCastTimingHandoff(&st, 5, true),
+            "a third query inside the same activation still denies");
+        // 中间别的部队行动过 → 目标部队再次被交权＝等待后的那次。
+        Check(!NoteCastTimingHandoff(&st, 5, false),
+            "another stack acting in between tracks normally");
+        Check(NoteCastTimingHandoff(&st, 5, true),
+            "second handoff to the target allows the after-wait cast");
+        Check(NoteCastTimingHandoff(&st, 5, true),
+            "later handoffs in the same round stay allowed");
+        // 新回合重置：又变回「本轮第一次」。
+        Check(!NoteCastTimingHandoff(&st, 6, false),
+            "new round resets the handoff counter for non-target stacks");
+        Check(!NoteCastTimingHandoff(&st, 6, true),
+            "new round makes the target's handoff the first one again");
+        ResetCastTimingWaitState(&st);
+        Check(st.turn == -1 && st.acts == 0 && !st.on_self,
+            "explicit reset clears the after-wait state machine");
+    }
+
+    // 记录去重：只改「等待后」勾选也算内容变化（5 个方案逐一验证）。
     BattleStoreRecord base = {};
     strcpy(base.time, "20261016-210000");
     for (int p = 0; p < 5; ++p)
@@ -423,7 +488,20 @@ void TestSpellCastTiming()
         changed.cast_timing[p].target_value = 2;
         Check(!BattleStoreRecordContentEquals(base, changed),
             "cast timing change differs in every profile");
+        // 仅勾选「等待后」也必须是内容变化：存档/确认不能漏掉这一位。
+        BattleStoreRecord wait_only = base;
+        wait_only.cast_timing[p] = changed.cast_timing[p];
+        wait_only.cast_timing[p].after_wait = 1;
+        Check(!BattleStoreRecordContentEquals(changed, wait_only),
+            "after-wait flag alone counts as a content change per profile");
     }
+
+    // 几何：复选框必须落在内容区右缘之内（绘制与命中共用同一批常量）。
+    Check(ARMY_TIMING_WAIT_X + ARMY_TIMING_WAIT_HIT_W
+            <= GRID_FRAME_X + GRID_FRAME_W,
+        "after-wait checkbox stays inside the content area");
+    Check(ARMY_TIMING_WAIT_X >= ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W,
+        "after-wait checkbox sits to the right of the unit dropdown");
 }
 
 void TestWarMachineActions()

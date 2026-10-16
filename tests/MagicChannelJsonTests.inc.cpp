@@ -112,6 +112,8 @@ static void TestMagicChannelJson()
             source->cast_timing[p].target_side = static_cast<int8_t>(p % 2);
             source->cast_timing[p].target_value = static_cast<int16_t>(p);
             source->cast_timing[p].target_occurrence = static_cast<int8_t>(p - 2);
+            // 「等待后」：方案 2/4 勾选、3 不勾——勾选态要过真实 JSON 往返。
+            source->cast_timing[p].after_wait = (p == 2 || p == 4) ? 1 : 0;
         }
         profiles.push_back(ProfileToJson_(source->rules[p], source->stop_turns[p],
             summon, status, source->cast_timing[p], source->forcefield[p]));
@@ -157,6 +159,9 @@ static void TestMagicChannelJson()
             Check(decoded->cast_timing[p].target_kind == 0
                     && decoded->cast_timing[p].target_value == -1,
                 "default cast timing keeps cleared identity after roundtrip");
+        Check(decoded->cast_timing[p].after_wait
+                == ((p == 2 || p == 4) ? 1 : 0),
+            "after-wait checkbox state survives production codec roundtrip");
         Check(decoded->rules[p][p].waitMode == AW_EVERY_TURN
                 && decoded->rules[p][20 - p].waitMode == AW_SIEGE,
             "wait mode survives production codec roundtrip per slot");
@@ -196,6 +201,52 @@ static void TestMagicChannelJson()
         Check(!ParseProfileJson_(broken, rules, &stop, &summon_out, &status_out,
                 &timing, &ff_out),
             "non-object castTiming rejects the profile");
+    }
+
+    // 「等待后」缺键＝不勾选（旧档语义）；一旦写了键，值必须是 0/1 整数。
+    {
+        AutoStackRule rules[21];
+        uint16_t stop = 0;
+        SummonProfileFields summon_out = MakeDefaultSummonFields();
+        StatusProfileFields status_out = MakeDefaultStatusFields();
+        ForceFieldProfileFields ff_out = MakeDefaultForceFieldFields();
+        SpellCastTimingFields timing = {};
+
+        // 老档（profiles[2] 是「指定部队」但序列化时已带 afterWait=1）——先伪造
+        // 成"老档没这个键"：删键后应解出 0，且部队身份照旧保留。
+        BattleJson no_wait_key = profiles[2];
+        no_wait_key["castTiming"].erase("afterWait");
+        Check(ParseProfileJson_(no_wait_key, rules, &stop, &summon_out,
+                &status_out, &timing, &ff_out),
+            "profile without afterWait key still parses");
+        Check(timing.mode == CAST_TIMING_UNIT
+                && timing.target_kind != 0
+                && timing.after_wait == 0,
+            "missing afterWait key decodes to unchecked by default");
+
+        BattleJson wait_on = profiles[2];
+        Check(ParseProfileJson_(wait_on, rules, &stop, &summon_out,
+                &status_out, &timing, &ff_out) && timing.after_wait == 1,
+            "afterWait=1 decodes to checked");
+        BattleJson wait_off = profiles[2];
+        wait_off["castTiming"]["afterWait"] = 0;
+        Check(ParseProfileJson_(wait_off, rules, &stop, &summon_out,
+                &status_out, &timing, &ff_out) && timing.after_wait == 0,
+            "afterWait=0 decodes to unchecked");
+
+        const BattleJson bad_wait[] = {2, -1, "1", 1.0, true,
+            static_cast<unsigned long long>(~0ULL)};
+        for (const BattleJson& bad : bad_wait) {
+            BattleJson profile = profiles[2];
+            profile["castTiming"]["afterWait"] = bad;
+            Check(!ParseProfileJson_(profile, rules, &stop, &summon_out,
+                    &status_out, &timing, &ff_out),
+                "afterWait rejects out-of-range, non-integer and string values");
+        }
+        // 序列化恒带这个键（0/1 两种都写出来，便于对拍）。
+        Check(ProfileToJson_(rules, stop, summon_out, status_out, timing,
+                ff_out)["castTiming"].contains("afterWait"),
+            "serialized cast timing always carries the afterWait key");
     }
 
     const BattleJson max_unsigned = static_cast<unsigned long long>(~0ULL);

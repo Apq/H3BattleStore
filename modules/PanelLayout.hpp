@@ -24,7 +24,17 @@ static const int ARMY_TIMING_MODE_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W;
 static const int ARMY_TIMING_MODE_W = 86;
 static const int ARMY_TIMING_UNIT_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W
     + ARMY_TIMING_MODE_W + 10;
-static const int ARMY_TIMING_UNIT_W = 280;
+// 2026-10-17 起右侧还要放「等待后」复选框（见下），部队框由 280 收窄到 264，
+// 让整行右缘（WAIT_X + WAIT_HIT_W = 651）仍落在内容区右缘 660 之内。
+static const int ARMY_TIMING_UNIT_W = 264;
+// 「等待后」复选框：只在模式为「指定部队」时出现，画在部队下拉框右侧
+// （用户要求「后面再加一个复选框」）。命中区＝方框 + 文字，交互与停止条件的
+// 「敌方魔力≤」复选框同款（点方框或文字都切换）。
+static const int ARMY_TIMING_WAIT_CHECK_W = 12;
+static const int ARMY_TIMING_WAIT_TEXT_W  = 56;   // 「等待后」3 字（6 半角宽）
+static const int ARMY_TIMING_WAIT_HIT_W   =
+    ARMY_TIMING_WAIT_CHECK_W + 4 + ARMY_TIMING_WAIT_TEXT_W;
+static const int ARMY_TIMING_WAIT_X = ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W + 8;
 // 首行行高按部队框（要放头像，与保持状态第三小列同款）＝STATUS_UNIT_ITEM_H。
 static const int GRID_Y      = 171;  // 施法时机首行（105+60）下方6px；三卡片底431
 static const int SCROLL_W    = 16;

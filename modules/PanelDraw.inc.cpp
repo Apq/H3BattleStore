@@ -877,6 +877,14 @@ static void DrawCastTiming_(H3LoadedPcx16* scr)
         CellControl_DrawArrow(scr, ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W - 14,
             ARMY_TIMING_Y + STATUS_UNIT_ITEM_H / 2 - 2, !unit_open);
     }
+    // 「等待后」：只有「指定部队」模式才有意义（首次行动没有"该部队"可等），
+    // 所以跟部队下拉框同生同灭；默认不勾选。
+    if (show_unit) {
+        DrawCheckbox_(scr, ARMY_TIMING_WAIT_X,
+            ARMY_TIMING_Y + (STATUS_UNIT_ITEM_H - ARMY_TIMING_WAIT_CHECK_W) / 2,
+            ct.after_wait != 0, T("panel.cast_timing_after_wait"),
+            ARMY_TIMING_WAIT_TEXT_W, ARMY_TIMING_WAIT_CHECK_W);
+    }
     if (mode_open) {
         static const int kRows[2] = { 0, 1 };
         for (int v = 0; v < 2; ++v) {

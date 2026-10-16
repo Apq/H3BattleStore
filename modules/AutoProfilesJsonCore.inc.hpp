@@ -314,6 +314,15 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
         cast_timing->target_side = static_cast<int8_t>(side);
         cast_timing->target_value = static_cast<int16_t>(value);
         cast_timing->target_occurrence = static_cast<int8_t>(occurrence);
+        // afterWait 可缺：缺键＝旧存档，语义就是「不勾等待后」（默认不勾选）。
+        // 一旦写了这个键，值就必须是 0/1；用 ParseAttackMagicInt_ 这类「有界整数」
+        // 读法（它先分流 is_number_unsigned，避免 64 位/无符号窄化伪装成合法值）。
+        if (ct.contains("afterWait")) {
+            int wait_flag = 0;
+            if (!ParseAttackMagicInt_(ct["afterWait"], 0, 1, &wait_flag))
+                return false;
+            cast_timing->after_wait = static_cast<uint8_t>(wait_flag);
+        }
         NormalizeSpellCastTiming(cast_timing);
     }
     for (int i = 0; i < 21; ++i) rules[i] = MakeDefaultRule();
@@ -367,6 +376,7 @@ static BattleJson ProfileToJson_(const AutoStackRule rules[21],
             {"side", (int)cast_timing.target_side},
             {"value", (int)cast_timing.target_value},
             {"occurrence", (int)cast_timing.target_occurrence},
+            {"afterWait", cast_timing.after_wait ? 1 : 0},
         }},
         {"forcefield", ForceFieldToJson_(forcefield)},
     };

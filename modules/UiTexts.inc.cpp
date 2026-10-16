@@ -34,6 +34,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "panel.cast_timing_default", "首次行动" },
     { "panel.cast_timing_unit_none", "指定部队" },
     { "panel.cast_timing_unit_none_list", "（无存活己方部队）" },
+    { "panel.cast_timing_after_wait", "等待后" },
     { "panel.tab_summon", "召唤" },
     { "panel.tab_status", "保持状态" },
     { "panel.tab_attack", "攻击魔法" },
