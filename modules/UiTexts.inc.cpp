@@ -41,7 +41,6 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "panel.status_add", "+" },
     { "panel.status_slow", "敌方减速（需专家群体）" },
     { "panel.status_empty", "（无已学状态魔法）" },
-    { "panel.status_blind_unlearned", "失明（敌方）：当前英雄未学会，学会后才会出现在下拉里" },
     { "panel.status_th_label", "剩余回合≤" },
     { "panel.status_th_tail", "时补" },
     // ---- 召唤页（PAGE_SUMMON）----

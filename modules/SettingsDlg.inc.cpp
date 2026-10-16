@@ -516,14 +516,19 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
 {
     s_status_dd_count = 0;
     H3Hero* hero = nullptr;
+    int side = -1;
     H3CombatManager* cm = H3CombatManager::Get();
     if (cm && o_BattleMgr) {
-        const int side = ResolveHumanSide_(o_BattleMgr);
+        side = ResolveHumanSide_(o_BattleMgr);
         if (side >= 0 && side <= 1)
             hero = reinterpret_cast<H3Hero*>(o_BattleMgr->hero[side]);
     }
     const BYTE* table = *reinterpret_cast<BYTE**>(0x687FA8);
     if (!hero || !table || !cm) return 0;
+    // 构建头一行（debug）：出问题时先看这一行确认"到底查的是哪边英雄、
+    // 当前方案已占了哪些槽"，再逐行看下面的候选判定。
+    LogDebug("[Panel] status build side=%d slots=%d skip=%d terrain=%d",
+        side, status.slot_count, skip_slot, cm->specialTerrain);
     int candidates[H3AutoPolicy::kBuffSpellCount + 2] = {};
     int candidate_count = 0;
     // 对敌两项置顶：玩家要找的通常就是它们（2026-10-16 用户裁定："这不
@@ -538,28 +543,19 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         for (int i = 0; i < status.slot_count; ++i)
             if (i != skip_slot)
                 used = used || status.slots[i] == spell;
-        if (used) continue;
         const unsigned flags = *reinterpret_cast<const unsigned*>(
             table + spell * 0x88 + 0x0C);
         const int expertise = hero->GetSpellExpertise(
             spell, cm->specialTerrain);
-        if (!H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise))
-            continue;
+        const bool ok = !used
+            && H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise);
+        // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出是
+        // 未学会、法术表没群体版，还是已被别的槽占用——不必让玩家自证，也不必靠
+        // 猜。判定细节在 debug 级，默认 info 日志不刷屏。
+        LogDebug("[Panel] status cand spell=%d exp=%d flags=0x%X used=%d ok=%d",
+            spell, expertise, flags, used ? 1 : 0, ok ? 1 : 0);
+        if (!ok) continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
-    }
-    // 英雄没学失明时把话说明白：否则下拉里就是看不到这一项，玩家无从判断
-    // 是"没做"还是"当前英雄学不了"。已学则一个字都不多说。
-    if (s_status_dd_count > 0 || skip_slot >= 0) {
-        bool knows_blind = false;
-        for (int i = 0; i < s_status_dd_count; ++i)
-            if (s_status_dd_ids[i] == H3AutoPolicy::kBlindSpellId)
-                knows_blind = true;
-        if (!knows_blind) {
-            const int blind_exp = hero->GetSpellExpertise(
-                H3AutoPolicy::kBlindSpellId, cm->specialTerrain);
-            if (blind_exp <= 0)
-                SetStatusText_(T("panel.status_blind_unlearned"), 3000);
-        }
     }
     return s_status_dd_count;
 }
