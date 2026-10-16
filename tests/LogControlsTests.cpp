@@ -173,6 +173,17 @@ static void TestLogPolicies_(const std::wstring& root)
     REQUIRE_MESSAGE(gate.Admit(0xFFFFFFF0u, 100, &skipped)
         && !gate.Admit(0x20u, 100, &skipped)
         && gate.Admit(0x60u, 100, &skipped) && skipped == 1, "rate limit survives tick wrap");
+    LogDetailBurst_ burst;
+    REQUIRE_MESSAGE(burst.Admit(true, 0, 5000, &skipped) && burst.Admit(true, 1, 5000, &skipped)
+        && burst.Admit(true, 2, 5000, &skipped), "trace level keeps every candidate-detail burst");
+    REQUIRE_MESSAGE(burst.Admit(false, 0, 5000, &skipped) && skipped == 0,
+        "first debug detail burst is immediate");
+    REQUIRE_MESSAGE(!burst.Admit(false, 1, 5000, &skipped)
+        && !burst.Admit(false, 4999, 5000, &skipped), "debug detail bursts are suppressed inside the window");
+    REQUIRE_MESSAGE(burst.Admit(false, 5000, 5000, &skipped) && skipped == 2,
+        "debug detail burst reports suppressed batch count per window");
+    REQUIRE_MESSAGE(!burst.Admit(false, 5001, 5000, &skipped) && skipped == 0,
+        "admitted burst clears the suppressed counter");
     LogFailureWindow_ failure;
     REQUIRE_MESSAGE(failure.Observe(true, 0, 30000, &skipped) == 1, "first drawing failure reports");
     for (DWORD i = 1; i < 30000; ++i)

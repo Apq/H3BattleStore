@@ -74,6 +74,23 @@ struct LogRepeatGate_ {
     }
 };
 
+// 逐候选/逐槽"明细突发"闸（纯策略，单测可钉）。这类明细一次行动可能几十行
+// （选目标的每个候选、保活队列的每个槽），默认 debug 级不设闸会随每次行动成批
+// 刷日志。策略：
+//   - trace 级（用户显式选"全部"）：不限，便于深挖单次行动的全部候选；
+//   - 其它级别：窗口内首次放行全量明细，其余压掉并累计批次数，下次放行时随
+//     明细一起报出（不静默丢，符合"限频只管报告次数"的口径）。
+// 摘要/决策行（选中结果、无候选原因、施放结果）不走此闸，决策链始终完整。
+struct LogDetailBurst_ {
+    LogRepeatGate_ gate;
+    bool Admit(bool trace_enabled, DWORD now, DWORD interval, unsigned* suppressed)
+    {
+        if (suppressed) *suppressed = 0;
+        if (trace_enabled) return true;
+        return gate.Admit(now, interval, suppressed);
+    }
+};
+
 struct LogFailureWindow_ {
     LogRepeatGate_ repeats;
     bool failing = false;

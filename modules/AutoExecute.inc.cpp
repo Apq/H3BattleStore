@@ -1585,6 +1585,13 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     int cand_slot[21] = {}, cand_spell[21] = {}, cand_exp[21] = {};
     int cand_restore[21] = {};
     int cand_count = 0;
+    // 队列槽位/候选明细按 5 秒窗口收账（trace 级不限）：每次交权最多几十行，
+    // 不设闸会随每次行动成批刷日志。摘要行（no qualified target / cast done）
+    // 不设闸，决策链不丢。
+    static LogDetailBurst_ protect_detail;
+    unsigned protect_skipped = 0;
+    const bool protect_detail_ok = protect_detail.Admit(
+        LogEnabled_(LOG_TRACE), GetTickCount(), 5000, &protect_skipped);
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = g_active_rules[slot];
 
@@ -1608,10 +1615,11 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         cand.lost_hp        = st->lost_hp;
         const int wound = H3AutoPolicy::WoundValue(cand);
         // 队列槽位快照（debug）：还原「该救不救」判定的完整输入。
-        LogDebug("[Protect] queue slot=%d mode=%d cnt=%d start=%d origin=%d wound=%d dead=%d rem=%d th=%d",
-            slot, (int)rule.protectMode, st->count_current, st->count_at_start, baseline,
-            wound, dead ? 1 : 0, H3AutoPolicy::StackRemainingHp(cand),
-            rule.protectCountBelow);
+        if (protect_detail_ok)
+            LogDebug("[Protect] queue slot=%d mode=%d cnt=%d start=%d origin=%d wound=%d dead=%d rem=%d th=%d",
+                slot, (int)rule.protectMode, st->count_current, st->count_at_start, baseline,
+                wound, dead ? 1 : 0, H3AutoPolicy::StackRemainingHp(cand),
+                rule.protectCountBelow);
 
         // 亡灵→聚灵(39)，活体→复活(38)；按英雄当前等级算可恢复量。
         const int spell_id = P_CreatureInformation[st->creature_id].undead
@@ -1672,15 +1680,20 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     }
     // Candidate qualification already used the game's actual spell cost.
     // 候选明细（debug）：定位“该救不救/救错对象”类问题。
-    for (int i = 0; i < cand_count; ++i)
-        LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d restore=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
-            i, cand_count, cand_slot[i], cand_spell[i], cand_exp[i],
-            cand_restore[i],
-            H3AutoPolicy::WoundValue(cands[i]),
-            H3AutoPolicy::StackRemainingHp(cands[i]),
-            cands[i].count_current <= 0 ? 1 : 0,
-            cands[i].count_current,
-            g_active_rules[cand_slot[i]].protectCountBelow);
+    if (protect_detail_ok) {
+        for (int i = 0; i < cand_count; ++i)
+            LogDebug("[Protect] cand[%d/%d] slot=%d spell=%d exp=%d restore=%d wound=%d rem=%d dead=%d cnt=%d th=%d",
+                i, cand_count, cand_slot[i], cand_spell[i], cand_exp[i],
+                cand_restore[i],
+                H3AutoPolicy::WoundValue(cands[i]),
+                H3AutoPolicy::StackRemainingHp(cands[i]),
+                cands[i].count_current <= 0 ? 1 : 0,
+                cands[i].count_current,
+                g_active_rules[cand_slot[i]].protectCountBelow);
+        if (protect_skipped)
+            LogDebug("[Protect] slot/cand detail suppressed=%u batch(es) in 5s window",
+                protect_skipped);
+    }
 
     const int best_slot = cand_slot[picked];
     const int best_spell = cand_spell[picked];
@@ -2330,14 +2343,26 @@ static _BattleStack_* SelectStackTarget_(_BattleMgr_* mgr, _BattleStack_* self,
         return nullptr;
     }
     // 候选明细与选中结果（debug）：定位“选错目标/不选目标”类问题。
-    for (int i = 0; i < count; ++i)
-        LogDebug("[Target] cand[%d/%d] side=%d slot=%d cid=0x%X cnt=%d/%d hp=%d rem=%d spd=%d shots=%d ranged=%d flyer=%d wound=%d",
-            i, count, candidates[i]->def_group_ix, candidates[i]->army_slot_ix,
-            candidates[i]->creature_id, candidates[i]->count_current,
-            candidates[i]->count_at_start, scored[i].hit_points,
-            H3AutoPolicy::StackRemainingHp(scored[i]), scored[i].speed,
-            scored[i].shots, scored[i].ranged, scored[i].flyer,
-            H3AutoPolicy::WoundValue(scored[i]));
+    // 明细按 5 秒窗口收账（trace 级不限）：单次最多 42 行，不设闸会随每次行动
+    // 成批刷日志；摘要行 select 每次都写，决策链不丢。
+    {
+        static LogDetailBurst_ target_detail;
+        unsigned detail_skipped = 0;
+        if (target_detail.Admit(LogEnabled_(LOG_TRACE), GetTickCount(), 5000,
+                &detail_skipped)) {
+            for (int i = 0; i < count; ++i)
+                LogDebug("[Target] cand[%d/%d] side=%d slot=%d cid=0x%X cnt=%d/%d hp=%d rem=%d spd=%d shots=%d ranged=%d flyer=%d wound=%d",
+                    i, count, candidates[i]->def_group_ix, candidates[i]->army_slot_ix,
+                    candidates[i]->creature_id, candidates[i]->count_current,
+                    candidates[i]->count_at_start, scored[i].hit_points,
+                    H3AutoPolicy::StackRemainingHp(scored[i]), scored[i].speed,
+                    scored[i].shots, scored[i].ranged, scored[i].flyer,
+                    H3AutoPolicy::WoundValue(scored[i]));
+            if (detail_skipped)
+                LogDebug("[Target] cand detail suppressed=%u batch(es) in 5s window",
+                    detail_skipped);
+        }
+    }
     LogDebug("[Target] select action=%d selector=%d -> slot=%d cid=0x%X hex=%d",
         (int)rule.action, (int)rule.target.selector,
         candidates[selected]->army_slot_ix, candidates[selected]->creature_id,

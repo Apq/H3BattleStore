@@ -570,10 +570,11 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
     const bool mouse_command = raw_command == 4 || raw_command == 8
         || raw_command == 16
         || raw_command == static_cast<int>(eMsgCommand::MOUSE_WHEEL);
-    // 到达性诊断：面板激活时每次点击类消息留一条 debug。若用户点击后日志
+    // 到达性诊断：面板激活时每次"点击类"消息留一条 debug。若用户点击后日志
     // 里没有这条，说明消息根本没到屏障 item（上游命中/派发问题），而非
-    // 面板命中测试问题。
-    if (panel_was_active && mouse_command) {
+    // 面板命中测试问题。原始 4=鼠标移动不写：每动一次都是独立消息，写下来
+    // 会把日志刷爆，而移动本身不证明点击到达（点击类 8/16/滚轮才有意义）。
+    if (panel_was_active && mouse_command && raw_command != 4) {
         LogDebug("[Panel] blocker hit raw=%d pos=(%d,%d)", raw_command,
             static_cast<int>(msg.position.x), static_cast<int>(msg.position.y));
     }
