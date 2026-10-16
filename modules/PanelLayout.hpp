@@ -21,14 +21,17 @@ static const int GRID_X      = GRID_FRAME_X; // 卡片贴内容区左缘
 // 部队框底 173。
 static const int ARMY_TIMING_Y = 113;
 static const int ARMY_TIMING_H = 18;
-static const int ARMY_TIMING_LABEL_W = 86;
+// 2026-10-17 用户要求标签改回「每回合施法时机」：**7 全角 = 14 半角**（此前 86px 框
+// 只显示到第 6 字 ⇒ ≈14.3px/字，7 字 ≈ 100px；另一口径 16px/字 ≈ 112px），框宽
+// 取 116 两种口径都留余量。
+static const int ARMY_TIMING_LABEL_W = 116;
 static const int ARMY_TIMING_MODE_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W;
 static const int ARMY_TIMING_MODE_W = 86;
 static const int ARMY_TIMING_UNIT_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W
     + ARMY_TIMING_MODE_W + 10;
-// 2026-10-17 起右侧还要放「等待后」复选框（见下），部队框由 280 收窄到 264，
-// 让整行右缘（WAIT_X + WAIT_HIT_W = 651）仍落在内容区右缘 660 之内。
-static const int ARMY_TIMING_UNIT_W = 264;
+// 2026-10-17 用户要求部队下拉框宽度减半：264→132（头像 50 + 位置/数量文字仍放得下，
+// 收起态箭头在 x+118 不与文字重叠）。
+static const int ARMY_TIMING_UNIT_W = 132;
 // 「等待后」复选框：只在模式为「指定部队」时出现，画在部队下拉框右侧
 // （用户要求「后面再加一个复选框」）。命中区＝方框 + 文字，交互与停止条件的
 // 「敌方魔力≤」复选框同款（点方框或文字都切换）。
