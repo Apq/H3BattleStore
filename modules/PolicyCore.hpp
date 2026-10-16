@@ -172,6 +172,22 @@ static constexpr int kSlowSpellId = 54;
 // 敌方失明（法术 62，单体、心智类，H3CstSpells.hpp:111 BLIND=62）：
 // 保持状态里唯一的单体对敌选项，前提同样是英雄已学会（学校等级 > 0）。
 static constexpr int kBlindSpellId = 62;
+
+// 保持状态下拉候选资格（2026-10-16 用户裁定："这不属于全体范围，英雄会
+// 下拉选项里就要添加这个魔法"）：
+//   失明（62）＝单体对敌，**不要求**法术表带 friendlyMass / expertMassVersion
+//               （它本来就没有群体版），英雄已学会（学校等级 > 0）就列；
+//   减速（54）＝群体对敌，同样不要求群体位，但要专家级（学校等级 3）；
+//   其余必须是原版群体增益（kBuffSpellIds 内且带群体位）。
+// 判定收敛成这一个函数：设置面板与单测共用同一口径，避免两侧漂移。
+inline bool IsStatusCandidateSpell(int spell_id, unsigned spell_flags,
+    int expertise)
+{
+    if (spell_id <= 0 || expertise <= 0) return false;
+    if (spell_id == kSlowSpellId) return expertise >= 3;
+    if (spell_id == kBlindSpellId) return true;
+    return IsMassBuffSpell(spell_id, spell_flags);
+}
 static constexpr int kBlessSpellId = 41;
 static constexpr int kPrecisionSpellId = 44;
 static constexpr int kMirthSpellId = 49;

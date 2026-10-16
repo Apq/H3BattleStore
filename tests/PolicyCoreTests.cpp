@@ -1162,6 +1162,20 @@ void TestStatusAndAutoStop()
         "blind: two turns left above threshold one is left alone");
     Check(ChooseBlindTarget(blind_dur_two, enemy_hexes, threat, 2, 3).spell_id == 62,
         "blind: wider threshold recasts at two turns left");
+    // 下拉候选资格（2026-10-16 用户裁定："这不属于全体范围，英雄会下拉选项里
+    // 就要添加这个魔法"）：失明是单体、法术表没有群体位，只要英雄已学就列；
+    // 减速要专家级；其余仍必须是原版群体增益。
+    Check(IsStatusCandidateSpell(62, 0x0004 | 0x0010, 1),
+        "candidate: blind needs no mass flag, learned is enough");
+    Check(!IsStatusCandidateSpell(62, 0x0004 | 0x0010, 0),
+        "candidate: blind not learned stays out of the dropdown");
+    Check(IsStatusCandidateSpell(54, 0, 3) && !IsStatusCandidateSpell(54, 0, 2),
+        "candidate: slow needs expert school");
+    Check(!IsStatusCandidateSpell(27, 0, 3)
+        && IsStatusCandidateSpell(27, H3AutoPolicy::kSpellFlagFriendlyMass, 1),
+        "candidate: plain buffs still require a mass version");
+    Check(!IsStatusCandidateSpell(0, 0x800, 3) && !IsStatusCandidateSpell(81, 0x800, 3),
+        "candidate: empty and out-of-range ids are rejected");
 }
 
 void TestSummonChannel()

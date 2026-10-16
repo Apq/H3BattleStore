@@ -509,7 +509,9 @@ static void CloseSummonDropdowns_()
 
 // 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速 + 已学失明
 // （单体对敌）；skip_slot 以外的槽位已用的法术排除（避免重复）。
-// 结果进 s_status_dd_ids。
+// 结果进 s_status_dd_ids。候选顺序＝失明、减速、再群体增益——失明是玩家
+// 2026-10-16 要求补的项，埋在 16 个增益后面要滚 6 行才看得见（原顺序为
+// buffs + slow + blind，玩家在已展开的下拉里没找到它，误以为没做）。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
 {
     s_status_dd_count = 0;
@@ -524,10 +526,12 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
     if (!hero || !table || !cm) return 0;
     int candidates[H3AutoPolicy::kBuffSpellCount + 2] = {};
     int candidate_count = 0;
+    // 对敌两项置顶：玩家要找的通常就是它们（2026-10-16 用户裁定："这不
+    // 属于全体范围，英雄会下拉选项里就要添加这个魔法"）。
+    candidates[candidate_count++] = H3AutoPolicy::kBlindSpellId;
+    candidates[candidate_count++] = H3AutoPolicy::kSlowSpellId;
     for (int spell : H3AutoPolicy::kBuffSpellIds)
         candidates[candidate_count++] = spell;
-    candidates[candidate_count++] = H3AutoPolicy::kSlowSpellId;
-    candidates[candidate_count++] = H3AutoPolicy::kBlindSpellId;
     for (int n = 0; n < candidate_count; ++n) {
         const int spell = candidates[n];
         bool used = false;
@@ -537,17 +541,25 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         if (used) continue;
         const unsigned flags = *reinterpret_cast<const unsigned*>(
             table + spell * 0x88 + 0x0C);
-        const bool slow = spell == H3AutoPolicy::kSlowSpellId;
-        const bool blind = spell == H3AutoPolicy::kBlindSpellId;
-        // 减速与失明都是对敌法术，不要求法术表带群体版；其余候选必须是
-        // 原版群体增益（friendlyMass / expertMassVersion）。
-        if (!slow && !blind && !H3AutoPolicy::IsMassBuffSpell(spell, flags))
-            continue;
         const int expertise = hero->GetSpellExpertise(
             spell, cm->specialTerrain);
-        // 减速要专家级群体版；失明与增益同门槛：英雄已学会（学校等级 > 0）。
-        if (expertise <= 0 || (slow && expertise < 3)) continue;
+        if (!H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise))
+            continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
+    }
+    // 英雄没学失明时把话说明白：否则下拉里就是看不到这一项，玩家无从判断
+    // 是"没做"还是"当前英雄学不了"。已学则一个字都不多说。
+    if (s_status_dd_count > 0 || skip_slot >= 0) {
+        bool knows_blind = false;
+        for (int i = 0; i < s_status_dd_count; ++i)
+            if (s_status_dd_ids[i] == H3AutoPolicy::kBlindSpellId)
+                knows_blind = true;
+        if (!knows_blind) {
+            const int blind_exp = hero->GetSpellExpertise(
+                H3AutoPolicy::kBlindSpellId, cm->specialTerrain);
+            if (blind_exp <= 0)
+                SetStatusText_(T("panel.status_blind_unlearned"), 3000);
+        }
     }
     return s_status_dd_count;
 }
