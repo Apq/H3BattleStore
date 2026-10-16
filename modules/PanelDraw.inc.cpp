@@ -1373,6 +1373,20 @@ static void DrawPanelToBuffer_()
                 const int i = first + v;
                 int x = 0, y = 0, w = 0, h = 0;
                 StatusMagicItemRect_(v, &x, &y, &w, &h);
+                // 分组标题行（「己方」/「敌方」）：不是候选项——深底 + 金字，
+                // 不参与选中/悬停高亮，只作分隔（2026-10-16 用户裁定：下拉按
+                // 魔法的目标分两大类，己方排在前面）。
+                if (s_status_dd_group[i] != 0) {
+                    Fill(scr, x, y, w, h, 58, 44, 22);
+                    scr->DrawFrame(x, y, w, h, 214, 176, 84);
+                    DrawTxt(scr, small_font,
+                        T(s_status_dd_group[i] == 2
+                            ? "panel.status_group_enemy"
+                            : "panel.status_group_friendly"),
+                        x + 6, y, w - 12, h,
+                        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+                    continue;
+                }
                 const bool selected = s_status_dd_ids[i] == status.slots[s_status_dd_open];
                 const bool hovered = (i == s_status_dd_hover);
                 BYTE bg_r = selected ? 104 : 68, bg_g = selected ? 70 : 42;

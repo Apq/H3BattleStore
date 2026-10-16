@@ -148,13 +148,25 @@ inline AutoStackRule MakeDefaultRule()
     return r;
 }
 
-// 原版友方范围增益白名单（法术 id）。2026-10-16 用户裁定「状态保持列出的
-// 魔法改为英雄已学会的状态魔法吧（不区分全体了）」——白名单继续界定"哪些
-// 算状态魔法"，但**不再要求法术表带群体版**：会不会以魔法书为准，全体还是
-// 指定由每槽的目标模式（+当前学校等级）决定。
-static constexpr int kBuffSpellCount = 16;
+// 状态魔法白名单按**目标阵营**分成两张表（2026-10-16 用户裁定：「魔法下拉框
+// 中的可选项改成根据魔法的目标分为己方、敌方两大类，己方排在前面」）。
+//
+// 己方持续增益（19）：原版友方范围增益，＋本轮补入的烈火神盾(29)/抗魔术(34)/
+// 魔法镜像(36) 三个可持续增益。白名单只界定"哪些算状态魔法"，**不再要求法术
+// 表带群体版**：会不会以魔法书为准，全体还是指定由每槽的目标模式（+该法术所属
+// 学派的熟练度）决定。
+static constexpr int kBuffSpellCount = 19;
 static constexpr int kBuffSpellIds[kBuffSpellCount] = {
-    27, 28, 30, 31, 32, 33, 41, 43, 44, 46, 48, 49, 51, 53, 55, 58,
+    27, 28, 29, 30, 31, 32, 33, 34, 36, 41, 43, 44, 46, 48, 49, 51, 53, 55, 58,
+};
+// 敌方持续减益（10）：诅咒42、虚弱无力45、瓦解射线47、悲痛欲绝50、大难临头52、
+// 迟缓大法54、丧心病狂59、蛊惑人心60、遗忘61、双目失明62。
+// 数组顺序＝下拉里的显示顺序，也是"同一回合有多个都该补"时的优先顺序：
+// 短效/单体/控制类排前面，迟缓大法（长时效群体）排最后——保留 2026-10-16
+// 早期裁定「失明与减速同时到期先补失明」。
+static constexpr int kEnemyStatusSpellCount = 10;
+static constexpr int kEnemyStatusSpellIds[kEnemyStatusSpellCount] = {
+    62, 61, 59, 60, 52, 50, 47, 45, 42, 54,
 };
 static constexpr int kSpellFlagFriendlyMass = 0x800;
 static constexpr int kSpellFlagExpertMass = 0x40;
@@ -165,33 +177,35 @@ static constexpr unsigned kSpellFlagSingleOnly   = 0x10u;
 static constexpr unsigned kSpellFlagAdvancedMass = 0x20u;
 static constexpr int kSlowSpellId = 54;
 // 敌方失明（法术 62，单体、心智类，H3CstSpells.hpp:111 BLIND=62）：
-// 保持状态里的单体对敌选项。
+// 敌方减益里最急的一项，白名单里排第一。
 static constexpr int kBlindSpellId = 62;
 
-// 「这是不是一个状态魔法」——只看法术 id 白名单，与是否已学、等级、群体无关。
-inline bool IsStatusSpellId(int spell_id)
+// 目标阵营判定（只看白名单，与是否已学、学校等级、能否群体无关）。
+inline bool IsFriendlyStatusSpell(int spell_id)
 {
-    if (spell_id == kSlowSpellId || spell_id == kBlindSpellId) return true;
     for (int id : kBuffSpellIds)
         if (id == spell_id) return true;
     return false;
 }
 
-inline bool IsMassBuffSpell(int spell_id, unsigned spell_flags)
+inline bool IsEnemyStatusSpell(int spell_id)
 {
-    if (spell_id <= 0) return false;
-    const bool listed = [&]() {
-        for (int id : kBuffSpellIds) if (id == spell_id) return true;
-        return false;
-    }();
-    if (!listed) return false;
-    return (spell_flags & kSpellFlagFriendlyMass) != 0
-        || (spell_flags & kSpellFlagExpertMass) != 0;
+    for (int id : kEnemyStatusSpellIds)
+        if (id == spell_id) return true;
+    return false;
 }
 
-// 该状态法术在当前学校等级下能不能群体施放（＝原版非单体）：
-//   单体位（失明）永远 false；专家群体位要等级 3；高级群体位要等级 ≥2；
-//   都没有群体位（如 55）也 false。与 StatusSpellCanMass 互补的
+// 「这是不是一个状态魔法」——只看法术 id 白名单，与是否已学、等级、群体无关。
+inline bool IsStatusSpellId(int spell_id)
+{
+    return IsFriendlyStatusSpell(spell_id) || IsEnemyStatusSpell(spell_id);
+}
+
+// 该状态法术在当前学校等级下能不能群体施放（＝原版非单体）：判据就是用户
+// 2026-10-16 定的「由魔法本身（法术表 flags）＋英雄对应学派（水火土气）的
+// 熟练度决定」——
+//   单体位（失明 62）永远 false；专家群体位要等级 3；高级群体位要等级 ≥2；
+//   都没有群体位（如屠戮成性 55）也 false。与 StatusSpellCanMass 互补的
 //   "只能单体"就是 !can_mass（原版 SingleTarget 的等价判据）。
 inline bool StatusSpellCanMass(int spell_id, unsigned spell_flags, int expertise)
 {
@@ -231,6 +245,13 @@ static constexpr int kSorrowSpellId = 50;
 static constexpr int kFortuneSpellId = 51;
 static constexpr int kMisfortuneSpellId = 52;
 static constexpr int kSlayerSpellId = 55;
+// 敌方减益里需要判"硬不可接受"的几个（2026-10-16 扩表时补）：
+static constexpr int kCurseSpellId = 42;
+static constexpr int kWeaknessSpellId = 45;
+static constexpr int kDisruptingRaySpellId = 47;
+static constexpr int kBerserkSpellId = 59;
+static constexpr int kHypnotizeSpellId = 60;
+static constexpr int kForgetfulnessSpellId = 61;
 static constexpr int kArrowTowerCreatureId = 149;
 // 与 H3CreatureInformation::flags / H3Spell::flags 同一套位。
 static constexpr unsigned kCreatureFlagShooter = 0x4u;
@@ -457,6 +478,20 @@ inline bool CreatureCanReceiveStatusSpell(int spell_id, unsigned spell_flags,
         return (creature_flags & kCreatureFlagNoMorale) == 0;
     case kPrecisionSpellId:
         return (creature_flags & kCreatureFlagShooter) != 0;
+    // 2026-10-16 扩敌方减益表时补的硬条件（下列三条为推断口径，待实机验证；
+    // 宁可少列一个目标：错列会让 CanCastSpellAtCoord 失败、整回合白等）。
+    case kCurseSpellId:
+    case kWeaknessSpellId:
+        // 降攻击：没有伤害的部队（弹药车、急救帐篷）不吃。
+        return damage_high > 0;
+    case kForgetfulnessSpellId:
+        // 遗忘：只对射击部队有意义（阻止远程攻击）。
+        return (creature_flags & kCreatureFlagShooter) != 0;
+    case kBerserkSpellId:
+    case kHypnotizeSpellId:
+        // 丧心病狂/蛊惑人心：心智类，与失明同规则（亡灵与心智免疫拒绝）。
+        return (creature_flags & (kCreatureFlagMindImmune | kCreatureFlagUndead))
+            == 0;
     case kBlindSpellId:
         // 失明（62，心智类单体）：亡灵与带心智免疫位的生物不接受
         // （元素、石像/铁人/金人/钻石人、傀儡龙等）。
@@ -515,6 +550,67 @@ inline int ChooseSingleStatusTarget(const int* durations, const int* hexes,
     return best;
 }
 
+// 敌方**单体**状态目标（失明/遗忘/丧心病狂/蛊惑人心，以及「指定」模式下的任何
+// 敌方法术）的通用选择：durations < 0 = 该队不存在/不可接受（免疫、战争机器、
+// 没有可施法位置），不参与判定。
+//   preferred_hex ≥ 0 ＝玩家在第三小列里点过的那一队 → 只认它：它还在候选里、
+//     且剩余 ≤ 阈值才施放（目标已阵亡/不接受，或还够回合 → -1＝本回合不施放，
+//     不偷偷换一个目标）；
+//   preferred_hex < 0 ＝按规则自己挑：在"剩余 ≤ 阈值"的候选里取剩余最少者
+//     （0 = 已经没效果了，比还剩 1 的更急），并列取威胁最大的。
+// 返回候选下标，-1 = 不施放。
+inline int ChooseEnemySingleStatusTarget(const int* durations, const int* hexes,
+    const int64_t* threats, int count, int refresh_turns, int preferred_hex)
+{
+    if (!durations || !hexes || count <= 0) return -1;
+    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
+    if (preferred_hex >= 0) {
+        for (int i = 0; i < count; ++i) {
+            if (durations[i] < 0 || hexes[i] != preferred_hex) continue;
+            return durations[i] <= refresh_turns ? i : -1;
+        }
+        return -1;
+    }
+    int best = -1;
+    for (int i = 0; i < count; ++i) {
+        if (durations[i] < 0 || durations[i] > refresh_turns) continue;
+        if (best < 0) {
+            best = i;
+            continue;
+        }
+        if (durations[i] != durations[best]) {
+            if (durations[i] < durations[best]) best = i;
+            continue;
+        }
+        const int64_t threat_i = threats ? threats[i] : 0;
+        const int64_t threat_best = threats ? threats[best] : 0;
+        if (threat_i > threat_best) best = i;
+    }
+    return best;
+}
+
+// 敌方**群体**状态（迟缓大法这类当前等级能群体的敌方法术）：语义 A
+// （2026-10-05 用户定，沿用至今）——按「全体覆盖」算达标：敌方已有任意一队还
+// 带着（剩余 > 阈值）就不再施，全都没到才补一次全体。理由：敌方可能有抵抗术，
+// 部分命中是常态，若按"任一队缺失即补"会在被抵抗后连续多回合重复施放，挤占
+// 一回合一次的施法位与魔力。-1（不存在/免疫）不参与覆盖判定。
+// out_remain 回填代表剩余回合（用于跨法术比较"谁最急"）；不施放时给 -1。
+inline StatusMaintainChoice ChooseEnemyMassStatusTarget(int spell_id,
+    const int* durations, int count, int refresh_turns, int* out_remain)
+{
+    StatusMaintainChoice choice = {-1, -1, 0};
+    if (out_remain) *out_remain = -1;
+    if (spell_id <= 0 || !durations || count <= 0) return choice;
+    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
+    const int rep = RepresentativeMassDuration(durations, count);
+    if (rep < 0 || rep > refresh_turns) return choice;
+    if (out_remain) *out_remain = rep;
+    choice.spell_id = spell_id;
+    choice.target_hex = -1; // 群体：目标格由引擎忽略，统一用 -1
+    choice.mass = 1;
+    return choice;
+}
+
 // 敌方减速：己方必须是专家群体。enemy_durations 覆盖全部存活敌方。
 // 语义 A（2026-10-05 用户定）：群体迟缓按「全体覆盖」算达标——敌方已
 // 有任意一队带迟缓 buff（剩余 > refresh_turns）就不再施，只有
@@ -527,21 +623,9 @@ inline StatusMaintainChoice ChooseSlowTarget(bool expert_mass,
     int refresh_turns)
 {
     StatusMaintainChoice choice = {-1, -1, 0};
-    if (!expert_mass || !enemy_durations || !enemy_hexes || enemy_count <= 0)
-        return choice;
-    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
-    int best = -1;
-    for (int i = 0; i < enemy_count; ++i) {
-        if (enemy_durations[i] < 0) continue;      // 不存在/免疫：跳过
-        if (enemy_durations[i] > refresh_turns)
-            return choice;                         // 已有覆盖：达标，不再施
-        if (best < 0 || enemy_durations[i] < enemy_durations[best]) best = i;
-    }
-    if (best < 0) return choice;
-    choice.spell_id = kSlowSpellId;
-    choice.target_hex = enemy_hexes[best];
-    choice.mass = 1;
-    return choice;
+    if (!expert_mass || !enemy_hexes) return choice;
+    return ChooseEnemyMassStatusTarget(kSlowSpellId, enemy_durations,
+        enemy_count, refresh_turns, nullptr);
 }
 
 // 敌方失明（法术 62，单体）。与减速共用「剩余回合 ≤ refresh_turns 就补」的
@@ -558,27 +642,11 @@ inline StatusMaintainChoice ChooseBlindTarget(const int* enemy_durations,
     int refresh_turns)
 {
     StatusMaintainChoice choice = {-1, -1, 0};
-    if (!enemy_durations || !enemy_hexes || enemy_count <= 0) return choice;
-    if (refresh_turns < 0) refresh_turns = kStatusRefreshTurns;
-    int best = -1;
-    for (int i = 0; i < enemy_count; ++i) {
-        if (enemy_durations[i] < 0) continue;              // 不存在/不可接受
-        if (enemy_durations[i] > refresh_turns) continue;  // 还够，不动它
-        if (best < 0) {
-            best = i;
-            continue;
-        }
-        if (enemy_durations[i] != enemy_durations[best]) {
-            if (enemy_durations[i] < enemy_durations[best]) best = i;
-            continue;
-        }
-        const int64_t threat_i = enemy_threat ? enemy_threat[i] : 0;
-        const int64_t threat_best = enemy_threat ? enemy_threat[best] : 0;
-        if (threat_i > threat_best) best = i;
-    }
-    if (best < 0) return choice;
+    const int idx = ChooseEnemySingleStatusTarget(enemy_durations, enemy_hexes,
+        enemy_threat, enemy_count, refresh_turns, -1);
+    if (idx < 0) return choice;
     choice.spell_id = kBlindSpellId;
-    choice.target_hex = enemy_hexes[best];
+    choice.target_hex = enemy_hexes[idx];
     choice.mass = 0; // 单体：必须带目标格
     return choice;
 }
@@ -1685,7 +1753,18 @@ using H3AutoPolicy::StatusProfileFields;
 using H3AutoPolicy::MakeDefaultStatusFields;
 using H3AutoPolicy::kStatusSlotCapacity;
 using H3AutoPolicy::kBuffSpellIds;
-using H3AutoPolicy::IsMassBuffSpell;
+using H3AutoPolicy::kEnemyStatusSpellIds;
+using H3AutoPolicy::kEnemyStatusSpellCount;
+using H3AutoPolicy::IsFriendlyStatusSpell;
+using H3AutoPolicy::IsEnemyStatusSpell;
+using H3AutoPolicy::ChooseEnemySingleStatusTarget;
+using H3AutoPolicy::ChooseEnemyMassStatusTarget;
+using H3AutoPolicy::kCurseSpellId;
+using H3AutoPolicy::kWeaknessSpellId;
+using H3AutoPolicy::kDisruptingRaySpellId;
+using H3AutoPolicy::kBerserkSpellId;
+using H3AutoPolicy::kHypnotizeSpellId;
+using H3AutoPolicy::kForgetfulnessSpellId;
 using H3AutoPolicy::kAttackMagicCapacity;
 using H3AutoPolicy::kAttackMagicPositionCapacity;
 using H3AutoPolicy::kAttackMagicSpellIds;

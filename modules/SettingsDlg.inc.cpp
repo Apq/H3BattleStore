@@ -395,7 +395,11 @@ static int  s_summon_act_dd_hover = -1;
 //   第三小列部队（s_status_unit_*）。同一时刻最多一个列展开。
 static int  s_status_dd_open = -1;
 static int  s_status_dd_hover = -1;
-static int  s_status_dd_ids[81] = {};
+static int  s_status_dd_ids[STATUS_MAGIC_DD_CAP] = {};
+// 每行的分组（2026-10-16 用户裁定：下拉按魔法的目标分「己方/敌方」两大类，
+// 己方排在前面）：0 = 法术项，1 = 「己方」标题行，2 = 「敌方」标题行。标题行
+// 只是视觉分隔，不可悬停、不可点选（当成透明行跳过）。
+static int  s_status_dd_group[STATUS_MAGIC_DD_CAP] = {};
 static int  s_status_dd_count = 0;
 static int  s_status_dd_first = 0;
 static int  s_status_mode_open = -1;
@@ -429,29 +433,31 @@ static int StatusAnyDropdownOpen_()
         || s_status_unit_open >= 0;
 }
 
-// 第三小列候选：战场双方存活部队，己方在前（与「部队」页卡片同序）。
-static void BuildStatusUnitCandidates_()
+// 第三小列候选：**按该槽法术的目标阵营只列一侧**（2026-10-16 用户裁定：
+// 「第三小列根据魔法的作用目标，只显示己方或敌方部队」）——己方增益列自己
+// 的存活部队，对敌减益（失明/减速/诅咒/…）列敌方的存活部队。这样玩家不会
+// 选到一个根本打不着的目标（原版会拒绝施放，白等一回合）。
+// spell_id <= 0（空槽）时不列任何候选。
+static void BuildStatusUnitCandidates_(int spell_id)
 {
     s_status_unit_count = 0;
     _BattleMgr_* mgr = o_BattleMgr;
-    if (!mgr) return;
+    if (!mgr || spell_id <= 0) return;
     const int human = ResolveHumanSide_(mgr);
-    const int order[2] = { human, 1 - human };
-    for (int k = 0; k < 2; ++k) {
-        const int side = order[k];
-        if (side < 0 || side > 1) continue;
-        for (int slot = 0; slot < 21 && s_status_unit_count < STATUS_UNIT_CAP;
-                ++slot) {
-            _BattleStack_* st = &mgr->stack[side][slot];
-            if (st->count_current <= 0) continue;
-            const int hex = StackHex_(st);
-            if (hex < 0) continue;
-            s_status_unit_hex[s_status_unit_count] = hex;
-            s_status_unit_count_alive[s_status_unit_count] = st->count_current;
-            s_status_unit_cid[s_status_unit_count] = st->creature_id;
-            s_status_unit_side[s_status_unit_count] = side;
-            ++s_status_unit_count;
-        }
+    if (human < 0 || human > 1) return;
+    const int side = H3AutoPolicy::IsEnemyStatusSpell(spell_id)
+        ? 1 - human : human;
+    for (int slot = 0; slot < 21 && s_status_unit_count < STATUS_UNIT_CAP;
+            ++slot) {
+        _BattleStack_* st = &mgr->stack[side][slot];
+        if (st->count_current <= 0) continue;
+        const int hex = StackHex_(st);
+        if (hex < 0) continue;
+        s_status_unit_hex[s_status_unit_count] = hex;
+        s_status_unit_count_alive[s_status_unit_count] = st->count_current;
+        s_status_unit_cid[s_status_unit_count] = st->creature_id;
+        s_status_unit_side[s_status_unit_count] = side;
+        ++s_status_unit_count;
     }
 }
 
@@ -589,7 +595,9 @@ static void CloseSummonDropdowns_()
     CloseAttackMagicUi_();
 }
 
-// 构建保持状态下拉候选：英雄魔法书里会的状态魔法（失明、减速置顶）。
+// 构建保持状态下拉候选：英雄魔法书里会的状态魔法，**按目标阵营分两组**
+// （2026-10-16 用户裁定：「改成根据魔法的目标，分为己方、敌方两大类，己方排在
+// 前面」）——先一行「己方」标题再列己方增益，然后一行「敌方」标题再列对敌减益。
 // 资格口径（2026-10-16 用户最终裁定）：**唯一门槛是会不会**——
 //   `hero->HasSpell(spell)`（learnedSpells|availableSpell，穿戴装备赋予也算，
 //   与原版施法面板同口径；见 attack 通道 BuildAttackMagicCandidates_）；
@@ -598,6 +606,7 @@ static void CloseSummonDropdowns_()
 //   按能做到的方式施放（用户同意的 B 方案）。
 // 已在其它槽选过的法术剔除（2026-10-16 最终口径：先试过"不剔除"，玩家
 // 定案改回剔除——同一种法术不重复占槽）；skip_slot 是正在编辑的槽，不算。
+// 某一段一个法术都没有时，连它的标题一起不画（不留空标题）。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
 {
     s_status_dd_count = 0;
@@ -615,38 +624,69 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
     // 当前方案已占了哪些槽"，再逐行看下面的候选判定。
     LogDebug("[Panel] status build side=%d slots=%d skip=%d terrain=%d",
         side, status.slot_count, skip_slot, cm->specialTerrain);
-    int candidates[H3AutoPolicy::kBuffSpellCount + 2] = {};
-    int candidate_count = 0;
-    // 对敌两项置顶：玩家要找的通常就是它们（2026-10-16 用户裁定："这不
-    // 属于全体范围，英雄会下拉选项里就要添加这个魔法"）。
-    candidates[candidate_count++] = H3AutoPolicy::kBlindSpellId;
-    candidates[candidate_count++] = H3AutoPolicy::kSlowSpellId;
-    for (int spell : H3AutoPolicy::kBuffSpellIds)
-        candidates[candidate_count++] = spell;
-    for (int n = 0; n < candidate_count; ++n) {
-        const int spell = candidates[n];
-        bool used = false;
-        for (int i = 0; i < status.slot_count; ++i)
-            if (i != skip_slot)
-                used = used || status.slots[i] == spell;
-        const unsigned flags = *reinterpret_cast<const unsigned*>(
-            table + spell * 0x88 + 0x0C);
-        const int expertise = hero->GetSpellExpertise(
-            spell, cm->specialTerrain);
-        // HasSpell＝learnedSpells|availableSpell（+0x3EA/+0x430 位或），与原版
-        // 施法面板同口径：会不会以魔法书显示为准；学校等级只影响群体版。
-        const bool has_spell = hero->HasSpell(spell) != 0;
-        const bool ok = !used && H3AutoPolicy::IsStatusCandidateSpell(
-            spell, has_spell);
-        // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出是
-        // 已被别的槽占用（used=1）、还是魔法书里没有（book=0）——不必再让玩家
-        // 自证，也不必靠猜。expertise/flags 一并留痕，方便核对群体口径。
-        LogDebug("[Panel] status cand spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d",
-            spell, has_spell ? 1 : 0, expertise, flags, used ? 1 : 0, ok ? 1 : 0);
-        if (!ok) continue;
-        s_status_dd_ids[s_status_dd_count++] = spell;
+    for (int grp = 0; grp < 2; ++grp) {
+        const bool enemy_group = (grp == 1);
+        const int* ids = enemy_group ? H3AutoPolicy::kEnemyStatusSpellIds
+                                     : H3AutoPolicy::kBuffSpellIds;
+        const int count = enemy_group ? H3AutoPolicy::kEnemyStatusSpellCount
+                                      : H3AutoPolicy::kBuffSpellCount;
+        // 先把本段通过判定的法术攒起来，有货才写标题行。
+        int kept[32] = {};
+        int kept_n = 0;
+        for (int n = 0; n < count && kept_n < 32; ++n) {
+            const int spell = ids[n];
+            bool used = false;
+            for (int i = 0; i < status.slot_count; ++i)
+                if (i != skip_slot)
+                    used = used || status.slots[i] == spell;
+            unsigned flags = 0;
+            __try {
+                flags = *reinterpret_cast<const unsigned*>(
+                    table + spell * 0x88 + 0x0C);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                flags = 0;
+            }
+            int expertise = 0;
+            __try {
+                expertise = hero->GetSpellExpertise(spell, cm->specialTerrain);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            // HasSpell＝learnedSpells|availableSpell（+0x3EA/+0x430 位或），与原版
+            // 施法面板同口径：会不会以魔法书显示为准；学校等级只影响群体版。
+            bool has_spell = false;
+            __try {
+                has_spell = hero->HasSpell(spell) != 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                has_spell = false;
+            }
+            const bool ok = !used && H3AutoPolicy::IsStatusCandidateSpell(
+                spell, has_spell);
+            // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出
+            // 是已被别的槽占用（used=1）、还是魔法书里没有（book=0）——不必再让
+            // 玩家自证，也不必靠猜。expertise/flags 一并留痕，方便核对群体口径。
+            LogDebug("[Panel] status cand grp=%d spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d",
+                grp, spell, has_spell ? 1 : 0, expertise, flags, used ? 1 : 0,
+                ok ? 1 : 0);
+            if (ok) kept[kept_n++] = spell;
+        }
+        if (kept_n <= 0) continue;
+        if (s_status_dd_count < STATUS_MAGIC_DD_CAP) {
+            s_status_dd_ids[s_status_dd_count] = 0;
+            s_status_dd_group[s_status_dd_count] = enemy_group ? 2 : 1;
+            ++s_status_dd_count;
+        }
+        for (int n = 0; n < kept_n && s_status_dd_count < STATUS_MAGIC_DD_CAP; ++n) {
+            s_status_dd_ids[s_status_dd_count] = kept[n];
+            s_status_dd_group[s_status_dd_count] = 0;
+            ++s_status_dd_count;
+        }
     }
     return s_status_dd_count;
+}
+
+// 某一行是不是分组标题（不可选、不可悬停）。
+static bool StatusRowIsHeader_(int row)
+{
+    return row >= 0 && row < s_status_dd_count && s_status_dd_group[row] != 0;
 }
 
 // 该法术在当前英雄学校等级下能不能群体施放（不能就只能单体）。读不到战场/
@@ -1503,7 +1543,8 @@ static bool UpdateDropdownHover_(int px, int py)
             int x = 0, y = 0, w = 0, h = 0;
             StatusMagicItemRect_(v, &x, &y, &w, &h);
             if (PointInRect_(px, py, x, y, w, h)) {
-                hover = first + v;
+                // 分组标题行不是候选项：悬停它不给高亮（保持 -1）。
+                hover = StatusRowIsHeader_(first + v) ? -1 : first + v;
                 break;
             }
         }
@@ -1971,6 +2012,9 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     StatusMagicItemRect_(v, &x, &y, &w, &h);
                     if (!PointInRect_(px, py, x, y, w, h)) continue;
                     const int i = first + v;
+                    // 分组标题行（己方/敌方）只是分隔，点了不选也不收起——
+                    // 当作"点在自己的列表里"，与点空白处收缩区分开。
+                    if (StatusRowIsHeader_(i)) return;
                     const int slot = s_status_dd_open;
                     const int picked = s_status_dd_ids[i];
                     if (slot < status.slot_count
@@ -2014,10 +2058,13 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         status.target_mode[slot] = i;
                         if (i == H3AutoPolicy::kStatusTargetAll)
                             status.target_hex[slot] = -1;
-                        else if (FindStatusUnitByHex_(status.target_hex[slot]) < 0) {
-                            // 选「指定」但还没有目标（或原目标已阵亡）：默认取
-                            // 候选第一项（己方在前），玩家再改。
-                            if (s_status_unit_count > 0)
+                        else {
+                            // 选「指定」：候选现按该槽法术的目标阵营重建（己方增益
+                            // 列己方、对敌减益列敌方）；原目标不在其中（没设过/
+                            // 已阵亡/换了法术换了阵营）就默认取候选第一项，玩家再改。
+                            BuildStatusUnitCandidates_(status.slots[slot]);
+                            if (FindStatusUnitByHex_(status.target_hex[slot]) < 0
+                                    && s_status_unit_count > 0)
                                 status.target_hex[slot] = s_status_unit_hex[0];
                         }
                         LogInfo("[Panel] 保持状态目标 slot=%d spell=%d mode=%d hex=%d (方案%d)",
@@ -2212,7 +2259,7 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                         STATUS_UNIT_W, STATUS_SLOT_H)) {
                     handled = true;
                     StatusResetDropdowns_();
-                    BuildStatusUnitCandidates_();
+                    BuildStatusUnitCandidates_(status.slots[i]);
                     if (s_status_unit_count > 0) {
                         s_status_unit_open = i;
                         s_status_unit_first = 0;
@@ -2233,14 +2280,15 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     s_p.status_add_armed = true;
                     StatusResetDropdowns_();
                     if (BuildStatusCandidates_(status, -1) > 0) {
-                        // 「＋」默认给一个友方状态槽：候选前两项是对敌的失明/
-                        // 减速，拿它们当默认会把"想给自己续增益"的玩家直接送进
-                        // 对敌槽，故取第一个非对敌项（历史上默认为第一个增益）。
-                        int picked = s_status_dd_ids[0];
+                        // 「＋」默认给一个**己方**状态槽：候选第一段就是己方增益
+                        // （标题行之后第一项），跳过标题行取它；没有己方项时退回
+                        // 第一个法术项。
+                        int picked = -1;
                         for (int i = 0; i < s_status_dd_count; ++i) {
+                            if (StatusRowIsHeader_(i)) continue;
                             const int id = s_status_dd_ids[i];
-                            if (id != H3AutoPolicy::kBlindSpellId
-                                && id != H3AutoPolicy::kSlowSpellId) {
+                            if (picked < 0) picked = id;
+                            if (!H3AutoPolicy::IsEnemyStatusSpell(id)) {
                                 picked = id;
                                 break;
                             }

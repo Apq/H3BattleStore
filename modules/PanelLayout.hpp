@@ -235,6 +235,11 @@ static const int STATUS_MODE_ITEM_H = 18; // 全体/指定列表项高
 static const int STATUS_UNIT_ITEM_H = STATUS_SLOT_H;
 // 战场存活部队候选上限：双方各 21 槽。
 static const int STATUS_UNIT_CAP = 42;
+// 保持状态魔法下拉的候选容量：己方 19 + 敌方 10 + 最多两行分组标题（「己方」/
+// 「敌方」各一行，只在对应组非空时出现）。留足余量：以后扩表若撑破这里，多出来
+// 的法术会静默不出现在下拉里（能看到但选不到），故 UiPortTests 侧不测，
+// 由 PolicyCoreTests 的几何用例钉住"表大小 + 标题行 ≤ 容量"。
+static const int STATUS_MAGIC_DD_CAP = 96;
 
 // 下拉列表展开几何（纯函数，单测可钉）：在内容区 [area_top, area_bottom] 内，
 // 以收起框 (box_y, box_h) 为基准，优先向下展开；下方能放的行数比上方少时改成

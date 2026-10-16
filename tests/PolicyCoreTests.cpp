@@ -1107,8 +1107,13 @@ void TestStatusAndAutoStop()
     const int uncovered[] = {1, 0, -1};
     const StatusMaintainChoice slow =
         ChooseSlowTarget(true, uncovered, enemy_hexes, 3, 1);
-    Check(slow.spell_id == 54 && slow.target_hex == 20 && slow.mass == 1,
-        "slow: fully uncovered enemy side casts on the fewest-turns enemy");
+    // 群体施法**不带目标格**：引擎本来就忽略它，而 cast_hex ≥ 0 会先过
+    // CanCastSpellAtCoord 并触发"选了指定但只有群体版"的兜底 info，所以群体
+    // 决策一律 target_hex = -1（2026-10-16 统一口径，见 ChooseEnemyMassStatusTarget）。
+    Check(slow.spell_id == 54 && slow.target_hex == -1 && slow.mass == 1,
+        "slow: fully uncovered enemy side casts as mass without a target hex");
+    Check(ChooseSlowTarget(true, uncovered, enemy_hexes, 3, 0).spell_id == -1,
+        "slow: threshold zero does not refresh while any enemy still has turns");
     Check(ChooseSlowTarget(true, uncovered, enemy_hexes, 0, 1).spell_id == -1,
         "slow: no enemies means no cast");
     // 阈值同步作用于减速覆盖判定：剩余 2 > 阈值 1 视为已覆盖。
@@ -1163,6 +1168,85 @@ void TestStatusAndAutoStop()
         "blind: two turns left above threshold one is left alone");
     Check(ChooseBlindTarget(blind_dur_two, enemy_hexes, threat, 2, 3).spell_id == 62,
         "blind: wider threshold recasts at two turns left");
+    // ---- 2026-10-16 敌方减益扩表：通用单体/群体选择 ----
+    // 通用单体：剩余最少者优先、同剩余取威胁最大；preferred_hex 指定时只认它。
+    Check(ChooseEnemySingleStatusTarget(blind_durations, enemy_hexes, threat, 3, 1, -1)
+            == 1,
+        "enemy single: least remaining wins (tie broken by threat)");
+    Check(ChooseEnemySingleStatusTarget(blind_durations, enemy_hexes, threat, 3, 0, -1)
+            == 1,
+        "enemy single: threshold zero still picks the most valuable awake enemy");
+    Check(ChooseEnemySingleStatusTarget(blind_durations, enemy_hexes, threat, 3, 1, 20)
+            == 1,
+        "enemy single: preferred hex is honored when it is a candidate");
+    Check(ChooseEnemySingleStatusTarget(blind_durations, enemy_hexes, threat, 3, 1, 999)
+            == -1,
+        "enemy single: preferred hex not among candidates means no cast");
+    Check(ChooseEnemySingleStatusTarget(blind_durations, enemy_hexes, threat, 3, 1, 10)
+            == 0,
+        "enemy single: preferred hex still covered is cast anyway when <= threshold");
+    Check(ChooseEnemySingleStatusTarget(nullptr, enemy_hexes, threat, 3, 1, -1) == -1,
+        "enemy single: null durations means no cast");
+    // 通用群体：语义 A——敌方已有任意一队还带着就不再施；全都没到才补。
+    {
+        const int all_gone[] = {0, 0, 0};
+        const int one_covered[] = {0, 3, 0};
+        int remain = -99;
+        const StatusMaintainChoice g = ChooseEnemyMassStatusTarget(
+            42, all_gone, 3, 1, &remain);
+        Check(g.spell_id == 42 && g.mass == 1 && g.target_hex == -1 && remain == 0,
+            "enemy mass: none covered casts with representative remainder 0");
+        Check(ChooseEnemyMassStatusTarget(42, one_covered, 3, 1, nullptr).spell_id == -1,
+            "enemy mass: any enemy still covered means covered (semantics A)");
+        {
+            const int all_due[] = {4, 4};
+            const StatusMaintainChoice wide = ChooseEnemyMassStatusTarget(
+                42, all_due, 2, 5, &remain);
+            Check(wide.spell_id == 42 && remain == 4,
+                "enemy mass: wider threshold refreshes while all enemies are due");
+        }
+        Check(ChooseEnemyMassStatusTarget(0, all_gone, 3, 1, nullptr).spell_id == -1,
+            "enemy mass: invalid spell id never casts");
+        Check(ChooseEnemyMassStatusTarget(42, nullptr, 3, 1, nullptr).spell_id == -1,
+            "enemy mass: null durations means no cast");
+    }
+    // 白名单按目标阵营分两组：己方 19（含本轮补的 29/34/36），敌方 10（含蛊惑人心 60）。
+    Check(H3AutoPolicy::kBuffSpellCount == 19
+        && IsFriendlyStatusSpell(27) && IsFriendlyStatusSpell(29)
+        && IsFriendlyStatusSpell(34) && IsFriendlyStatusSpell(36)
+        && IsFriendlyStatusSpell(55) && IsFriendlyStatusSpell(58)
+        && !IsFriendlyStatusSpell(62) && !IsFriendlyStatusSpell(54),
+        "whitelist: friendly group is the 19 sustained buffs");
+    Check(kEnemyStatusSpellCount == 10
+        && IsEnemyStatusSpell(62) && IsEnemyStatusSpell(61)
+        && IsEnemyStatusSpell(59) && IsEnemyStatusSpell(60)
+        && IsEnemyStatusSpell(52) && IsEnemyStatusSpell(50)
+        && IsEnemyStatusSpell(47) && IsEnemyStatusSpell(45)
+        && IsEnemyStatusSpell(42) && IsEnemyStatusSpell(54)
+        && !IsEnemyStatusSpell(27) && !IsEnemyStatusSpell(17)
+        && !IsEnemyStatusSpell(0),
+        "whitelist: enemy group is the 10 sustained debuffs");
+    Check(IsStatusSpellId(62) == IsEnemyStatusSpell(62)
+        && IsStatusSpellId(27) == IsFriendlyStatusSpell(27),
+        "whitelist: status spell id is the union of the two groups");
+    // 新成员的可接受性硬条件（推断口径，与失明/精准同规则族）：
+    // 诅咒/虚弱不吃无伤害部队，遗忘只对射击部队，丧心病狂/蛊惑人心拒绝心智免疫。
+    Check(!CreatureCanReceiveStatusSpell(42, 0, 0, 0, 13),
+        "curse: zero-damage creatures cannot receive curse");
+    Check(CreatureCanReceiveStatusSpell(42, 0, 0, 50, 13),
+        "curse: normal damage creatures can receive curse");
+    Check(!CreatureCanReceiveStatusSpell(45, 0, 0, 0, 13),
+        "weakness: zero-damage creatures cannot receive weakness");
+    Check(!CreatureCanReceiveStatusSpell(61, 0, 0, 50, 13),
+        "forgetfulness: non-shooters cannot receive forgetfulness");
+    Check(CreatureCanReceiveStatusSpell(61, 0, 0x4u, 50, 13),
+        "forgetfulness: shooters can receive forgetfulness");
+    Check(!CreatureCanReceiveStatusSpell(59, 0, 0x400u, 50, 13),
+        "berserk: mind-immune creatures cannot receive berserk");
+    Check(!CreatureCanReceiveStatusSpell(60, 0, 0x40000u, 50, 56),
+        "hypnotize: undead cannot receive hypnotize");
+    Check(CreatureCanReceiveStatusSpell(60, 0, 0, 50, 13),
+        "hypnotize: ordinary living creatures can receive hypnotize");
     // 下拉候选资格（2026-10-16 用户最终裁定）：**唯一门槛是会不会**——
     // has_spell＝HasSpell（learnedSpells|availableSpell），"不区分全体了"：
     // 不再要求法术表带群体版、减速也不再要求专家级（群体与否由每槽的第二小列
@@ -1703,6 +1787,12 @@ void TestStatusPageGeometry()
             GRID_FRAME_Y, MAGIC_LIST_BOTTOM, &up);
         Check(!up, "first slot row opens its lists downward");
     }
+    // 下拉候选容量：己方组 + 敌方组 + 两行分组标题（只在对应组非空时出现）必须
+    // 装得下。装不下不会崩，但多出来的法术会静默不出现在下拉里——玩家看不到也
+    // 选不到，属于"看不出错"的坏故障，所以在表大小这一侧钉死。
+    Check(H3AutoPolicy::kBuffSpellCount + H3AutoPolicy::kEnemyStatusSpellCount + 2
+            <= STATUS_MAGIC_DD_CAP,
+        "magic dropdown capacity holds both spell groups plus their header rows");
 }
 TEST_CASE("policy: 保持状态页三列几何", "[policy]") { TestStatusPageGeometry(); }
 TEST_CASE("policy: 铠甲核心（异常过滤/环形缓冲/力盾表）", "[policy]") { TestCrashGuardCore(); }

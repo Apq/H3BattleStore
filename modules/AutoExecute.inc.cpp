@@ -1072,16 +1072,17 @@ static bool StackCanReceiveStatusSpell_(_BattleStack_* stack, int spell,
         spell, spell_flags, flags, damage_high, creature_id);
 }
 
-// 敌方失明候选采样：把 21 个敌方槽位抽样成三组平行数组（由外层按 21 分配）。
-// durations < 0 = 该队不存在 / 不接受失明（亡灵与心智免疫、战争机器、
-// 没有可施法位置、读不到字段），不参与后续选择；hexes 是该队所在格；
-// threats = 原版单位价值 × 当前数量。原版单位价值取 aiValue，为 0 退
-// fightValue，仍为 0 再退 hitPoints（Heroes3Src/docs/ARMY_VALUE_ALGORITHM_
-// DETAILED.md：“aiValue 是首选，fightValue 是备选”）；乘当前数量即原版
-// 军队价值口径，保证「失明最痛的那支」与游戏 AI 自己判断强弱同源。
+// 一侧状态的候选采样：把 21 个槽位抽样成三组平行数组（由外层按 21 分配）。
+// durations < 0 = 该队不存在 / 不接受这个法术（免疫、战争机器、没有可施法
+// 位置、读不到字段），不参与后续选择；hexes 是该队所在格；threats = 原版单位
+// 价值 × 当前数量。原版单位价值取 aiValue，为 0 退 fightValue，仍为 0 再退
+// hitPoints（Heroes3Src/docs/ARMY_VALUE_ALGORITHM_DETAILED.md："aiValue 是
+// 首选，fightValue 是备选"）；乘当前数量即原版军队价值口径，保证「失明最痛的
+// 那支」与游戏 AI 自己判断强弱同源。友方增益与敌方减益共用这一份采样
+// （target_side 决定抽哪一侧）。
 // 返回填充的行数（恒等于 21 槽逐槽一条，含不可接受的占位 -1 项）。
-static int GatherBlindCandidates_(_BattleMgr_* mgr, H3CombatManager* cm, int side,
-    int spell, unsigned spell_flags, int enemy_side,
+static int GatherSideStatusCandidates_(_BattleMgr_* mgr, H3CombatManager* cm,
+    int side, int target_side, int spell, unsigned spell_flags,
     int* durations, int* hexes, int64_t* threats, int capacity)
 {
     if (!mgr || !durations || !hexes || !threats || capacity <= 0) return 0;
@@ -1090,7 +1091,7 @@ static int GatherBlindCandidates_(_BattleMgr_* mgr, H3CombatManager* cm, int sid
         durations[n] = -1;
         hexes[n] = -1;
         threats[n] = 0;
-        _BattleStack_* st = &mgr->stack[enemy_side][slot];
+        _BattleStack_* st = &mgr->stack[target_side][slot];
         if (!st || st->count_current <= 0) {                      // 不存在/已死
             ++n;
             continue;
@@ -1680,8 +1681,10 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         // 资格只看"英雄会不会"（HeroMagicAllowed_ 已含 HasSpell 与费用/回合
         // 门槛）；学校等级 0 照样能施放原版 baseValue[0]（H3Note 禁施笔记），
         // 群体版资格由 StatusSpellCanMass 单独判，不拿 exp<=0 当未学。
+        // 敌方减益（迟缓大法/失明/诅咒/…）不走这条路：它们的目标在敌方，
+        // 由下面的通用敌方分支统一处理（2026-10-16 扩表后不再是"只有减速"）。
         if (spell <= 0 || spell >= 81
-                || spell == H3AutoPolicy::kSlowSpellId)
+                || H3AutoPolicy::IsEnemyStatusSpell(spell))
             continue;
         unsigned spell_flags = 0;
         __try {
@@ -1759,259 +1762,138 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     int spell_id = best_index >= 0 ? status.slots[best_index] : -1;
     // 施法目标格：≥0 = 单体打这一格；-1 = 无目标群体施放。
     int cast_hex = best_index >= 0 ? single_hex[best_index] : -1;
-    // 敌方失明（62，单体对敌；2026-10-16 用户提出「保持状态里对敌人增加
-    // 一个选项」）。排在友方增益之后、减速之前：失明通常只 1 回合（被打断
-    // 或到期就得续），减速是长时效群体法术；两者同时到期时先补失明（一支
-    // 还能自由行动的敌人比一支变慢的敌人更危险）。阈值语义与其它状态法术
-    // 同源（剩余回合 ≤ refresh_turns 才补），但单体是逐队判定，没有减速那
-    // 套「敌方任一队已覆盖即整体达标」的规则——按用户 2026-10-16 口径：
-    // 自动遍历所有可失明的敌方部队，发现有该补的了就补给它。
-    int blind_hex = -1;
+    // 敌方持续减益（白名单 10 个法术，含迟缓大法与双目失明；2026-10-16 用户
+    // 裁定「魔法下拉框中的可选项改成根据魔法的目标分为己方、敌方两大类」）。
+    // 逐个已配置的敌方槽算出"该不该补、补在哪"，再按「剩余回合最少者先补、
+    // 并列按白名单顺序」挑一个动手——白名单把失明排最前、迟缓大法排最后，
+    // 保住了早期裁定「失明与减速同时到期先补失明」（一支还能自由行动的敌人
+    // 比一支变慢的敌人更危险）。单体（失明/遗忘/丧心病狂/蛊惑人心，以及玩家
+    // 选「指定」的任何敌方法术）逐队判定；群体（该学派等级能群体且玩家选
+    // 「全体」）按语义 A：敌方已有任意一队还带着就不重复施。
     if (spell_id < 0) {
-        const int blind_spell = H3AutoPolicy::kBlindSpellId;
-        // 找失明所在的槽（拿它的目标模式与指定目标格）。同一种法术不重复占槽
-        // （下拉剔除已选项），所以最多一个。
-        int blind_slot = -1;
+        int best_remain = -1;
+        int best_hex = -1;
         for (int i = 0; i < status.slot_count
-                && i < H3AutoPolicy::kStatusSlotCapacity; ++i)
-            if (status.slots[i] == blind_spell) { blind_slot = i; break; }
-        const bool want_blind = blind_slot >= 0;
-        const int blind_mode = blind_slot >= 0
-            ? status.target_mode[blind_slot] : H3AutoPolicy::kStatusTargetAll;
-        const int blind_want_hex = blind_slot >= 0
-            ? status.target_hex[blind_slot] : -1;
-        const bool blind_masked =
-            (g_status_immune_mask & (1ULL << blind_spell)) != 0
-            || !HeroMagicAllowed_(cm, side, blind_spell);
-        int blind_exp = 0;
-        unsigned blind_flags = 0;
-        if (want_blind && !blind_masked) {
-            __try {
-                blind_exp = hero->GetSpellExpertise(blind_spell,
-                    cm->specialTerrain);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            __try {
-                BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
-                if (spell_table)
-                    blind_flags = *reinterpret_cast<unsigned*>(
-                        spell_table + blind_spell * 0x88 + 0x0C);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                blind_flags = 0;
-            }
-        }
-        int blind_durations[21] = {};
-        int blind_hexes[21] = {};
-        int64_t blind_threats[21] = {};
-        int blind_acceptable = 0;
-        int blind_living = 0;
-        for (int slot = 0; slot < 21; ++slot) {
-            _BattleStack_* st = &mgr->stack[enemy_side][slot];
-            if (st && st->count_current > 0) ++blind_living;
-        }
-        // 资格只看魔法书（blind_masked 已含 HasSpell）；学校等级不限——失明是
-        // 单体法术，原版 exp0 也照样能放（baseValue[0]）。
-        if (want_blind && !blind_masked) {
-            GatherBlindCandidates_(mgr, cm, side, blind_spell, blind_flags,
-                enemy_side, blind_durations, blind_hexes, blind_threats, 21);
-            for (int i = 0; i < 21; ++i)
-                if (blind_durations[i] >= 0) ++blind_acceptable;
-            if (blind_living > 0 && blind_acceptable == 0
-                    && (g_status_norecipient_logged
-                        & (1ULL << blind_spell)) == 0) {
-                g_status_norecipient_logged |= 1ULL << blind_spell;
-                LogInfo("[Status] spell=%d 当前没有可接受失明的存活敌军，不施放",
-                    blind_spell);
-            }
-        }
-        const H3AutoPolicy::StatusMaintainChoice blind =
-            H3AutoPolicy::ChooseBlindTarget(blind_durations, blind_hexes,
-                blind_threats, 21, refresh_turns);
-        // 「指定」：只认玩家点过的那一队（它得在可失明候选里，且确实该补——
-        // 剩余回合 ≤ 阈值）。原版失明没有群体版，选「全体」也是同一套单体
-        // 逻辑（按剩余最少/威胁最大兜底），故两者只在目标来源上不同。
-        int blind_pick_hex = blind.spell_id == blind_spell ? blind.target_hex : -1;
-        if (blind_pick_hex >= 0
-                && blind_mode == H3AutoPolicy::kStatusTargetPick) {
-            int hit = -1;
-            for (int i = 0; i < 21; ++i)
-                if (blind_durations[i] >= 0 && blind_hexes[i] == blind_want_hex) {
-                    hit = i;
-                    break;
+                && i < H3AutoPolicy::kStatusSlotCapacity; ++i) {
+            const int spell = status.slots[i];
+            if (!H3AutoPolicy::IsEnemyStatusSpell(spell)) continue;
+            const bool masked =
+                (g_status_immune_mask & (1ULL << spell)) != 0
+                || !HeroMagicAllowed_(cm, side, spell);
+            const int mode = status.target_mode[i];
+            int exp_here = 0;
+            unsigned flags = 0;
+            if (!masked) {
+                __try {
+                    exp_here = hero->GetSpellExpertise(spell,
+                        cm->specialTerrain);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    const BYTE* spell_table =
+                        *reinterpret_cast<BYTE**>(0x687FA8);
+                    if (spell_table)
+                        flags = *reinterpret_cast<const unsigned*>(
+                            spell_table + spell * 0x88 + 0x0C);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    flags = 0;
                 }
-            if (hit < 0) {
-                blind_pick_hex = -1;   // 指定目标已不可失明（阵亡/免疫/换场）
-                LogDebug("[Status] blind 指定目标 hex=%d 不可用，本回合不施放",
-                    blind_want_hex);
-            } else if (blind_durations[hit] > refresh_turns) {
-                blind_pick_hex = -1;   // 还够，不动它
-                LogDebug("[Status] blind 指定目标 hex=%d 剩余 %d > 阈值 %d，不施放",
-                    blind_want_hex, blind_durations[hit], refresh_turns);
+            }
+            // 群体可行性＝法术表 flags ＋ 该法术所属学派（水火土气）的熟练度，
+            // 与友方槽同一判据（用户 2026-10-16 裁定的第 2 条）。
+            const bool can_mass =
+                H3AutoPolicy::StatusSpellCanMass(spell, flags, exp_here);
+            const bool mass_mode =
+                can_mass && mode == H3AutoPolicy::kStatusTargetAll;
+            int durations[21] = {};
+            int hexes[21] = {};
+            int64_t threats[21] = {};
+            int acceptable = 0;
+            int living = 0;
+            if (!masked) {
+                for (int slot = 0; slot < 21; ++slot) {
+                    _BattleStack_* st = &mgr->stack[enemy_side][slot];
+                    if (st && st->count_current > 0) ++living;
+                }
+                GatherSideStatusCandidates_(mgr, cm, side, enemy_side, spell,
+                    flags, durations, hexes, threats, 21);
+                for (int q = 0; q < 21; ++q)
+                    if (durations[q] >= 0) ++acceptable;
+                if (living > 0 && acceptable == 0
+                        && (g_status_norecipient_logged & (1ULL << spell)) == 0) {
+                    g_status_norecipient_logged |= 1ULL << spell;
+                    LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放",
+                        spell);
+                }
+            }
+            int remain = -1;
+            int pick_hex = -1;
+            if (mass_mode) {
+                H3AutoPolicy::ChooseEnemyMassStatusTarget(spell, durations, 21,
+                    refresh_turns, &remain);
             } else {
-                blind_pick_hex = blind_want_hex;
+                const int pick = H3AutoPolicy::ChooseEnemySingleStatusTarget(
+                    durations, hexes, threats, 21, refresh_turns,
+                    mode == H3AutoPolicy::kStatusTargetPick
+                        ? status.target_hex[i] : -1);
+                if (pick >= 0) {
+                    remain = durations[pick];
+                    pick_hex = hexes[pick];
+                }
+            }
+            LogDebug("[Status] enemy cand slot=%d spell=%d mode=%d mass=%d exp=%d want=%d remain=%d hex=%d cand=%d living=%d masked=%d",
+                i, spell, mode, mass_mode ? 1 : 0, exp_here, remain >= 0 ? 1 : 0,
+                remain, pick_hex, acceptable, living, masked ? 1 : 0);
+            if (remain < 0) continue;
+            if (best_remain < 0 || remain < best_remain) {
+                best_remain = remain;
+                best_hex = pick_hex;
+                spell_id = spell;
+                cast_hex = pick_hex;
             }
         }
-        if (blind_pick_hex >= 0) {
-            spell_id = blind_spell;
-            blind_hex = blind_pick_hex;
-            // 失效目标落到哪一队：info 留痕（玩家可感知的“为什么是它”）。
+        // 选中单体目标后留一条 info：打的是哪一队、为什么是它（remain＝急迫度，
+        // value＝原版军队价值口径的威胁值）。
+        if (best_hex >= 0 && spell_id > 0) {
             int t_slot = -1;
             int t_cid = -1;
             int t_count = 0;
             int t_remain = -1;
-            int t_value = 0;
-            for (int i = 0; i < 21; ++i) {
-                if (blind_hexes[i] != blind_pick_hex) continue;
-                t_slot = i;
-                t_remain = blind_durations[i];
-                t_value = blind_threats[i] > 2000000000LL
-                    ? 2000000000 : static_cast<int>(blind_threats[i]);
-                __try {
-                    t_cid = mgr->stack[enemy_side][i].creature_id;
-                    t_count = mgr->stack[enemy_side][i].count_current;
-                } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                break;
-            }
-            LogInfo("[Status] 失明目标 slot=%d cid=0x%X count=%d remain=%d th=%d value=%d hex=%d turn=%d",
-                t_slot, t_cid, t_count, t_remain, refresh_turns, t_value,
-                blind_hex, status_turn);
-        }
-        LogDebug("[Status] blind branch want=%d exp=%d pick=%d th=%d turn=%d cand=%d living=%d masked=%d",
-            want_blind ? 1 : 0, blind_exp, spell_id, refresh_turns, status_turn,
-            blind_acceptable, blind_living, blind_masked ? 1 : 0);
-    }
-    if (spell_id < 0) {
-        // 减速槽的目标模式与指定目标格（同一种法术不重复占槽，最多一个）。
-        int slow_slot = -1;
-        for (int i = 0; i < status.slot_count
-                && i < H3AutoPolicy::kStatusSlotCapacity; ++i)
-            if (status.slots[i] == H3AutoPolicy::kSlowSpellId) { slow_slot = i; break; }
-        const bool want_slow = slow_slot >= 0;
-        const int slow_mode = slow_slot >= 0
-            ? status.target_mode[slow_slot] : H3AutoPolicy::kStatusTargetAll;
-        const int slow_want_hex = slow_slot >= 0
-            ? status.target_hex[slow_slot] : -1;
-        int expertise = 0;
-        __try {
-            expertise = hero->GetSpellExpertise(H3AutoPolicy::kSlowSpellId,
-                cm->specialTerrain);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        // 单体减速（非专家、或玩家选「指定」）也支持：原版非专家减速就是单体，
-        // 选「指定」时按玩家点的那一队（失效或还够就本回合不施）。
-        const bool slow_mass = expertise >= 3
-            && slow_mode == H3AutoPolicy::kStatusTargetAll;
-        int enemy_durations[21] = {};
-        int enemy_hexes[21] = {};
-        int slow_single_hex = -1;
-        const bool slow_masked =
-            (g_status_immune_mask & (1ULL << H3AutoPolicy::kSlowSpellId)) != 0
-            || !HeroMagicAllowed_(cm, side, H3AutoPolicy::kSlowSpellId);
-        int found_slow = -1;
-        if (want_slow && !slow_masked) {
-            unsigned slow_flags = 0;
-            __try {
-                BYTE* spell_table = *reinterpret_cast<BYTE**>(0x687FA8);
-                if (spell_table)
-                    slow_flags = *reinterpret_cast<unsigned*>(
-                        spell_table + H3AutoPolicy::kSlowSpellId * 0x88 + 0x0C);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                slow_flags = 0;
-            }
-            int stack_durations[21] = {};
-            int stack_hexes[21] = {};
-            int stack_count = 0;
-            int living_slow = 0;
+            int64_t t_threat = 0;
             for (int slot = 0; slot < 21; ++slot) {
                 _BattleStack_* st = &mgr->stack[enemy_side][slot];
                 if (!st || st->count_current <= 0) continue;
-                ++living_slow;
-                if (!TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st),
-                        H3AutoPolicy::kSlowSpellId)
-                    || !StackCanReceiveStatusSpell_(st, H3AutoPolicy::kSlowSpellId,
-                        slow_flags))
-                    continue;
-                int dur = 0;
+                if (StackHex_(st) != best_hex) continue;
+                t_slot = slot;
                 __try {
-                    dur = st->active_spell_duration[H3AutoPolicy::kSlowSpellId];
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    continue;
+                    t_cid = st->creature_id;
+                    t_count = st->count_current;
+                    t_remain = st->active_spell_duration[spell_id];
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                if (t_cid >= 0 && t_cid < 150) {
+                    int unit = P_CreatureInformation[t_cid].aiValue;
+                    if (unit <= 0) unit = P_CreatureInformation[t_cid].fightValue;
+                    if (unit <= 0) unit = P_CreatureInformation[t_cid].hitPoints;
+                    t_threat = static_cast<int64_t>(unit > 0 ? unit : 0)
+                        * static_cast<int64_t>(t_count);
                 }
-                const int hex = StackHex_(st);
-                if (hex < 0) continue;
-                stack_durations[stack_count] = dur > 0 ? dur : 0;
-                stack_hexes[stack_count] = hex;
-                ++stack_count;
+                break;
             }
-            if (living_slow > 0 && stack_count == 0
-                    && (g_status_norecipient_logged
-                        & (1ULL << H3AutoPolicy::kSlowSpellId)) == 0) {
-                g_status_norecipient_logged |= 1ULL << H3AutoPolicy::kSlowSpellId;
-                LogInfo("[Status] spell=%d 当前没有可接受的存活部队，不施放",
-                    H3AutoPolicy::kSlowSpellId);
+            LogInfo("[Status] 敌方状态目标 slot=%d spell=%d cid=0x%X count=%d remain=%d th=%d value=%d hex=%d turn=%d",
+                t_slot, spell_id, t_cid, t_count, t_remain, refresh_turns,
+                t_threat > 2000000000LL ? 2000000000
+                                        : static_cast<int>(t_threat),
+                best_hex, status_turn);
+        } else if (spell_id < 0) {
+            char buffs[80] = "";
+            for (int i = 0; i < status.slot_count
+                    && i < H3AutoPolicy::kStatusSlotCapacity; ++i) {
+                char one[12];
+                _snprintf(one, sizeof(one), "%s%d", i ? "," : "", durations[i]);
+                strcat_s(buffs, sizeof(buffs), one);
             }
-            if (slow_mass) {
-                found_slow = H3AutoPolicy::RepresentativeMassDuration(
-                    stack_durations, stack_count);
-            } else {
-                // 单体：优先玩家指定格，其次剩余最少者（并列取先出现的）。
-                const int pick = H3AutoPolicy::ChooseSingleStatusTarget(
-                    stack_durations, stack_hexes, stack_count,
-                    slow_mode == H3AutoPolicy::kStatusTargetPick
-                        ? slow_want_hex : -1);
-                if (pick >= 0 && stack_durations[pick] <= refresh_turns) {
-                    found_slow = stack_durations[pick];
-                    slow_single_hex = stack_hexes[pick];
-                } else if (pick >= 0) {
-                    found_slow = stack_durations[pick];   // 还够：不施放
-                }
-            }
+            LogDebug("[Status] enemy branch none turn=%d slots=%d buffs=[%s]",
+                status_turn, status.slot_count, buffs);
         }
-        for (int slot = 0; slot < 21; ++slot) {
-            _BattleStack_* st = &mgr->stack[enemy_side][slot];
-            // found_slow < 0 表示没有可接受的敌方，不能改记成 0，否则会去施放。
-            enemy_durations[slot] = (want_slow && !slow_masked
-                    && st && st->count_current > 0 && found_slow >= 0)
-                ? found_slow : -1;
-            enemy_hexes[slot] = slow_single_hex >= 0 ? slow_single_hex : 0;
-        }
-        const H3AutoPolicy::StatusMaintainChoice slow =
-            H3AutoPolicy::ChooseSlowTarget(
-                slow_mass, enemy_durations, enemy_hexes, 21,
-                refresh_turns);
-        spell_id = slow.spell_id;
-        // 单体减速（非专家、或玩家选「指定」）：ChooseSlowTarget 只负责群体，
-        // 这里自己把槽位里选中它的那一队交出去。
-        if (!slow_mass && slow_single_hex >= 0) {
-            spell_id = H3AutoPolicy::kSlowSpellId;
-            cast_hex = slow_single_hex;
-        }
-        // 实锤快照：cas=施法前 currentActiveSide；slow_low/min=敌方迟缓
-        // 剩余时长 ≤阈值 的队数与最小值（-1 视为无/免疫，不参与）。
-        int slow_low = 0;
-        int slow_min = 99;
-        for (int q = 0; q < 21; ++q) {
-            if (enemy_durations[q] >= 0
-                    && enemy_durations[q] <= refresh_turns) {
-                ++slow_low;
-                if (enemy_durations[q] < slow_min) slow_min = enemy_durations[q];
-            }
-        }
-        int cas_now = -1;
-        __try {
-            if (cm) cas_now = cm->currentActiveSide;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        // 诊断摘要：各增益槽采用“找到的第一队已有状态”的剩余回合
-        // （-1=没学/已跳过，0=没有任何一队已有，>0=已有剩余回合）。
-        char buffs[80] = "";
-        for (int i = 0; i < status.slot_count
-                && i < H3AutoPolicy::kStatusSlotCapacity; ++i) {
-            char one[12];
-            _snprintf(one, sizeof(one), "%s%d", i ? "," : "", durations[i]);
-            strcat_s(buffs, sizeof(buffs), one);
-        }
-        LogDebug("[Status] slow branch want=%d mode=%d mass=%d exp=%d pick=%d th=%d turn=%d cas=%d slow_low=%d slow_min=%d buffs=[%s]",
-            want_slow ? 1 : 0, slow_mode, slow_mass ? 1 : 0, expertise, spell_id,
-            refresh_turns, status_turn,
-            cas_now, slow_low, slow_min == 99 ? -1 : slow_min, buffs);
     }
     if (spell_id < 0 || spell_id >= 70) return false;
     // 等级只作为施法实参（效果强度/群体版），**不作为资格**：能不能放以魔法书
@@ -2025,10 +1907,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         expertise = 0;
     }
     if (!HeroMagicAllowed_(cm, side, spell_id)) return false;
-    // 失明的目标格来自候选选择（blind_hex），其余法术的目标格来自槽位的
-    // 「指定」模式（cast_hex，-1 = 群体无目标格）。两者统一成一个施法格。
-    int cast_hex_final = (spell_id == H3AutoPolicy::kBlindSpellId)
-        ? blind_hex : cast_hex;
+    // 队友与敌方的目标格都已在上面选好并写进 cast_hex（≥0 = 单体打这一格，
+    // -1 = 无目标群体施放）：统一成一个施法格，不再区分法术。
+    int cast_hex_final = cast_hex;
     if (cast_hex_final >= 0) {
         // 单体：目标格由候选/玩家指定给出；可施与否交原版判定
         // （与保活的 CanCastSpellAtCoord 同款，避免弹出阻止框/空放）。
@@ -2083,8 +1964,8 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     // 施后验证：若目标侧没有任何存活队获得持续时间，说明该法术本场
     // 完全无法生效，整场跳过，避免每回合无效重施。
     {
-        const int check_side = (spell_id == H3AutoPolicy::kSlowSpellId
-                || spell_id == H3AutoPolicy::kBlindSpellId) ? enemy_side : side;
+        const int check_side =
+            H3AutoPolicy::IsEnemyStatusSpell(spell_id) ? enemy_side : side;
         bool any_received = false;
         bool any_checked = false;
         __try {
