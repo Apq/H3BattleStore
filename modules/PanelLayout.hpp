@@ -5,7 +5,7 @@ static const int PANEL_W    = 680;
 // 底部状态栏 +26，背景图 HA_bg.pcx 同步为 680×548（底部 y=508 前插 20px 木纹带，底框原样下移）。
 static const int PANEL_H    = 548;
 static const int COLS       = 1;   // 一行一格（单列宽格）
-static const int VISIBLE_ROWS = 4; // 停止行底103→下分隔线456之间放4行
+static const int VISIBLE_ROWS = 3; // 首行放每回合施法时机，下方三行部队卡片
 static const int CELL_W     = 511; // 内容区 129..660(=帮助按钮右缘636+24)，滚动条前留4px
 // 移除施法行后卡片高88，其余信息上移22px，头像原坐标保持。
 static const int CELL_H     = 88;
@@ -17,11 +17,20 @@ static const int GRID_FRAME_H = 342;
 static const int GRID_FRAME_X = 129;  // 左界左移 10
 static const int GRID_FRAME_Y = 109;  // 窗口加高20：内容整体下移15
 static const int GRID_X      = GRID_FRAME_X; // 卡片贴内容区左缘
-static const int GRID_Y      = 105;  // 停止行(STOP_ROW_Y 85+18)下方2px；4行底451=内容区底
+static const int ARMY_TIMING_Y = 105;
+static const int ARMY_TIMING_H = 18;
+static const int ARMY_TIMING_LABEL_W = 86;
+static const int ARMY_TIMING_MODE_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W;
+static const int ARMY_TIMING_MODE_W = 86;
+static const int ARMY_TIMING_UNIT_X = GRID_FRAME_X + ARMY_TIMING_LABEL_W
+    + ARMY_TIMING_MODE_W + 10;
+static const int ARMY_TIMING_UNIT_W = 280;
+// 首行行高按部队框（要放头像，与保持状态第三小列同款）＝STATUS_UNIT_ITEM_H。
+static const int GRID_Y      = 171;  // 施法时机首行（105+60）下方6px；三卡片底431
 static const int SCROLL_W    = 16;
 static const int SCROLL_X    = GRID_FRAME_X + GRID_FRAME_W - SCROLL_W; // 贴内容区右缘
 static const int SCROLL_Y    = GRID_Y;
-static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 346（4行）
+static const int SCROLL_H    = CELL_H + (VISIBLE_ROWS - 1) * CELL_STEP_Y;  // 260（3行）
 static const int MARGIN      = 20;
 static const int TITLE_H    = 44;
 static const int BTN_W      = 64;

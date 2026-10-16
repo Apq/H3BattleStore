@@ -251,9 +251,11 @@ static BattleJson ForceFieldToJson_(const ForceFieldProfileFields& forcefield)
 
 static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
     uint16_t* stop_turns, SummonProfileFields* summon,
-    StatusProfileFields* status, ForceFieldProfileFields* forcefield)
+    StatusProfileFields* status, SpellCastTimingFields* cast_timing,
+    ForceFieldProfileFields* forcefield)
 {
-    if (!obj.is_object() || !rules || !stop_turns || !summon || !status || !forcefield)
+    if (!obj.is_object() || !rules || !stop_turns || !summon || !status
+        || !cast_timing || !forcefield)
         return false;
     if (!obj.contains("forcefield")
         || !ParseForceFieldJson_(obj["forcefield"], forcefield))
@@ -289,6 +291,31 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
     if (!obj.contains("status")
         || !ParseStatusJson_(obj["status"], status))
         return false;
+    *cast_timing = MakeDefaultSpellCastTiming();
+    // 缺键保持旧语义：每回合首次轮到玩家行动时施法。
+    if (obj.contains("castTiming")) {
+        const BattleJson& ct = obj["castTiming"];
+        if (!ct.is_object()) return false;
+        // 键存在时保持严格类型：缺键走旧行为；已存在的键不能静默回退。
+        const char* keys[] = {"mode", "kind", "side", "value", "occurrence"};
+        for (const char* key : keys)
+            if (!ct.contains(key) || !ct[key].is_number_integer()) return false;
+        const long long mode = ct["mode"].get<long long>();
+        const long long kind = ct["kind"].get<long long>();
+        const long long side = ct["side"].get<long long>();
+        const long long value = ct["value"].get<long long>();
+        const long long occurrence = ct["occurrence"].get<long long>();
+        if (mode < 0 || mode > 255 || kind < -128 || kind > 127
+            || side < -128 || side > 127 || value < -32768 || value > 32767
+            || occurrence < -128 || occurrence > 127)
+            return false;
+        cast_timing->mode = static_cast<uint8_t>(mode);
+        cast_timing->target_kind = static_cast<int8_t>(kind);
+        cast_timing->target_side = static_cast<int8_t>(side);
+        cast_timing->target_value = static_cast<int16_t>(value);
+        cast_timing->target_occurrence = static_cast<int8_t>(occurrence);
+        NormalizeSpellCastTiming(cast_timing);
+    }
     for (int i = 0; i < 21; ++i) rules[i] = MakeDefaultRule();
     if (!obj.contains("army") || !obj["army"].is_array()) return false;
     for (const BattleJson& unit : obj["army"]) {
@@ -303,7 +330,8 @@ static bool ParseProfileJson_(const BattleJson& obj, AutoStackRule rules[21],
 
 static BattleJson ProfileToJson_(const AutoStackRule rules[21],
     uint16_t stop_turns, const SummonProfileFields& summon,
-    const StatusProfileFields& status, const ForceFieldProfileFields& forcefield)
+    const StatusProfileFields& status, const SpellCastTimingFields& cast_timing,
+    const ForceFieldProfileFields& forcefield)
 {
     BattleJson army = BattleJson::array();
     for (int slot = 0; slot < 21; ++slot) {
@@ -333,6 +361,13 @@ static BattleJson ProfileToJson_(const AutoStackRule rules[21],
         }},
         {"army", army},
         {"status", StatusToJson_(status)},
+        {"castTiming", {
+            {"mode", (int)cast_timing.mode},
+            {"kind", (int)cast_timing.target_kind},
+            {"side", (int)cast_timing.target_side},
+            {"value", (int)cast_timing.target_value},
+            {"occurrence", (int)cast_timing.target_occurrence},
+        }},
         {"forcefield", ForceFieldToJson_(forcefield)},
     };
 }
@@ -352,7 +387,7 @@ static bool ParseRecordJson_(const BattleJson& obj, BattleStoreRecord* rec)
     for (int i = 0; i < 5; ++i) {
         if (!ParseProfileJson_(obj["profiles"][i], rec->rules[i],
                 &rec->stop_turns[i], &rec->summon[i], &rec->status[i],
-                &rec->forcefield[i]))
+                &rec->cast_timing[i], &rec->forcefield[i]))
             return false;
     }
     return true;

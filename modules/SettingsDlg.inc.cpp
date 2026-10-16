@@ -38,6 +38,7 @@ static struct Panel {
     uint16_t draft_stop_turns[PROFILE_COUNT];       // 自动停止回合草稿，0=关闭，0..999
     SummonProfileFields draft_summon[PROFILE_COUNT]; // 召唤通道草稿（启用/阈值/法术/召唤物规则/敌方法力停）
     StatusProfileFields draft_status[PROFILE_COUNT]; // 保持状态草稿
+    SpellCastTimingFields draft_cast_timing[PROFILE_COUNT]; // 每回合施法时机草稿
     H3AutoPolicy::ForceFieldProfileFields draft_forcefield[PROFILE_COUNT];
     bool status_add_armed; // 保持状态「＋」已按下，松开才追加
     int selected_profile;                           // 当前编号 0..4（存档文件编号 = 界面方案 1-5）
@@ -415,6 +416,106 @@ static int  s_status_unit_cid[STATUS_UNIT_CAP] = {};
 static int  s_status_unit_side[STATUS_UNIT_CAP] = {};
 static int  s_status_unit_count = 0;
 
+// Army 页方案级施法时机下拉：己方存活本体/召唤物均可选。
+static bool s_cast_timing_dd_open = false;
+static int s_cast_timing_dd_kind = 0; // 1=模式，2=部队
+static int s_cast_timing_dd_hover = -1;
+static int s_cast_timing_dd_first = 0;
+static int s_cast_timing_unit_count = 0;
+static int s_cast_timing_unit_cid[STATUS_UNIT_CAP] = {};
+static int s_cast_timing_unit_count_alive[STATUS_UNIT_CAP] = {};
+static int s_cast_timing_unit_hex[STATUS_UNIT_CAP] = {};
+static SpellCastTimingFields s_cast_timing_unit_id[STATUS_UNIT_CAP] = {};
+
+static void BuildCastTimingCandidates_()
+{
+    s_cast_timing_unit_count = 0;
+    _BattleMgr_* mgr = o_BattleMgr;
+    if (!mgr) return;
+    const int side = ResolveHumanSide_(mgr);
+    if (side < 0 || side > 1) return;
+    for (int slot = 0; slot < 21 && s_cast_timing_unit_count < STATUS_UNIT_CAP; ++slot) {
+        _BattleStack_* st = &mgr->stack[side][slot];
+        if (st->count_current <= 0 || st->creature_id < 0) continue;
+        int occurrence = 0;
+        for (int prior = 0; prior < slot; ++prior)
+            if ((mgr->stack[side][prior].count_at_start > 0
+                    || mgr->stack[side][prior].count_current > 0)
+                && mgr->stack[side][prior].creature_id == st->creature_id)
+                ++occurrence;
+        const int i = s_cast_timing_unit_count++;
+        const H3AutoPolicy::StableStackIdentity id = H3AutoPolicy::MakeStableStackIdentity(side,
+            st->clone_id > 0 ? -1 : st->source_army_slot,
+            st->creature_id, occurrence);
+        s_cast_timing_unit_id[i] = MakeDefaultSpellCastTiming();
+        s_cast_timing_unit_id[i].mode = CAST_TIMING_UNIT;
+        s_cast_timing_unit_id[i].target_kind = static_cast<int8_t>(id.kind);
+        s_cast_timing_unit_id[i].target_side = id.side;
+        s_cast_timing_unit_id[i].target_value = id.value;
+        s_cast_timing_unit_id[i].target_occurrence = id.occurrence;
+        s_cast_timing_unit_cid[i] = st->creature_id;
+        s_cast_timing_unit_count_alive[i] = st->count_current;
+        s_cast_timing_unit_hex[i] = StackHex_(st);
+    }
+}
+
+static void ResetCastTimingDropdown_()
+{
+    s_cast_timing_dd_open = false;
+    s_cast_timing_dd_kind = 0;
+    s_cast_timing_dd_hover = -1;
+    s_cast_timing_dd_first = 0;
+}
+
+static void CastTimingModeRect_(int* x, int* y, int* w, int* h)
+{
+    if (x) *x = ARMY_TIMING_MODE_X;
+    if (y) *y = ARMY_TIMING_Y;
+    if (w) *w = ARMY_TIMING_MODE_W;
+    if (h) *h = ARMY_TIMING_H;
+}
+
+static void CastTimingUnitRect_(int* x, int* y, int* w, int* h)
+{
+    if (x) *x = ARMY_TIMING_UNIT_X;
+    if (y) *y = ARMY_TIMING_Y;
+    if (w) *w = ARMY_TIMING_UNIT_W;
+    if (h) *h = STATUS_UNIT_ITEM_H; // 要放头像（60），与保持状态第三小列同款
+}
+
+static int CastTimingListRows_()
+{
+    return ListVisibleRowsInArea_(ARMY_TIMING_Y, STATUS_UNIT_ITEM_H,
+        STATUS_UNIT_ITEM_H, s_cast_timing_unit_count,
+        GRID_FRAME_Y, MAGIC_LIST_BOTTOM, nullptr);
+}
+
+static int CastTimingFirstRow_()
+{
+    const int last = s_cast_timing_unit_count - CastTimingListRows_();
+    if (s_cast_timing_dd_first < 0) s_cast_timing_dd_first = 0;
+    if (s_cast_timing_dd_first > last) s_cast_timing_dd_first = last;
+    return s_cast_timing_dd_first;
+}
+
+static int CastTimingListOriginY_()
+{
+    return ListOriginYInArea_(ARMY_TIMING_Y, STATUS_UNIT_ITEM_H,
+        STATUS_UNIT_ITEM_H, s_cast_timing_unit_count,
+        GRID_FRAME_Y, MAGIC_LIST_BOTTOM);
+}
+
+static int FindCastTimingCandidate_(const SpellCastTimingFields& f)
+{
+    for (int i = 0; i < s_cast_timing_unit_count; ++i)
+        if (f.target_kind == s_cast_timing_unit_id[i].target_kind
+            && f.target_side == s_cast_timing_unit_id[i].target_side
+            && f.target_value == s_cast_timing_unit_id[i].target_value
+            && f.target_occurrence == s_cast_timing_unit_id[i].target_occurrence)
+            return i;
+    return -1;
+}
+
 static void StatusResetDropdowns_()
 {
     s_status_dd_open = -1;
@@ -591,6 +692,7 @@ static void CloseSummonDropdowns_()
     s_summon_act_dd_hover = -1;
     s_status_dd_open = -1;
     s_status_dd_hover = -1;
+    ResetCastTimingDropdown_();
     StatusResetDropdowns_();
     CloseAttackMagicUi_();
 }
@@ -958,6 +1060,7 @@ void ResetPanelDrafts()
         s_p.draft_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         s_p.draft_summon[p] = summon_def;
         s_p.draft_status[p] = H3AutoPolicy::MakeDefaultStatusFields();
+        s_p.draft_cast_timing[p] = H3AutoPolicy::MakeDefaultSpellCastTiming();
         s_p.draft_forcefield[p] = H3AutoPolicy::MakeDefaultForceFieldFields();
     }
     LogInfo("[Panel] 草稿已随战斗结果清空（5 套方案+召唤参数）");
@@ -1026,6 +1129,7 @@ static void LoadBattleRecordIntoDrafts_(const BattleStoreRecord& rec)
         s_p.draft_stop_turns[p] = rec.stop_turns[p];
         s_p.draft_summon[p] = rec.summon[p];
         s_p.draft_status[p] = rec.status[p];
+        s_p.draft_cast_timing[p] = rec.cast_timing[p];
         s_p.draft_forcefield[p] = rec.forcefield[p];
     }
     s_p.selected_profile = rec.active;
@@ -1170,6 +1274,7 @@ void OpenSettingsPanel_()
     memcpy(s_p.draft_stop_turns, g_stop_turns, sizeof(s_p.draft_stop_turns));
     memcpy(s_p.draft_summon, g_summon, sizeof(s_p.draft_summon));
     memcpy(s_p.draft_status, g_status, sizeof(s_p.draft_status));
+    memcpy(s_p.draft_cast_timing, g_cast_timing, sizeof(s_p.draft_cast_timing));
     memcpy(s_p.draft_forcefield, g_forcefield, sizeof(s_p.draft_forcefield));
     s_stop_turns_editing = false;
     CancelManaThEdit_();
@@ -1278,7 +1383,7 @@ static void CommitAndCloseSettingsPanel_()
     bool store_added = false;
     CommitProfiles(s_p.selected_profile, s_p.draft_rules,
         s_p.draft_stop_turns, s_p.draft_summon, s_p.draft_status,
-        s_p.draft_forcefield, &store_added);
+        s_p.draft_cast_timing, s_p.draft_forcefield, &store_added);
     // 编号记忆随勾号生效写入（存档/读档只动草稿，不记编号）。
     RememberProfileSlot(s_p.selected_profile);
     // 本场存档下拉：新增时立刻重读内存列表并切到新档（降序 0=最新），
@@ -1532,6 +1637,39 @@ static bool UpdateDropdownHover_(int px, int py)
         }
         if (new_act_hover != s_summon_act_dd_hover) {
             s_summon_act_dd_hover = new_act_hover;
+            changed = true;
+        }
+    }
+    if (s_cast_timing_dd_open && s_cast_timing_dd_kind == 1) {
+        int hover = -1;
+        for (int v = 0; v < 2; ++v) {
+            const int y = ARMY_TIMING_Y + ARMY_TIMING_H
+                + v * STATUS_MODE_ITEM_H;
+            if (PointInRect_(px, py, ARMY_TIMING_MODE_X, y,
+                    ARMY_TIMING_MODE_W, STATUS_MODE_ITEM_H)) {
+                hover = v;
+                break;
+            }
+        }
+        if (hover != s_cast_timing_dd_hover) {
+            s_cast_timing_dd_hover = hover;
+            changed = true;
+        }
+    } else if (s_cast_timing_dd_open && s_cast_timing_dd_kind == 2
+        && s_cast_timing_unit_count > 0) {
+        int hover = -1;
+        const int first = CastTimingFirstRow_();
+        const int rows = CastTimingListRows_();
+        for (int v = 0; v < rows; ++v) {
+            const int y = CastTimingListOriginY_() + v * STATUS_UNIT_ITEM_H;
+            if (PointInRect_(px, py, ARMY_TIMING_UNIT_X, y,
+                    ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H)) {
+                hover = first + v;
+                break;
+            }
+        }
+        if (hover != s_cast_timing_dd_hover) {
+            s_cast_timing_dd_hover = hover;
             changed = true;
         }
     }
@@ -1996,6 +2134,81 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
         return;
     }
 
+    // Army 页施法时机下拉展开时：选项即选、点框收起、点外收起（与状态页同款）。
+    if (s_p.active_page == PAGE_ARMY && s_cast_timing_dd_open) {
+        if (raw_command == 4)
+            return;
+        if (raw_command == 8 || raw_command == 16) {
+            SpellCastTimingFields& ct =
+                s_p.draft_cast_timing[s_p.selected_profile];
+            if (s_cast_timing_dd_kind == 1) {
+                for (int v = 0; v < 2; ++v) {
+                    const int y = ARMY_TIMING_Y + ARMY_TIMING_H
+                        + v * STATUS_MODE_ITEM_H;
+                    if (!PointInRect_(px, py, ARMY_TIMING_MODE_X, y,
+                            ARMY_TIMING_MODE_W, STATUS_MODE_ITEM_H))
+                        continue;
+                    ct.mode = v ? CAST_TIMING_UNIT : CAST_TIMING_DEFAULT;
+                    if (ct.mode == CAST_TIMING_UNIT && ct.target_kind == 0) {
+                        BuildCastTimingCandidates_();
+                        if (s_cast_timing_unit_count > 0)
+                            ct = s_cast_timing_unit_id[0];
+                    }
+                    H3AutoPolicy::NormalizeSpellCastTiming(&ct);
+                    LogInfo("[Panel] 施法时机模式=%d (方案%d)", (int)ct.mode,
+                        s_p.selected_profile + 1);
+                    ResetCastTimingDropdown_();
+                    DrawPanelToBuffer_();
+                    return;
+                }
+                if (PointInRect_(px, py, ARMY_TIMING_MODE_X, ARMY_TIMING_Y,
+                        ARMY_TIMING_MODE_W, ARMY_TIMING_H)) {
+                    if (raw_command == 8) {
+                        ResetCastTimingDropdown_();
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                ResetCastTimingDropdown_();
+                DrawPanelToBuffer_();
+                return;
+            }
+            if (s_cast_timing_dd_kind == 2) {
+                if (s_cast_timing_unit_count > 0) {
+                    const int first = CastTimingFirstRow_();
+                    const int rows = CastTimingListRows_();
+                    for (int v = 0; v < rows; ++v) {
+                        const int i = first + v;
+                        const int y = CastTimingListOriginY_() + v * STATUS_UNIT_ITEM_H;
+                        if (!PointInRect_(px, py, ARMY_TIMING_UNIT_X, y,
+                                ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H))
+                            continue;
+                        ct = s_cast_timing_unit_id[i];
+                        ct.mode = CAST_TIMING_UNIT;
+                        LogInfo("[Panel] 施法时机指定部队 kind=%d side=%d val=%d occ=%d (方案%d)",
+                            (int)ct.target_kind, (int)ct.target_side,
+                            (int)ct.target_value, (int)ct.target_occurrence,
+                            s_p.selected_profile + 1);
+                        ResetCastTimingDropdown_();
+                        DrawPanelToBuffer_();
+                        return;
+                    }
+                }
+                if (PointInRect_(px, py, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y,
+                        ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H)) {
+                    if (raw_command == 8) {
+                        ResetCastTimingDropdown_();
+                        DrawPanelToBuffer_();
+                    }
+                    return;
+                }
+                ResetCastTimingDropdown_();
+                DrawPanelToBuffer_();
+                return;
+            }
+        }
+    }
+
     // 保持状态下拉展开时：选项即选、点框保持/收起、点外收起（三个小列同款语义）。
     if (s_p.active_page == PAGE_STATUS && StatusAnyDropdownOpen_()) {
         if (raw_command == 4)
@@ -2445,6 +2658,33 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
             }
             DrawPanelToBuffer_();
             return;
+        }
+
+        // ---- Army 首行：施法时机下拉（收起态点击展开）----
+        if (s_p.active_page == PAGE_ARMY) {
+            if (PointInRect_(px, py, ARMY_TIMING_MODE_X, ARMY_TIMING_Y,
+                    ARMY_TIMING_MODE_W, ARMY_TIMING_H)) {
+                BuildCastTimingCandidates_();
+                ResetCastTimingDropdown_();
+                s_cast_timing_dd_open = true;
+                s_cast_timing_dd_kind = 1;
+                s_cast_timing_dd_hover = -1;
+                DrawPanelToBuffer_();
+                return;
+            }
+            if (PointInRect_(px, py, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y,
+                    ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H)) {
+                BuildCastTimingCandidates_();
+                ResetCastTimingDropdown_();
+                if (s_cast_timing_unit_count > 0)
+                    s_cast_timing_dd_open = true;
+                else
+                    SetStatusText_(T("panel.cast_timing_unit_none_list"), 3000);
+                s_cast_timing_dd_kind = 2;
+                s_cast_timing_dd_hover = -1;
+                DrawPanelToBuffer_();
+                return;
+            }
         }
 
         // ---- 优先处理展开的下拉：其展开区可能覆盖到下方格子，须先消费防穿透 ----

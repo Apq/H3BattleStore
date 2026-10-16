@@ -101,8 +101,20 @@ static void TestMagicChannelJson()
         source->forcefield[p] = MakeDefaultForceFieldFields();
         source->forcefield[p].anchor_hex[0] = 20 + p;
         source->forcefield[p].anchor_hex[1] = 120 + p;
+        // 每回合施法时机（方案级）：默认方案 0/1 用「首次行动」，2/3/4 用
+        // 「指定部队」——本体军队槽与召唤物身份都要过真实 JSON 往返。
+        source->cast_timing[p] = MakeDefaultSpellCastTiming();
+        if (p >= 2) {
+            source->cast_timing[p].mode = CAST_TIMING_UNIT;
+            source->cast_timing[p].target_kind =
+                static_cast<int8_t>(p % 2 ? H3AutoPolicy::STACK_ID_SUMMON
+                                          : H3AutoPolicy::STACK_ID_ARMY_SLOT);
+            source->cast_timing[p].target_side = static_cast<int8_t>(p % 2);
+            source->cast_timing[p].target_value = static_cast<int16_t>(p);
+            source->cast_timing[p].target_occurrence = static_cast<int8_t>(p - 2);
+        }
         profiles.push_back(ProfileToJson_(source->rules[p], source->stop_turns[p],
-            summon, status, source->forcefield[p]));
+            summon, status, source->cast_timing[p], source->forcefield[p]));
     }
     const BattleJson record = {{"time", source->time}, {"active", source->active + 1},
         {"profiles", profiles}};
@@ -130,6 +142,21 @@ static void TestMagicChannelJson()
                 && decoded->rules[p][20 - p].target.meleePairCount == 2
                 && decoded->forcefield[p].anchor_hex[1] == 120 + p,
             "army slot mapping and forcefield survive each profile");
+        Check(decoded->cast_timing[p].mode
+                == (p >= 2 ? CAST_TIMING_UNIT : CAST_TIMING_DEFAULT),
+            "cast timing mode survives production codec roundtrip");
+        if (p >= 2)
+            Check(decoded->cast_timing[p].target_kind == (p % 2
+                        ? H3AutoPolicy::STACK_ID_SUMMON
+                        : H3AutoPolicy::STACK_ID_ARMY_SLOT)
+                    && decoded->cast_timing[p].target_side == (p % 2)
+                    && decoded->cast_timing[p].target_value == p
+                    && decoded->cast_timing[p].target_occurrence == p - 2,
+                "cast timing stable identity survives production codec roundtrip");
+        else
+            Check(decoded->cast_timing[p].target_kind == 0
+                    && decoded->cast_timing[p].target_value == -1,
+                "default cast timing keeps cleared identity after roundtrip");
         Check(decoded->rules[p][p].waitMode == AW_EVERY_TURN
                 && decoded->rules[p][20 - p].waitMode == AW_SIEGE,
             "wait mode survives production codec roundtrip per slot");
@@ -138,8 +165,37 @@ static void TestMagicChannelJson()
                 && decoded->rules[p][(p + 1) % 20].waitMode == AW_SIEGE,
             "siege action, safe hex and wait mode survive codec roundtrip");
         Check(ProfileToJson_(decoded->rules[p], decoded->stop_turns[p],
-                decoded->summon[p], decoded->status[p], decoded->forcefield[p]) == profiles[p],
+                decoded->summon[p], decoded->status[p], decoded->cast_timing[p],
+                decoded->forcefield[p]) == profiles[p],
             "production decoded profile reserializes to the identical JSON object");
+    }
+
+    // 旧档缺 castTiming 键 → 默认「首次行动」（缺键即旧行为，不升版本）。
+    {
+        BattleJson legacy = profiles[0];
+        legacy.erase("castTiming");
+        AutoStackRule rules[21];
+        uint16_t stop = 0;
+        SummonProfileFields summon_out = MakeDefaultSummonFields();
+        StatusProfileFields status_out = MakeDefaultStatusFields();
+        SpellCastTimingFields timing = {};
+        timing.mode = CAST_TIMING_UNIT;
+        timing.target_kind = 1;
+        timing.target_side = 0;
+        timing.target_value = 9;
+        ForceFieldProfileFields ff_out = MakeDefaultForceFieldFields();
+        Check(ParseProfileJson_(legacy, rules, &stop, &summon_out, &status_out,
+                &timing, &ff_out),
+            "legacy profile without castTiming key still parses");
+        Check(timing.mode == CAST_TIMING_DEFAULT && timing.target_kind == 0
+                && timing.target_value == -1,
+            "missing castTiming key decodes to default first-action timing");
+        // 非对象 castTiming 拒绝（严格校验保留给已存在的键）。
+        BattleJson broken = profiles[0];
+        broken["castTiming"] = 5;
+        Check(!ParseProfileJson_(broken, rules, &stop, &summon_out, &status_out,
+                &timing, &ff_out),
+            "non-object castTiming rejects the profile");
     }
 
     const BattleJson max_unsigned = static_cast<unsigned long long>(~0ULL);

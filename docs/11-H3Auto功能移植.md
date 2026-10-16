@@ -344,6 +344,15 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 
 **验证边界**：两变体 0 错 0 警、七组单测全绿、部署哈希一致；「按 F9 后当回合是否立即补施、『等待』不再是必须步骤」属游戏内行为，**由用户实机验收**。
 
+### 5.8 每回合施法时机玩家可配（2026-10-16 用户需求）
+
+原先「每回合第一次施法发生在什么时刻」是插件定死的：交权路径每次「控制权交给玩家」都判施法，配合 `heroCasted` 一回合一施，实际效果=**本回合首次轮到玩家行动时**。本需求把该时机交给玩家配置，且**不设置时保持原行为**。
+
+- **数据**（方案级，随 5 套方案各自保存）：`SpellCastTimingFields{mode, target_kind, target_side, target_value, target_occurrence}`（`PolicyCore.hpp`）。`mode=CAST_TIMING_DEFAULT`(0)=首次行动（缺省）；`mode=CAST_TIMING_UNIT`(1)=指定部队，目标用与部队规则同构的 `StableStackIdentity` 四元组（本体=军队槽 0..6，召唤物/克隆=生物 id+出现序；**不存会移动的 hex**）。`NormalizeSpellCastTiming` 把非法身份整体回默认；JSON v7 不升版，`castTiming` 键**缺失=旧行为**（技能例外条款），存在则严格校验。
+- **UI**（部队页）：Army 从 4 行卡片改 3 行，首行放「每回合施法时机」——模式（首次行动/指定部队）+ 指定部队两个下拉；候选=**己方存活部队含召唤物**（`BuildCastTimingCandidates_`，按 `MakeStableStackIdentity` 现算；候选下拉与保持状态第三小列同款：头像+位置+数量，展开方向/可见行/滚轮全走 `ListVisibleRowsInArea_`/`ListOriginYInArea_` 纯函数）。草稿语义同其它方案级设置：只随「确定」提交，取消回滚，切方案/读本场存档各自带值。
+- **运行时**：`CastTimingAllowsThisHandoff_(mgr, side)` 插在 `TryProtectCast_` 的 `heroCasted` 之前；独立的 `TryAttackMagicCast_` 在确认当前人类侧后也复用同一门闸，因此保活/状态/召唤与攻击魔法四通道时机一致。默认模式放行（行为不变）；指定模式取 `CurrentTurnStack_` 当前轮到部队、`BuildStableIdentitiesFromBattle_` 现算身份、`StableStackIdentityEquals` 比对——不匹配或身份不在场（阵亡/重打丢召唤物）本回合不判施法。`g_cast_in_flight`/`heroCasted` 防重入与一回合一施上限不变。
+- **验证边界**：两变体 0 错 0 警、七组单测全绿（含新用例 `policy: 每回合施法时机` 与 JSON 往返/缺键用例）、部署哈希一致；「指定部队轮到它行动时才施法、默认仍是首次行动」属游戏内行为，**由用户实机验收**。
+
 ## 6. 协作机制直连化改造
 
 两插件时代的协作 ABI（[协作与防冲突](<10-H3Auto协作与防冲突.md>) §2）靠 patcher 注册表 + 名字查询；合并成同 TU 后，移植侧不再需要「动态查询、加载顺序无关」，改为直接调用宿主实现。

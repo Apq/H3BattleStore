@@ -312,6 +312,9 @@ static bool TryAttackMagicCast_(_BattleMgr_* mgr)
         window.side = ResolveHumanSide_(mgr);
         if (window.side < 0 || window.side > 1
             || mgr->current_mon_side != window.side || mgr->action != 0) return false;
+        // 方案级施法时机与保活/状态/召唤通道一致：指定部队时，攻击魔法
+        // 也只在该部队轮到行动的交权窗口判定；默认模式保持首次行动语义。
+        if (!CastTimingAllowsThisHandoff_(mgr, window.side)) return true;
         window.index = mgr->current_mon_index;
         if (window.index < 0 || window.index >= 21) return false;
         window.current = CurrentTurnStack_(mgr);

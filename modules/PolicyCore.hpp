@@ -350,6 +350,44 @@ inline void NormalizeAttackMagicRule(AttackMagicRule* rule)
 // 保持状态与攻击列表均为方案级。slots 空槽 0；slow 为专家群体减速开关。
 // target_mode/target_hex 是每槽的目标（2026-10-16 用户要求）：全体＝原版
 // 群体施放；指定＝打 target_hex 那一队（单体），-1 表示还没指定。
+// 每回合施法时机（方案级）：默认=本回合首次轮到玩家行动时；指定=轮到所选己方部队时。
+// 目标身份使用 StableStackIdentity 的同构字段，避免保存会移动的战场 hex；召唤物
+// 以 creature id + occurrence 标识，跨战斗不可匹配时自然回退为不施法。
+static constexpr int CAST_TIMING_DEFAULT = 0;
+static constexpr int CAST_TIMING_UNIT = 1;
+struct SpellCastTimingFields {
+    uint8_t mode;       // CAST_TIMING_DEFAULT / CAST_TIMING_UNIT
+    int8_t target_kind; // StableStackIdentityKind
+    int8_t target_side;
+    int16_t target_value;
+    int8_t target_occurrence;
+};
+
+inline SpellCastTimingFields MakeDefaultSpellCastTiming()
+{
+    SpellCastTimingFields f = {};
+    f.mode = CAST_TIMING_DEFAULT;
+    f.target_kind = 0;
+    f.target_side = -1;
+    f.target_value = -1;
+    f.target_occurrence = 0;
+    return f;
+}
+
+inline void NormalizeSpellCastTiming(SpellCastTimingFields* f)
+{
+    if (!f) return;
+    if (f->mode != CAST_TIMING_UNIT) {
+        *f = MakeDefaultSpellCastTiming();
+        return;
+    }
+    if (f->target_side < 0 || f->target_side > 1
+        || f->target_kind <= 0 || f->target_kind > 3
+        || f->target_value < 0 || f->target_occurrence < 0) {
+        *f = MakeDefaultSpellCastTiming();
+    }
+}
+
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
     int target_mode[kStatusSlotCapacity];
@@ -1460,6 +1498,7 @@ struct BattleStoreRecord {
     uint16_t stop_turns[5];
     SummonProfileFields summon[5];
     StatusProfileFields status[5];
+    SpellCastTimingFields cast_timing[5];
     ForceFieldProfileFields forcefield[5];
 };
 
@@ -1482,6 +1521,8 @@ inline bool BattleStoreRecordContentEquals(const BattleStoreRecord& a,
         if (!bytes_equal(&a.summon[p], &b.summon[p], sizeof(SummonProfileFields)))
             return false;
         if (!bytes_equal(&a.status[p], &b.status[p], sizeof(StatusProfileFields)))
+            return false;
+        if (!bytes_equal(&a.cast_timing[p], &b.cast_timing[p], sizeof(SpellCastTimingFields)))
             return false;
         for (int i = 0; i < 2; ++i)
             if (a.forcefield[p].anchor_hex[i] != b.forcefield[p].anchor_hex[i])
@@ -1750,6 +1791,13 @@ using H3AutoPolicy::SUMMON_COMBINE_AND;
 using H3AutoPolicy::SUMMON_COMBINE_OR;
 using H3AutoPolicy::MakeDefaultRule;
 using H3AutoPolicy::StatusProfileFields;
+using H3AutoPolicy::SpellCastTimingFields;
+using H3AutoPolicy::MakeDefaultSpellCastTiming;
+using H3AutoPolicy::NormalizeSpellCastTiming;
+using H3AutoPolicy::StableStackIdentity;
+using H3AutoPolicy::MakeStableStackIdentity;
+using H3AutoPolicy::CAST_TIMING_DEFAULT;
+using H3AutoPolicy::CAST_TIMING_UNIT;
 using H3AutoPolicy::MakeDefaultStatusFields;
 using H3AutoPolicy::kStatusSlotCapacity;
 using H3AutoPolicy::kBuffSpellIds;

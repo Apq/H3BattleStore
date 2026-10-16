@@ -67,7 +67,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
                 CancelSummonNumEdit_();
                 DrawPanelToBuffer_();
             } else if (s_summon_spell_dd_open || s_summon_cond_dd_open
-                || s_summon_act_dd_open || StatusAnyDropdownOpen_() || s_attack_dd_row >= 0) {
+                || s_summon_act_dd_open || s_cast_timing_dd_open
+                || StatusAnyDropdownOpen_() || s_attack_dd_row >= 0) {
                 CloseSummonDropdowns_();
                 DrawPanelToBuffer_();
             } else if (s_stop_turns_editing) {
@@ -109,7 +110,8 @@ static LRESULT CALLBACK PanelKbHook_(int code, WPARAM wParam, LPARAM lParam)
         if (wParam == VK_RETURN && !s_panel_hidden_for_pick
             && !s_help_modal_open
             && !s_summon_spell_dd_open && !s_summon_cond_dd_open
-            && !s_summon_act_dd_open && !StatusAnyDropdownOpen_() && s_attack_dd_row < 0) {
+            && !s_summon_act_dd_open && !s_cast_timing_dd_open
+            && !StatusAnyDropdownOpen_() && s_attack_dd_row < 0) {
             SetPhase_(BP_COMBAT_CLOSED, BE_PANEL_COMMIT); // 状态机关闭边（S2.2）
             CommitAndCloseSettingsPanel_();
             return 1;  // swallow
@@ -433,7 +435,8 @@ static LRESULT CALLBACK PanelMouseHook_(int code, WPARAM wParam, LPARAM lParam)
         // 会导致悬停高亮函数根本不被调用（绘制侧的高亮分支是好的，只是
         // hover 值永远停在 -1）。
         bool any_expanded = s_summon_spell_dd_open || s_summon_cond_dd_open
-            || s_summon_act_dd_open || s_battle_dd_open || StatusAnyDropdownOpen_() || s_attack_dd_row >= 0;
+            || s_summon_act_dd_open || s_battle_dd_open || s_cast_timing_dd_open
+            || StatusAnyDropdownOpen_() || s_attack_dd_row >= 0;
         for (int i = 0; i < CELL_COUNT; ++i) {
             if (s_p.cells[i].expanded != CEX_NONE) {
                 any_expanded = true;
@@ -607,6 +610,17 @@ static INT __fastcall BlockBattleItemMessage_(H3DlgItem*, int, H3Msg& msg)
             DrawPanelToBuffer_();
             return msg.StopProcessing();
         }
+        // Army 首行施法时机的部队列表（项高＝行高；模式列表只有两项不滚）。
+        if (s_cast_timing_dd_open && s_cast_timing_dd_kind == 2) {
+            if (wheel_delta < 0) ++s_cast_timing_dd_first;
+            else if (wheel_delta > 0) --s_cast_timing_dd_first;
+            CastTimingFirstRow_();
+            s_cast_timing_dd_hover = -1;
+            DrawPanelToBuffer_();
+            return msg.StopProcessing();
+        }
+        if (s_cast_timing_dd_open && s_cast_timing_dd_kind == 1)
+            return msg.StopProcessing();
         // 第二小列只有两项，滚轮不参与（吞掉即可，避免穿透滚底层列表）。
         if (AttackMagicWheel_(wheel_delta)) return msg.StopProcessing();
         // 近战站立/攻击下拉展开时，滚轮优先滚动下拉列表

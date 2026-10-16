@@ -66,6 +66,13 @@ StatusProfileFields g_status[5] = {
     H3AutoPolicy::MakeDefaultStatusFields(),
     H3AutoPolicy::MakeDefaultStatusFields(),
 };
+SpellCastTimingFields g_cast_timing[5] = {
+    H3AutoPolicy::MakeDefaultSpellCastTiming(),
+    H3AutoPolicy::MakeDefaultSpellCastTiming(),
+    H3AutoPolicy::MakeDefaultSpellCastTiming(),
+    H3AutoPolicy::MakeDefaultSpellCastTiming(),
+    H3AutoPolicy::MakeDefaultSpellCastTiming(),
+};
 
 ForceFieldProfileFields g_forcefield[5] = {
     H3AutoPolicy::MakeDefaultForceFieldFields(),
@@ -105,6 +112,7 @@ void ClearConfirmedProfiles()
         g_stop_turns[p] = H3AutoPolicy::DEFAULT_STOP_TURNS;
         g_summon[p] = summon_def;
         g_status[p] = status_def;
+        g_cast_timing[p] = H3AutoPolicy::MakeDefaultSpellCastTiming();
         g_forcefield[p] = forcefield_def;
     }
     g_active_profile = 0;
@@ -530,7 +538,8 @@ static bool SaveBattleStoreRaw_(unsigned long long fp,
         for (int p = 0; p < 5; ++p)
             profiles.push_back(ProfileToJson_(records[i].rules[p],
                 records[i].stop_turns[p], records[i].summon[p],
-                records[i].status[p], records[i].forcefield[p]));
+                records[i].status[p], records[i].cast_timing[p],
+                records[i].forcefield[p]));
         entries.push_back({
             {"time", records[i].time},
             {"active", records[i].active + 1},
@@ -574,7 +583,7 @@ bool LoadBattleStore(unsigned long long fp, BattleStoreRecord* records,
 bool AppendBattleStoreRecord(unsigned long long fp,
     const AutoStackRule rules[5][21],
     const uint16_t stop_turns[5], const SummonProfileFields summon[5],
-    const StatusProfileFields status[5],
+    const StatusProfileFields status[5], const SpellCastTimingFields cast_timing[5],
     const ForceFieldProfileFields forcefield[5], int active, bool* skipped_same)
 {
     if (skipped_same) *skipped_same = false;
@@ -592,9 +601,11 @@ bool AppendBattleStoreRecord(unsigned long long fp,
         memcpy(rec->stop_turns, stop_turns, sizeof(rec->stop_turns));
         memcpy(rec->summon, summon, sizeof(rec->summon));
         memcpy(rec->status, status, sizeof(rec->status));
+        memcpy(rec->cast_timing, cast_timing, sizeof(rec->cast_timing));
         memcpy(rec->forcefield, forcefield, sizeof(rec->forcefield));
         for (int p = 0; p < 5; ++p) {
             NormalizeStatusFields(&rec->status[p]);
+            NormalizeSpellCastTiming(&rec->cast_timing[p]);
             NormalizeForceFieldFields(&rec->forcefield[p]);
         }
         if (n > 0

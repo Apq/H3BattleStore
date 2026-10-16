@@ -821,6 +821,104 @@ static void DrawSummonCombo_(H3LoadedPcx16* scr, H3Font* small_font,
     CellControl_DrawArrow(scr, x + w - 14, y + h / 2 - 2, !open);
 }
 
+// 定义在本文件后部（状态下拉区）：部队头像绘制（先原尺寸后降采样）。
+static void DrawStatusUnitIcon_(H3LoadedPcx16* scr, int creature_id, int x, int y,
+    BYTE bg_r, BYTE bg_g, BYTE bg_b);
+
+static void DrawCastTimingUnitItem_(H3LoadedPcx16* scr, int x, int y,
+    int entry, bool highlight)
+{
+    const BYTE r = highlight ? 104 : 74, g = highlight ? 70 : 52,
+        b = highlight ? 28 : 24;
+    Fill(scr, x, y, ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H, r, g, b);
+    if (entry < 0 || entry >= s_cast_timing_unit_count) return;
+    DrawStatusUnitIcon_(scr, s_cast_timing_unit_cid[entry], x + 3, y + 2, r, g, b);
+    H3Font* font = GetSmallFont();
+    const int tx = x + STATUS_ICON_W + 6;
+    const int tw = ARMY_TIMING_UNIT_W - (STATUS_ICON_W + 6) - 4;
+    char pos[12] = {}, cnt[24] = {};
+    CellControl_FormatPosition(pos, sizeof(pos), s_cast_timing_unit_hex[entry]);
+    _snprintf(cnt, sizeof(cnt), "%d", s_cast_timing_unit_count_alive[entry]);
+    DrawTxt(scr, font, pos, tx, y + 2, tw, STATUS_ICON_H / 2,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    DrawTxt(scr, font, cnt, tx, y + 2 + STATUS_ICON_H / 2, tw, STATUS_ICON_H / 2,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+}
+
+static void DrawCastTiming_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    H3Font* font = GetSmallFont();
+    const SpellCastTimingFields& ct = s_p.draft_cast_timing[s_p.selected_profile];
+    DrawTxt(scr, font, T("panel.cast_timing_label"), GRID_FRAME_X,
+        ARMY_TIMING_Y, ARMY_TIMING_LABEL_W, ARMY_TIMING_H,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_LEFT);
+    const bool mode_open = s_cast_timing_dd_open && s_cast_timing_dd_kind == 1;
+    DrawSummonCombo_(scr, font, ARMY_TIMING_MODE_X, ARMY_TIMING_Y,
+        ARMY_TIMING_MODE_W, ARMY_TIMING_H,
+        ct.mode == CAST_TIMING_UNIT ? T("panel.cast_timing_unit_none")
+            : T("panel.cast_timing_default"), mode_open);
+    const int entry = FindCastTimingCandidate_(ct);
+    const bool unit_open = s_cast_timing_dd_open && s_cast_timing_dd_kind == 2;
+    Fill(scr, ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
+        STATUS_UNIT_ITEM_H, unit_open ? 104 : 74, unit_open ? 70 : 52, unit_open ? 28 : 24);
+    scr->DrawFrame(ARMY_TIMING_UNIT_X, ARMY_TIMING_Y, ARMY_TIMING_UNIT_W,
+        STATUS_UNIT_ITEM_H, (BYTE)210, (BYTE)170, (BYTE)72);
+    if (entry >= 0) DrawCastTimingUnitItem_(scr, ARMY_TIMING_UNIT_X,
+        ARMY_TIMING_Y, entry, false);
+    else DrawTxt(scr, font, T("panel.cast_timing_unit_none"), ARMY_TIMING_UNIT_X + 6,
+        ARMY_TIMING_Y, ARMY_TIMING_UNIT_W - 24, STATUS_UNIT_ITEM_H,
+        (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+    CellControl_DrawArrow(scr, ARMY_TIMING_UNIT_X + ARMY_TIMING_UNIT_W - 14,
+        ARMY_TIMING_Y + STATUS_UNIT_ITEM_H / 2 - 2, !unit_open);
+    if (mode_open) {
+        static const int kRows[2] = { 0, 1 };
+        for (int v = 0; v < 2; ++v) {
+            const int y = ARMY_TIMING_Y + ARMY_TIMING_H + v * STATUS_MODE_ITEM_H;
+            const bool sel = (ct.mode == (v ? CAST_TIMING_UNIT : CAST_TIMING_DEFAULT));
+            const bool hov = (s_cast_timing_dd_hover == v);
+            BYTE bg_r = sel ? 104 : 68, bg_g = sel ? 70 : 42, bg_b = sel ? 28 : 18;
+            BYTE fr = 166, fg = 112, fb = 40;
+            if (hov) { bg_r = 184; bg_g = 136; bg_b = 48; fr = 246; fg = 214; fb = 116; }
+            Fill(scr, ARMY_TIMING_MODE_X, y, ARMY_TIMING_MODE_W,
+                STATUS_MODE_ITEM_H, bg_r, bg_g, bg_b);
+            scr->DrawFrame(ARMY_TIMING_MODE_X, y, ARMY_TIMING_MODE_W,
+                STATUS_MODE_ITEM_H, fr, fg, fb);
+            DrawTxt(scr, font, v ? T("panel.cast_timing_unit_none")
+                : T("panel.cast_timing_default"), ARMY_TIMING_MODE_X + 6, y,
+                ARMY_TIMING_MODE_W - 12, STATUS_MODE_ITEM_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+        }
+        (void)kRows;
+    }
+    if (unit_open) {
+        if (s_cast_timing_unit_count <= 0) {
+            const int y = ARMY_TIMING_Y + STATUS_UNIT_ITEM_H;
+            Fill(scr, ARMY_TIMING_UNIT_X, y, ARMY_TIMING_UNIT_W, STATUS_MODE_ITEM_H, 68, 42, 18);
+            scr->DrawFrame(ARMY_TIMING_UNIT_X, y, ARMY_TIMING_UNIT_W, STATUS_MODE_ITEM_H, 166, 112, 40);
+            DrawTxt(scr, font, T("panel.cast_timing_unit_none_list"), ARMY_TIMING_UNIT_X + 6,
+                y, ARMY_TIMING_UNIT_W - 12, STATUS_MODE_ITEM_H,
+                (INT32)eTextColor::GOLD, eTextAlignment::MIDDLE_LEFT);
+            return;
+        }
+        const int first = CastTimingFirstRow_();
+        const int rows = CastTimingListRows_();
+        for (int v = 0; v < rows; ++v) {
+            const int i = first + v;
+            const int y = CastTimingListOriginY_() + v * STATUS_UNIT_ITEM_H;
+            const bool sel = (i == FindCastTimingCandidate_(ct));
+            const bool hov = (i == s_cast_timing_dd_hover);
+            BYTE bg_r = sel ? 104 : 74, bg_g = sel ? 70 : 52, bg_b = sel ? 28 : 24;
+            BYTE fr = 166, fg = 112, fb = 40;
+            if (hov) { bg_r = 184; bg_g = 136; bg_b = 48; fr = 246; fg = 214; fb = 116; }
+            Fill(scr, ARMY_TIMING_UNIT_X, y, ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H, bg_r, bg_g, bg_b);
+            scr->DrawFrame(ARMY_TIMING_UNIT_X, y, ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H, fr, fg, fb);
+            DrawCastTimingUnitItem_(scr, ARMY_TIMING_UNIT_X, y, i, hov);
+            scr->DrawFrame(ARMY_TIMING_UNIT_X, y, ARMY_TIMING_UNIT_W, STATUS_UNIT_ITEM_H, fr, fg, fb);
+        }
+    }
+}
+
 static void DrawForceFieldRow_(H3LoadedPcx16* scr)
 {
     H3Font* font = GetSmallFont();
@@ -1356,6 +1454,8 @@ static void DrawPanelToBuffer_()
             && dropRc.bottom > max_redraw_bottom)
             max_redraw_bottom = dropRc.bottom;
     }
+    // 首行：每回合施法时机。放在卡片/卡片下拉之后，保证其展开浮层置顶。
+    DrawCastTiming_(scr);
     } // PAGE_ARMY
     } else if (s_p.active_page == PAGE_SUMMON) {
         // 召唤页：设置行 + 说明行 + 召唤物行动卡（无滚动条）。

@@ -13,6 +13,7 @@ extern void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
     const SummonProfileFields summon[5],
     const StatusProfileFields status[5],
+    const SpellCastTimingFields cast_timing[5],
     const ForceFieldProfileFields forcefield[5], bool* out_store_added);
 extern void ClearConfirmedProfiles();
 extern AutoStackRule g_profiles[5][21];
@@ -22,6 +23,7 @@ extern int  g_last_profile;
 extern uint16_t g_stop_turns[5];
 extern SummonProfileFields g_summon[5];
 extern StatusProfileFields g_status[5];
+extern SpellCastTimingFields g_cast_timing[5];
 // 界面契约（UiPortHost 在更早处定义 g_uiPort）：本文件只经契约感知面板，
 // 不 extern 任何界面实现符号（docs/13）。
 #include "AutoUiPort.hpp"
@@ -1465,6 +1467,32 @@ static void TryAutoStop_(_BattleMgr_* mgr)
 static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     H3CombatManager* cm, H3Hero* hero, int spell_power);
 
+// 每回合施法时机门闸：默认=每次「交给玩家」放行（即本回合首次轮到玩家行动）；
+// 指定部队=仅当前轮到行动的部队身份与配置一致时放行。身份用与部队规则同
+// 口径的 StableStackIdentity（本体按军队槽、召唤物按生物 id+出现序），不存
+// 会移动的 hex。指定身份已不在场（阵亡/重打丢召唤物）时本回合不施法，等
+// 它再次出现或玩家改配置。
+static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr); // 定义在本文件后部
+static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
+{
+    const SpellCastTimingFields& ct = g_cast_timing[g_active_profile];
+    if (ct.mode != H3AutoPolicy::CAST_TIMING_UNIT) return true; // 默认时机
+    _BattleStack_* self = CurrentTurnStack_(mgr);
+    if (!self || self->def_group_ix != side) return false;
+    const int idx = self->army_slot_ix;
+    if (idx < 0 || idx >= 21) return false;
+    H3AutoPolicy::StableStackIdentity ids[21] = {};
+    BuildStableIdentitiesFromBattle_(mgr, side, ids);
+    if (ids[idx].kind == H3AutoPolicy::STACK_ID_NONE) return false;
+    H3AutoPolicy::StableStackIdentity want = {};
+    want.kind = static_cast<H3AutoPolicy::StableStackIdentityKind>(
+        ct.target_kind);
+    want.side = ct.target_side;
+    want.value = ct.target_value;
+    want.occurrence = ct.target_occurrence;
+    return H3AutoPolicy::StableStackIdentityEquals(want, ids[idx]);
+}
+
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
     if (g_phase != BP_COMBAT_CLOSED) return false;
@@ -1475,6 +1503,10 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
     const int side = ResolveHumanSide_(mgr);
     if (side < 0 || side > 1) return false;
+    // 每回合施法时机（方案级）：默认=本回合首次交权即施；指定=只在该部队
+    // 轮到行动的交权时施。放在 heroCasted 之前，避免非指定回合留下"已判
+    // 施法"的痕迹。
+    if (!CastTimingAllowsThisHandoff_(mgr, side)) return false;
     // 一回合一次：读游戏 heroCasted[side]（插件施法成功后由
     // MarkHeroCastThisTurn_ 补写，玩家手动施法游戏自己置位）。
     if (g_cast_in_flight) return false; // 施法动画期间的消息循环重入
@@ -2054,6 +2086,7 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
     const uint16_t stop_turns[5],
     const SummonProfileFields summon[5],
     const StatusProfileFields status[5],
+    const SpellCastTimingFields cast_timing[5],
     const ForceFieldProfileFields forcefield[5], bool* out_store_added)
 {
     if (out_store_added) *out_store_added = false;
@@ -2095,6 +2128,10 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
             st.refresh_turns = H3AutoPolicy::kStatusRefreshTurns;
         H3AutoPolicy::NormalizeStatusFields(&st);
         g_status[p] = st;
+        SpellCastTimingFields ct = cast_timing
+            ? cast_timing[p] : H3AutoPolicy::MakeDefaultSpellCastTiming();
+        H3AutoPolicy::NormalizeSpellCastTiming(&ct);
+        g_cast_timing[p] = ct;
         ForceFieldProfileFields ff = forcefield
             ? forcefield[p] : H3AutoPolicy::MakeDefaultForceFieldFields();
         H3AutoPolicy::NormalizeForceFieldFields(&ff);
@@ -2133,8 +2170,8 @@ void CommitProfiles(int active_profile, AutoStackRule rules[5][21],
         bool skipped = false;
         if (AppendBattleStoreRecord(g_battle_fp,
                 (const AutoStackRule(*)[21])g_profiles,
-                g_stop_turns, g_summon, g_status, g_forcefield,
-                g_active_profile, &skipped)) {
+                g_stop_turns, g_summon, g_status, g_cast_timing,
+                g_forcefield, g_active_profile, &skipped)) {
             LogInfo("[BattleStore] %s（active=%d）",
                 skipped ? "内容未变，不新增存档" : "已存档", g_active_profile + 1);
             if (!skipped && out_store_added) *out_store_added = true;

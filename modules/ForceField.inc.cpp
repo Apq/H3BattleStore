@@ -99,6 +99,9 @@ bool EnsureForceFieldBeforeAction_(_BattleMgr_* mgr)
         if (mgr->auto_combat || IsHiddenBattle(mgr) || IsTacticsPhase_(mgr)) return false;
         side = ResolveHumanSide_(mgr);
         if (side < 0 || side > 1) return false;
+        // 方案级施法时机覆盖力盾：指定部队时不在其它部队的行动窗口
+        // 抢占本回合施法位；默认模式保持首次行动语义。
+        if (!CastTimingAllowsThisHandoff_(mgr, side)) return true;
         if (mgr->current_mon_side != side || mgr->action != 0) return false;
         const int index = mgr->current_mon_index;
         if (index < 0 || index >= 21) return false;

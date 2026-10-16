@@ -327,6 +327,105 @@ void TestBattleStoreRecord()
     Check(!BattleStoreStampValid(nullptr), "null invalid");
 }
 
+void TestSpellCastTiming()
+{
+    using H3AutoPolicy::StableStackIdentity;
+    using H3AutoPolicy::MakeStableStackIdentity;
+    using H3AutoPolicy::StableStackIdentityEquals;
+
+    // 默认：首次轮到玩家行动，目标身份全空。
+    const SpellCastTimingFields def = MakeDefaultSpellCastTiming();
+    Check(def.mode == CAST_TIMING_DEFAULT, "cast timing default mode");
+    Check(def.target_kind == 0 && def.target_side == -1
+        && def.target_value == -1 && def.target_occurrence == 0,
+        "cast timing default clears target identity");
+    NormalizeSpellCastTiming(nullptr);
+
+    // 单位模式 + 合法身份（本体军队槽）→ 保留，且幂等。
+    const StableStackIdentity army =
+        MakeStableStackIdentity(0, 3, 10, 0);
+    Check(army.kind == H3AutoPolicy::STACK_ID_ARMY_SLOT
+        && army.value == 3, "army slot identity");
+    SpellCastTimingFields ct = def;
+    ct.mode = CAST_TIMING_UNIT;
+    ct.target_kind = (int8_t)army.kind;
+    ct.target_side = army.side;
+    ct.target_value = army.value;
+    ct.target_occurrence = army.occurrence;
+    NormalizeSpellCastTiming(&ct);
+    Check(ct.mode == CAST_TIMING_UNIT && ct.target_kind == army.kind
+        && ct.target_value == 3, "unit timing with army slot survives");
+    const SpellCastTimingFields normalized_once = ct;
+    NormalizeSpellCastTiming(&ct);
+    Check(ct.mode == normalized_once.mode
+        && ct.target_kind == normalized_once.target_kind
+        && ct.target_value == normalized_once.target_value,
+        "unit timing normalization is idempotent");
+
+    // 召唤物身份（type+occurrence）同样合法。
+    const StableStackIdentity summon =
+        MakeStableStackIdentity(1, -1, 10, 2);
+    Check(summon.kind == H3AutoPolicy::STACK_ID_SUMMON
+        && summon.occurrence == 2, "summon identity");
+    ct = def;
+    ct.mode = CAST_TIMING_UNIT;
+    ct.target_kind = (int8_t)summon.kind;
+    ct.target_side = summon.side;
+    ct.target_value = summon.value;
+    ct.target_occurrence = summon.occurrence;
+    NormalizeSpellCastTiming(&ct);
+    Check(ct.mode == CAST_TIMING_UNIT && ct.target_occurrence == 2,
+        "summon timing survives normalization");
+
+    // 单位模式 + 非法身份（side/kind/value/occurrence 越界）→ 回默认。
+    const SpellCastTimingFields bad_inputs[] = {
+        {CAST_TIMING_UNIT, 0, 0, 5, 0},      // kind=NONE
+        {CAST_TIMING_UNIT, 4, 0, 5, 0},      // kind 越界
+        {CAST_TIMING_UNIT, 1, -1, 5, 0},     // side 越界
+        {CAST_TIMING_UNIT, 1, 2, 5, 0},      // side 越界
+        {CAST_TIMING_UNIT, 1, 0, -1, 0},     // value 负
+        {CAST_TIMING_UNIT, 1, 0, 5, -1},     // occurrence 负
+        {CAST_TIMING_UNIT, 9, 7, 5, 3},      // 多字段组合
+    };
+    for (const SpellCastTimingFields& input : bad_inputs) {
+        ct = input;
+        NormalizeSpellCastTiming(&ct);
+        Check(ct.mode == CAST_TIMING_DEFAULT && ct.target_kind == 0
+            && ct.target_value == -1,
+            "invalid unit identity falls back to default timing");
+    }
+
+    // 非单位模式 → 一律回默认（残留身份清零）。
+    for (int mode = 2; mode < 6; ++mode) {
+        ct = def;
+        ct.mode = (uint8_t)mode;
+        ct.target_kind = 1;
+        ct.target_side = 0;
+        ct.target_value = 4;
+        NormalizeSpellCastTiming(&ct);
+        Check(ct.mode == CAST_TIMING_DEFAULT && ct.target_kind == 0,
+            "unknown mode resets to default timing");
+    }
+
+    // 记录去重：任一方案的施法时机变化都算内容变化。
+    BattleStoreRecord base = {};
+    strcpy(base.time, "20261016-210000");
+    for (int p = 0; p < 5; ++p)
+        base.cast_timing[p] = MakeDefaultSpellCastTiming();
+    BattleStoreRecord same = base;
+    Check(BattleStoreRecordContentEquals(base, same),
+        "identical cast timing deduplicates");
+    for (int p = 0; p < 5; ++p) {
+        BattleStoreRecord changed = base;
+        changed.cast_timing[p].mode = CAST_TIMING_UNIT;
+        changed.cast_timing[p].target_kind = 1;
+        changed.cast_timing[p].target_side = 0;
+        changed.cast_timing[p].target_value = 2;
+        Check(!BattleStoreRecordContentEquals(base, changed),
+            "cast timing change differs in every profile");
+    }
+}
+
 void TestWarMachineActions()
 {
     CheckActions(CREATURE_BALLISTA, true, true, false,
@@ -1704,6 +1803,7 @@ TEST_CASE("policy: 面板项归属", "[policy]") { TestPanelItemOwnership(); }
 TEST_CASE("policy: 面板输入准入", "[policy]") { TestPanelAdmission(); }
 TEST_CASE("policy: 战斗指纹", "[policy]") { TestBattleFingerprint(); }
 TEST_CASE("policy: 力盾字段默认值", "[policy]") { TestForceFieldFields(); }
+TEST_CASE("policy: 每回合施法时机", "[policy]") { TestSpellCastTiming(); }
 TEST_CASE("policy: 力盾选点", "[policy]") { TestForceFieldSelection(); }
 TEST_CASE("policy: 战斗方案记录序列化", "[policy]") { TestBattleStoreRecord(); }
 TEST_CASE("policy: 战争机器行动", "[policy]") { TestWarMachineActions(); }
