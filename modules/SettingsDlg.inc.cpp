@@ -513,7 +513,8 @@ static void CloseSummonDropdowns_()
 // 与原版施法面板同口径；见 attack 通道 BuildAttackMagicCandidates_）；
 // 学校技能等级（GetSpellExpertise 0..3）只决定群体版/效果强度，**不构成**
 // "会不会"的资格。减速与群体增益另需专家级（那才有群体版）。
-// **不剔除已在其它槽选过的法术**——同一种法术可以配多个槽位（同日裁定）。
+// 已在其它槽选过的法术剔除（2026-10-16 最终口径：先试过"不剔除"，玩家
+// 定案改回剔除——同一种法术不重复占槽）；skip_slot 是正在编辑的槽，不算。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
 {
     s_status_dd_count = 0;
@@ -541,6 +542,10 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         candidates[candidate_count++] = spell;
     for (int n = 0; n < candidate_count; ++n) {
         const int spell = candidates[n];
+        bool used = false;
+        for (int i = 0; i < status.slot_count; ++i)
+            if (i != skip_slot)
+                used = used || status.slots[i] == spell;
         const unsigned flags = *reinterpret_cast<const unsigned*>(
             table + spell * 0x88 + 0x0C);
         const int expertise = hero->GetSpellExpertise(
@@ -548,13 +553,13 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         // HasSpell＝learnedSpells|availableSpell（+0x3EA/+0x430 位或），与原版
         // 施法面板同口径：会不会以魔法书显示为准；学校等级只影响群体版。
         const bool has_spell = hero->HasSpell(spell) != 0;
-        const bool ok = H3AutoPolicy::IsStatusCandidateSpell(
+        const bool ok = !used && H3AutoPolicy::IsStatusCandidateSpell(
             spell, flags, expertise, has_spell);
         // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出是
-        // 魔法书里没有（book=0）、学校等级不够群体版（exp<3），还是别的——
-        // 不必再让玩家自证，也不必靠猜。判定细节在 debug 级，默认 info 不刷屏。
-        LogDebug("[Panel] status cand spell=%d book=%d exp=%d flags=0x%X ok=%d",
-            spell, has_spell ? 1 : 0, expertise, flags, ok ? 1 : 0);
+        // 已被别的槽占用（used=1）、魔法书里没有（book=0），还是学校等级不够
+        // 群体版（exp<3）——不必再让玩家自证，也不必靠猜。debug 级，默认不刷屏。
+        LogDebug("[Panel] status cand spell=%d book=%d exp=%d flags=0x%X used=%d ok=%d",
+            spell, has_spell ? 1 : 0, expertise, flags, used ? 1 : 0, ok ? 1 : 0);
         if (!ok) continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
     }
