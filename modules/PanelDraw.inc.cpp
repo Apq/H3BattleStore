@@ -1304,11 +1304,11 @@ static void DrawStatusPage_(H3LoadedPcx16* scr)
         s_p.draft_status[s_p.selected_profile];
     for (int i = 0; i < status.slot_count; ++i) {
         const int y = StatusRowY_(i);
-        char label[96] = {};
-        // 第一小列：魔法（只用法术表名，超宽由 DrawTxt 裁掉）。
+        char label[192] = {};
+        // 第一小列：魔法名追加对应英雄等级系别。
         DrawSummonCombo_(scr, small_font, StatusMagicX_(i), y,
             STATUS_MAGIC_W, STATUS_SLOT_H,
-            StatusSpellName_(status.slots[i], label, sizeof(label)),
+            StatusSpellNameWithExpertise_(status.slots[i], label, sizeof(label)),
             s_status_dd_open == i);
         // 第二小列：全体/指定（两项固定，默认取当前等级真能做到的那个）。
         DrawSummonCombo_(scr, small_font, StatusModeX_(i), y,
