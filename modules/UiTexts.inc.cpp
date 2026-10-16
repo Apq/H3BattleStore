@@ -30,7 +30,7 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "panel.stop_mana_label", "敌方魔力≤" },
     { "panel.stop_mana_tail", "时停" },
     { "panel.tab_army", "部队" },
-    { "panel.cast_timing_label", "每回合施法时机" },
+    { "panel.cast_timing_label", "每回合施法" },
     { "panel.cast_timing_default", "首次行动" },
     { "panel.cast_timing_unit_none", "指定部队" },
     { "panel.cast_timing_unit_none_list", "（无存活己方部队）" },

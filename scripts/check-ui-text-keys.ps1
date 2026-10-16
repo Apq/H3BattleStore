@@ -110,6 +110,9 @@ if ($unused.Count -gt 0) {
 # 新增条目：凡是画在 `DrawTxt(..., <宽>, <小高度>)` 单行框里的键，按同法量一次再登记。
 $singleLineBudget = @{
     'panel.status_note' = 74
+    # 部队页首行标签框 ARMY_TIMING_LABEL_W = 86：2026-10-17 用户实测「每回合施法时机」
+    # （6 全角 = 12 半角）会被裁成「每回合施法时」，5 全角 = 10 半角完整可见 ⇒ 上限取 10。
+    'panel.cast_timing_label' = 10
 }
 
 $fullWidthRe = '[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]'
