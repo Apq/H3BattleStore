@@ -37,10 +37,10 @@ static const UiTextEntry kUiTextDefaults[] = {
     { "tips.tab_status", "保持状态：力盾落点、友方增益、敌方减速与敌方失明" },
     { "tips.tab_attack", "攻击魔法：智能攻击配置，一行两条、控件按魔法类别出现" },
     { "tips.forcefield_pick", "力盾落点：点＋新增，点已有格重选，右键删除；最多两个。点选中右键或 ESC 取消。盾在不补，消失后最高优先补施；每回合只能补一个" },
-    { "panel.status_note", "只列英雄已学会的状态魔法（含敌方减速与敌方失明）。多个都保持，哪个剩余回合先到阈值就补哪个" },
+    { "panel.status_note", "下拉按英雄魔法书列（含敌方减速与敌方失明），已选项不剔除。多个都保持，哪个剩余回合先到阈值就补哪个" },
     { "panel.status_add", "+" },
     { "panel.status_slow", "敌方减速（需专家群体）" },
-    { "panel.status_empty", "（无已学状态魔法）" },
+    { "panel.status_empty", "（魔法书里没有可用状态魔法）" },
     { "panel.status_th_label", "剩余回合≤" },
     { "panel.status_th_tail", "时补" },
     // ---- 召唤页（PAGE_SUMMON）----

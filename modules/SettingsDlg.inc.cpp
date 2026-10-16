@@ -507,11 +507,13 @@ static void CloseSummonDropdowns_()
     CloseAttackMagicUi_();
 }
 
-// 构建保持状态下拉候选：英雄已学的群体增益 + 专家级群体减速 + 已学失明
-// （单体对敌）；skip_slot 以外的槽位已用的法术排除（避免重复）。
-// 结果进 s_status_dd_ids。候选顺序＝失明、减速、再群体增益——失明是玩家
-// 2026-10-16 要求补的项，埋在 16 个增益后面要滚 6 行才看得见（原顺序为
-// buffs + slow + blind，玩家在已展开的下拉里没找到它，误以为没做）。
+// 构建保持状态下拉候选：失明、减速置顶，其后是英雄的群体增益。
+// 资格口径（2026-10-16 用户裁定）：**以魔法书显示为准**——
+// `hero->HasSpell(spell)`（learnedSpells|availableSpell，穿戴装备赋予也算，
+// 与原版施法面板同口径；见 attack 通道 BuildAttackMagicCandidates_）；
+// 学校技能等级（GetSpellExpertise 0..3）只决定群体版/效果强度，**不构成**
+// "会不会"的资格。减速与群体增益另需专家级（那才有群体版）。
+// **不剔除已在其它槽选过的法术**——同一种法术可以配多个槽位（同日裁定）。
 static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_slot)
 {
     s_status_dd_count = 0;
@@ -539,21 +541,20 @@ static int BuildStatusCandidates_(const StatusProfileFields& status, int skip_sl
         candidates[candidate_count++] = spell;
     for (int n = 0; n < candidate_count; ++n) {
         const int spell = candidates[n];
-        bool used = false;
-        for (int i = 0; i < status.slot_count; ++i)
-            if (i != skip_slot)
-                used = used || status.slots[i] == spell;
         const unsigned flags = *reinterpret_cast<const unsigned*>(
             table + spell * 0x88 + 0x0C);
         const int expertise = hero->GetSpellExpertise(
             spell, cm->specialTerrain);
-        const bool ok = !used
-            && H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise);
+        // HasSpell＝learnedSpells|availableSpell（+0x3EA/+0x430 位或），与原版
+        // 施法面板同口径：会不会以魔法书显示为准；学校等级只影响群体版。
+        const bool has_spell = hero->HasSpell(spell) != 0;
+        const bool ok = H3AutoPolicy::IsStatusCandidateSpell(
+            spell, flags, expertise, has_spell);
         // 每个候选都留痕（debug）：玩家再说「下拉里没有 X」时，一行就能看出是
-        // 未学会、法术表没群体版，还是已被别的槽占用——不必让玩家自证，也不必靠
-        // 猜。判定细节在 debug 级，默认 info 日志不刷屏。
-        LogDebug("[Panel] status cand spell=%d exp=%d flags=0x%X used=%d ok=%d",
-            spell, expertise, flags, used ? 1 : 0, ok ? 1 : 0);
+        // 魔法书里没有（book=0）、学校等级不够群体版（exp<3），还是别的——
+        // 不必再让玩家自证，也不必靠猜。判定细节在 debug 级，默认 info 不刷屏。
+        LogDebug("[Panel] status cand spell=%d book=%d exp=%d flags=0x%X ok=%d",
+            spell, has_spell ? 1 : 0, expertise, flags, ok ? 1 : 0);
         if (!ok) continue;
         s_status_dd_ids[s_status_dd_count++] = spell;
     }
@@ -1965,7 +1966,18 @@ static void HandlePanelMouseMessage_(int raw_command, int screen_x, int screen_y
                     handled = true;
                     s_p.status_add_armed = true;
                     if (BuildStatusCandidates_(status, -1) > 0) {
-                        const int picked = s_status_dd_ids[0];
+                        // 「＋」默认给一个友方状态槽：候选前两项是对敌的失明/
+                        // 减速，拿它们当默认会把"想给自己续增益"的玩家直接送进
+                        // 对敌槽，故取第一个非对敌项（历史上默认为第一个增益）。
+                        int picked = s_status_dd_ids[0];
+                        for (int i = 0; i < s_status_dd_count; ++i) {
+                            const int id = s_status_dd_ids[i];
+                            if (id != H3AutoPolicy::kBlindSpellId
+                                && id != H3AutoPolicy::kSlowSpellId) {
+                                picked = id;
+                                break;
+                            }
+                        }
                         status.slots[status.slot_count++] = picked;
                         s_status_dd_open = status.slot_count - 1;
                         s_status_dd_first = 0;

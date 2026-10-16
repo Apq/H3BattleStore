@@ -432,10 +432,10 @@ static int __stdcall Hook_AfterBlt_(LoHook* h, HookContext* c)
 | `slow` | 敌方减速开关（历史保留字段） | 0/1 |
 | `refresh_turns` | 补状态阈值：剩余回合 ≤ 此值就补 | 1..9，默认 1 |
 
-**下拉候选（`BuildStatusCandidates_`，`SettingsDlg.inc.cpp`）**三个来源：英雄已学的群体增益（`kBuffSpellIds`，要求法术表带群体版 —— `friendlyMass` 或专家级 `expertMassVersion`）、专家级群体减速（54）、**已学会的敌方失明（62，单体，2026-10-16 新增）**。候选统一过 `hero->GetSpellExpertise(spell, cm->specialTerrain)`：增益与失明只要 `> 0`（也就是"已学会"），减速要 `>= 3`（专家级才有群体版）；同一法术已占用其它槽则不再出现。
-**候选资格统一在 `H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise)`（`PolicyCore.hpp`）判定**（2026-10-16 追加，见 §7.6 末）：失明（62）**不要求**法术表带群体位——它是单体法术，本来就没有群体版；用户口径「这不属于全体范围，英雄会下拉选项里就要添加这个魔法」。资格收敛成一个函数是为了让设置面板与单测共用同一口径，避免两侧漂移。
-**候选顺序：失明、减速置顶，其后才是 16 个群体增益**（2026-10-16 玩家反馈"失明没加出来"后调整）。原实现把失明排在 18 个候选的末位，玩家要往下滚多行才看得见；现已把唯一的新增项放在第一项。
-**未学会时的界面提示：按玩家要求不做**（2026-10-16 玩家原话「没学会时明说 这个不需要」）。取而代之的是**日志留痕**：`BuildStatusCandidates_` 构建时打一行头信息 + 每个候选一行 `[Panel] status cand spell=%d exp=%d flags=0x%X used=%d ok=%d`（均 debug 级），让"下拉里为什么没有 X"可从日志直接读出——未学会（`exp=0`）、法术表无群体位（`flags` 缺 `0x800/0x40`）、还是已被别的槽占用（`used=1`）三者一行分清。
+**下拉候选（`BuildStatusCandidates_`，`SettingsDlg.inc.cpp`）**：失明、减速置顶，其后是 16 个群体增益（`kBuffSpellIds`）。**"会不会"一律以英雄魔法书为准**——`hero->HasSpell(spell)`（`learnedSpells|availableSpell`，+0x3EA/+0x430 位或，装备赋予也算，与原版施法面板同口径；2026-10-16 用户裁定「英雄装备了魔法书之后…会不会，你应该以魔法书的显示为准」，与 attack 通道同款）。学校技能等级（`GetSpellExpertise` 0..3，魔法系别熟练度）**不构成资格**，只决定群体版与效果强度：减速（54）与群体增益仍要专家级（≥3，那才有群体版，属于"槽位能不能生效"而非"会不会"）；失明（62）单体、有书即列。
+**候选资格统一在 `H3AutoPolicy::IsStatusCandidateSpell(spell, flags, expertise, has_spell)`（`PolicyCore.hpp`）判定**（2026-10-16 定案）：`has_spell` 是唯一资格门槛，等级只作用于减速/增益的群体版要求；收敛成一个函数是为了让设置面板与单测共用同一口径，避免两侧漂移。**已选项不剔除**（2026-10-16 用户裁定「下拉选项不用把已选择的去掉」）——同一法术可配多个槽位。
+**候选顺序：失明、减速置顶**（2026-10-16 玩家反馈"失明没加出来"后调整；原实现把失明排在 18 个候选的末位）。「＋」新增槽的默认项跳过对敌两项，仍取第一个友方增益。
+**未学会时的界面提示：按玩家要求不做**（玩家原话「没学会时明说 这个不需要」）。取而代之的是**日志留痕**：`BuildStatusCandidates_` 构建时打一行头信息 + 每个候选一行 `[Panel] status cand spell=%d book=%d exp=%d flags=0x%X ok=%d`（均 debug 级），"下拉里为什么没有 X"可从日志直接读出——`book=0`＝魔法书里没有，`book=1 exp<3`＝有书但等级不够群体版。
 **槽位文案**：`StatusSpellLabel_` 对所有对敌法术追加「（敌方）」后缀，减速（54）与失明（62）都显示为「xxx（敌方）」。
 
 **每回合最多补一个法术，优先级 = 友方增益 → 敌方失明 → 敌方减速**（`TryMaintainStatus_`）。失明排在减速之前是有意为之：失明通常只约一回合时长（被攻击即醒、到期就得续），减速是长时效群体法术；两者同时到期时先补失明。

@@ -1667,9 +1667,11 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
         durations[i] = -1;
     for (int i = 0; i < status.slot_count; ++i) {
         const int spell = status.slots[i];
+        // 资格只看"英雄会不会"（HeroMagicAllowed_ 已含 HasSpell 与费用/回合
+        // 门槛）；学校等级 0 照样能施放原版 baseValue[0]（H3Note 禁施笔记），
+        // 群体版资格由下面的 MagicHasMassVersion 单独判，不拿 exp<=0 当未学。
         if (spell <= 0 || spell >= 81
-                || spell == H3AutoPolicy::kSlowSpellId
-                || expertise_of[i] <= 0)
+                || spell == H3AutoPolicy::kSlowSpellId)
             continue;
         unsigned spell_flags = 0;
         __try {
@@ -1760,7 +1762,9 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
             _BattleStack_* st = &mgr->stack[enemy_side][slot];
             if (st && st->count_current > 0) ++blind_living;
         }
-        if (want_blind && !blind_masked && blind_exp > 0) {
+        // 资格只看魔法书（blind_masked 已含 HasSpell）；学校等级不限——失明是
+        // 单体法术，原版 exp0 也照样能放（baseValue[0]）。
+        if (want_blind && !blind_masked) {
             GatherBlindCandidates_(mgr, cm, side, blind_spell, blind_flags,
                 enemy_side, blind_durations, blind_hexes, blind_threats, 21);
             for (int i = 0; i < 21; ++i)
@@ -1906,11 +1910,16 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
     // 必须带目标格）。
     if (spell_id < 0 || spell_id >= 70) return false;
     const bool blind_cast = spell_id == H3AutoPolicy::kBlindSpellId;
+    // 等级只作为施法实参（效果强度/群体版），**不作为资格**：能不能放以魔法书
+    // 为准，HeroMagicAllowed_ 里的 HasSpell 已经把关（2026-10-16 用户裁定
+    // "会不会以魔法书的显示为准"）。选中的法术来自槽位，这里实算它的等级。
     int expertise = 0;
     __try {
         expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    if (expertise <= 0) return false;
+        if (expertise < 0 || expertise > 3) expertise = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        expertise = 0;
+    }
     if (!HeroMagicAllowed_(cm, side, spell_id)) return false;
     if (blind_cast) {
         // 单体：目标格由上面的候选选择给出；可施与否交原版判定

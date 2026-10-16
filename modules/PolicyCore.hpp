@@ -173,17 +173,20 @@ static constexpr int kSlowSpellId = 54;
 // 保持状态里唯一的单体对敌选项，前提同样是英雄已学会（学校等级 > 0）。
 static constexpr int kBlindSpellId = 62;
 
-// 保持状态下拉候选资格（2026-10-16 用户裁定："这不属于全体范围，英雄会
-// 下拉选项里就要添加这个魔法"）：
-//   失明（62）＝单体对敌，**不要求**法术表带 friendlyMass / expertMassVersion
-//               （它本来就没有群体版），英雄已学会（学校等级 > 0）就列；
-//   减速（54）＝群体对敌，同样不要求群体位，但要专家级（学校等级 3）；
-//   其余必须是原版群体增益（kBuffSpellIds 内且带群体位）。
+// 保持状态下拉候选资格（2026-10-16 用户裁定："这不属于全体范围，英雄会下拉选项里
+// 就要添加这个魔法"；同日再定：「会不会以魔法书的显示为准」）：
+//   **资格只看 has_spell**（HasSpell = learnedSpells|availableSpell，穿戴装备
+//   赋予也算，与原版施法面板同口径，见 attack 通道 BuildAttackMagicCandidates_）；
+//   **学校技能等级（expertise 0..3）不构成资格**——它只决定群体版与效果强度，见
+//   H3Note\英雄魔法禁施与目标免疫.md"学校 expertise0 不等于未学魔法"。
+//   失明（62）＝单体对敌、无群体版，英雄会就列；
+//   减速（54）＝群体对敌，要专家级（学校等级 3）才有群体减速；
+//   其余必须是原版群体增益（kBuffSpellIds 内且带专家级群体版）。
 // 判定收敛成这一个函数：设置面板与单测共用同一口径，避免两侧漂移。
 inline bool IsStatusCandidateSpell(int spell_id, unsigned spell_flags,
-    int expertise)
+    int expertise, bool has_spell)
 {
-    if (spell_id <= 0 || expertise <= 0) return false;
+    if (spell_id <= 0 || !has_spell) return false;
     if (spell_id == kSlowSpellId) return expertise >= 3;
     if (spell_id == kBlindSpellId) return true;
     return IsMassBuffSpell(spell_id, spell_flags);
