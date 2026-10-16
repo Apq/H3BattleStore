@@ -1498,6 +1498,63 @@ static bool StackWaitedThisRound_(_BattleStack_* st)
     }
 }
 
+// 决策点留痕（debug）：把各通道"静默 return"的原因写下来。这是"功能没生效"类
+// 反馈的定位依据——只写"做了什么"、不写"为什么没做"的日志对定位没有价值。
+// 同一次交权里消息循环会反复重入这些门闸，故用 (turn, slot, reason) 变化闸：
+// 每种原因每个回合只留一行，保证留痕本身不会变成新的噪音源（见 AGENTS.md 日志规范）。
+enum DeclineCode {
+    DC_PHASE = 1,     // 状态机未进入战斗期
+    DC_CONTROL,       // 控制权不是自动
+    DC_TURN,          // 回合号无效
+    DC_SIDE,          // 解析不出人类侧
+    DC_TIMING,        // 每回合施法时机未到（含"不是指定部队的回合"）
+    DC_IN_FLIGHT,     // 施法动画期间的消息循环重入
+    DC_NO_CM,         // 取不到 H3CombatManager
+    DC_NO_HERO,       // 人类侧没有英雄
+    DC_NO_STACK,      // 取不到当前行动部队
+    DC_SLOT_RANGE,    // 当前部队槽位越界
+    DC_YIELD,         // 本场全手动 / 单次接管：留给玩家
+    DC_AUTO_COMBAT,   // 原版自动战斗
+    DC_HIDDEN,        // 隐藏战斗
+    DC_TACTICS,       // 战术期
+    DC_WM_AMMO_CART,  // 弹药车不介入
+};
+
+static int s_decline_turn = -2, s_decline_slot = -1, s_decline_code = -1;
+
+static const char* DeclineName_(int code)
+{
+    switch (code) {
+    case DC_PHASE:        return "phase";
+    case DC_CONTROL:      return "control";
+    case DC_TURN:         return "turn";
+    case DC_SIDE:         return "side";
+    case DC_TIMING:       return "timing";
+    case DC_IN_FLIGHT:    return "in-flight";
+    case DC_NO_CM:        return "no-cm";
+    case DC_NO_HERO:      return "no-hero";
+    case DC_NO_STACK:     return "no-stack";
+    case DC_SLOT_RANGE:   return "slot-range";
+    case DC_YIELD:        return "yield-to-player";
+    case DC_AUTO_COMBAT:  return "auto-combat";
+    case DC_HIDDEN:       return "hidden-battle";
+    case DC_TACTICS:      return "tactics";
+    case DC_WM_AMMO_CART: return "ammo-cart";
+    default:              return "unknown";
+    }
+}
+
+static void LogDecline_(const char* tag, int turn, int slot, int code)
+{
+    if (turn == s_decline_turn && slot == s_decline_slot && code == s_decline_code)
+        return;
+    s_decline_turn = turn;
+    s_decline_slot = slot;
+    s_decline_code = code;
+    LogDebug("[%s] 未执行 turn=%d slot=%d reason=%s", tag, turn, slot,
+        DeclineName_(code));
+}
+
 static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
 {
     const SpellCastTimingFields& ct = g_cast_timing[g_active_profile];
@@ -1529,7 +1586,11 @@ static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
     // 每次交权都要喂状态机：只有"别的部队 → 目标部队"的切换才算新的一次行动。
     const bool second_handoff = H3AutoPolicy::NoteCastTimingHandoff(
         &s_cast_wait_state, turn, is_target);
-    if (!is_target) return false;
+    if (!is_target) {
+        // 指定部队时机：本轮不是它的回合——"设了指定部队却没施法"最常见的解释。
+        LogDecline_("CastTiming", turn, self ? self->army_slot_ix : -1, DC_TIMING);
+        return false;
+    }
     if (!ct.after_wait) return true; // 未勾选：老行为，轮到它就施
     if (turn < 0) return StackWaitedThisRound_(self);
     const bool waited = StackWaitedThisRound_(self);
@@ -1546,21 +1607,21 @@ static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
 
 static bool TryProtectCast_(_BattleMgr_* mgr)
 {
-    if (g_phase != BP_COMBAT_CLOSED) return false;
-    if (g_control != CM_AUTO) return false; // AUTO 才判保活/施法（§3.1.1）
+    if (g_phase != BP_COMBAT_CLOSED) { LogDecline_("Protect", -1, -1, DC_PHASE); return false; }
+    if (g_control != CM_AUTO) { LogDecline_("Protect", -1, -1, DC_CONTROL); return false; } // AUTO 才判保活/施法（§3.1.1）
 
     const int turn = GetCurrentBattleTurn_(mgr);
-    if (turn < 0) return false;
+    if (turn < 0) { LogDecline_("Protect", -1, -1, DC_TURN); return false; }
 
     const int side = ResolveHumanSide_(mgr);
-    if (side < 0 || side > 1) return false;
+    if (side < 0 || side > 1) { LogDecline_("Protect", turn, -1, DC_SIDE); return false; }
     // 每回合施法时机（方案级）：默认=本回合首次交权即施；指定=只在该部队
     // 轮到行动的交权时施。放在 heroCasted 之前，避免非指定回合留下"已判
-    // 施法"的痕迹。
+    // 施法"的痕迹。（时机门闸内部自带原因留痕，这里不重复记。）
     if (!CastTimingAllowsThisHandoff_(mgr, side)) return false;
     // 一回合一次：读游戏 heroCasted[side]（插件施法成功后由
     // MarkHeroCastThisTurn_ 补写，玩家手动施法游戏自己置位）。
-    if (g_cast_in_flight) return false; // 施法动画期间的消息循环重入
+    if (g_cast_in_flight) { LogDecline_("Protect", turn, -1, DC_IN_FLIGHT); return false; } // 施法动画期间的消息循环重入
     if (GetHeroCasted_(mgr, side)) {
         // 按回合去重留痕：区分「挡板没生效」与「通道没判」，定位连发类问题。
         static int s_block_logged_turn = -2;
@@ -1573,10 +1634,10 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     }
 
     H3CombatManager* cm = H3CombatManager::Get();
-    if (!cm) return false;
+    if (!cm) { LogDecline_("Protect", turn, -1, DC_NO_CM); return false; }
     // 魔法通道只在玩家方有英雄时启用。无英雄不能施法，保活、补状态和召唤都不判。
     H3Hero* hero = reinterpret_cast<H3Hero*>(mgr->hero[side]);
-    if (!hero) return false;
+    if (!hero) { LogDecline_("Protect", turn, -1, DC_NO_HERO); return false; }
     const int spell_power = cm->heroSpellPower[side];
 
     // 收集己方部队（按队保活方式，选「不保活」的队永不入选；战争机器与召唤物克隆槽不参与）
@@ -3091,22 +3152,26 @@ static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr)
 // 战争机器：才有“交回 AI / 保持原版 / 按配置执行”的特殊分支。
 int DecideTakeover(_BattleMgr_* mgr)
 {
-    if (!mgr) return CD_KEEP_ORIGINAL;
-    if (g_phase != BP_COMBAT_CLOSED) return CD_KEEP_ORIGINAL; // 状态机守卫（S5.3）
-    if (mgr->auto_combat) return CD_KEEP_ORIGINAL;
-    if (IsHiddenBattle(mgr)) return CD_KEEP_ORIGINAL;
-    if (IsTacticsPhase_(mgr)) return CD_KEEP_ORIGINAL;
+    if (!mgr) { LogDecline_("Takeover", -1, -1, DC_NO_STACK); return CD_KEEP_ORIGINAL; }
+    const int turn = GetCurrentBattleTurn_(mgr);
+    if (g_phase != BP_COMBAT_CLOSED) { LogDecline_("Takeover", turn, -1, DC_PHASE); return CD_KEEP_ORIGINAL; } // 状态机守卫（S5.3）
+    if (mgr->auto_combat) { LogDecline_("Takeover", turn, -1, DC_AUTO_COMBAT); return CD_KEEP_ORIGINAL; }
+    if (IsHiddenBattle(mgr)) { LogDecline_("Takeover", turn, -1, DC_HIDDEN); return CD_KEEP_ORIGINAL; }
+    if (IsTacticsPhase_(mgr)) { LogDecline_("Takeover", turn, -1, DC_TACTICS); return CD_KEEP_ORIGINAL; }
     UpdateStackTracking_();
 
     // 最高优先级：本场全手动 / 单次接管 → 一律把控制权留给玩家。
     // 不改配置、不推进游标；正在飞行中的自动动作由热键层延后接管。
-    if (ShouldYieldToPlayer_(mgr))
+    if (ShouldYieldToPlayer_(mgr)) {
+        LogDecline_("Takeover", turn, -1, DC_YIELD);
         return CD_KEEP_ORIGINAL;
+    }
 
     _BattleStack_* stack = CurrentTurnStack_(mgr);
-    if (!stack) return CD_KEEP_ORIGINAL;
+    if (!stack) { LogDecline_("Takeover", turn, -1, DC_NO_STACK); return CD_KEEP_ORIGINAL; }
 
     // 非本场已绑定的人类侧存活单位：不介入（控制权本就不该由我们改写）。
+    // （此分支自带本场一次的 warn 留痕，见下。）
     if (!ActiveStackMatchesTrack_(stack)) {
         ++g_mismatch_takeover_count;
         if (g_mismatch_detail_attempt != g_battle_attempt_id) {
@@ -3126,13 +3191,14 @@ int DecideTakeover(_BattleMgr_* mgr)
     }
 
     int idx = stack->army_slot_ix;
-    if (idx < 0 || idx >= 21) return CD_KEEP_ORIGINAL;
+    if (idx < 0 || idx >= 21) { LogDecline_("Takeover", turn, idx, DC_SLOT_RANGE); return CD_KEEP_ORIGINAL; }
     const AutoStackRule& rule = g_active_rules[idx];
     const int cid = stack->creature_id;
 
     // —— 仅战争机器特殊处理 ——
     switch (cid) {
     case WM_AMMO_CART:
+        LogDecline_("Takeover", turn, idx, DC_WM_AMMO_CART);
         return CD_KEEP_ORIGINAL;
 
     case WM_FIRST_AID:
