@@ -59,22 +59,13 @@ static const int CANCEL_X   = (PANEL_W + BTN_GAP) / 2;
 static const int CELL_COUNT = COLS * VISIBLE_ROWS;
 static const int MAX_STACKS = 21;
 static const int PROFILE_COUNT = 5;
-// 2026-10-17 用户要求：第二行（方案行）右侧空档放「打开打铁设置」热键提示。
-// 「方案N」文字约 48px，按钮 104→84（5×84+4×8 = 452，居中 x=114..566），
-// 右端留 566..668 约 100px 给提示（F10 这类三字符键名也放得下）。
-static const int PROFILE_BTN_W = 84;
+static const int PROFILE_BTN_W = 104;
 static const int PROFILE_BTN_H = 18;
 static const int PROFILE_BTN_GAP = 8;
 static const int PROFILE_BTN_Y = 47;
 static const int PROFILE_BTNS_W = PROFILE_COUNT * PROFILE_BTN_W
     + (PROFILE_COUNT - 1) * PROFILE_BTN_GAP;
 static const int PROFILE_BTN_X = (PANEL_W - PROFILE_BTNS_W) / 2;
-// 「打开打铁设置」热键提示：画在方案行右侧空档、与方案按钮同一纵向带，右对齐。
-// 文案里的键名取用户当前配置（[Hotkeys] OpenSettings → cfg.open_settings_vk），
-// 改键后下一次重绘即跟随，绝不写死默认键。
-static const int PROFILE_HINT_X = PROFILE_BTN_X + PROFILE_BTNS_W + 6;
-// 100px：容得下「F10 打开设置」（3 半角键名 + 空格 + 4 全角 ≈ 100px）。
-static const int PROFILE_HINT_W = PANEL_W - 8 - PROFILE_HINT_X;
 
 // 右上角帮助按钮（点击弹使用说明模态框）
 static const int HELP_BTN_SIZE = 24;
