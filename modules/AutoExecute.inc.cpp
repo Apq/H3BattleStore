@@ -1613,6 +1613,16 @@ static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
         return false;
     }
     if (!ct.after_wait) return true; // 未勾选：老行为，轮到它就施
+    // 「等待后」对「防御」不适用（2026-10-17 用户口径）：行动规则=防御的部队
+    // 不会产生等待动作，等下去等于永远不施法；此时语义是「在它发出防御操作
+    // 之前施法」——直接放行（调用点都在提交动作之前，顺序天然满足）。
+    if (self && self->army_slot_ix >= 0 && self->army_slot_ix < 21
+        && !H3AutoPolicy::AfterWaitAppliesToAction(
+            g_active_rules[self->army_slot_ix].action)) {
+        LogDebug("[CastWait] 等待后不适用：该队行动=防御，改在防御前施法 turn=%d slot=%d",
+            turn, self->army_slot_ix);
+        return true;
+    }
     // 唯一判据：游戏自己记的等待标志（用户裁定，见本函数开头注释）。
     const bool waited = StackWaitedThisRound_(self);
     if (waited) {

@@ -446,6 +446,16 @@ void TestSpellCastTiming()
     // 现在唯一判据是游戏自己记的等待标志（`IsWaiting()`，creature+0x84
     // bit25），由生产侧 `StackWaitedThisRound_` 直读，纯策略层不再持有状态，
     // 因此这里不再有可测的状态机语义。
+    // 行动规则=防御时「等待后」不适用（2026-10-17 用户口径：在防御动作发出前施法）。
+    Check(!AfterWaitAppliesToAction(AA_DEFEND),
+        "after-wait does not apply to a DEFEND stack");
+    Check(AfterWaitAppliesToAction(AA_WAIT),
+        "after-wait still applies to a WAIT stack (it sets the waiting flag itself)");
+    Check(AfterWaitAppliesToAction(AA_MANUAL),
+        "after-wait applies to manual stacks");
+    Check(AfterWaitAppliesToAction(AA_MOVE) && AfterWaitAppliesToAction(AA_MELEE_ATTACK)
+        && AfterWaitAppliesToAction(AA_RANGED_ATTACK),
+        "after-wait applies to move/attack rules");
 
     // 记录去重：只改「等待后」勾选也算内容变化（5 个方案逐一验证）。
     BattleStoreRecord base = {};

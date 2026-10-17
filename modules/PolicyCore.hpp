@@ -409,6 +409,15 @@ inline void NormalizeSpellCastTiming(SpellCastTimingFields* f)
 // 是死代码。留着只会误导后来者，故删除；判定语义随之变成：
 // 勾了「等待后」= 该部队本轮「已等待」才施法，与「第几次被交权」无关。
 
+// 「等待后」是否适用于某个行动规则（2026-10-17 用户口径）：
+// 行动=防御（AA_DEFEND）时不适用——防御不产生等待动作，等下去等于永远不施法；
+// 此时语义是「在该部队发出防御操作之前施法」，即按默认时机（交权即施）处理。
+// 其余行动（含 AA_WAIT：插件自己会提交等待、天然满足「等待后」）保持适用。
+inline bool AfterWaitAppliesToAction(uint8_t action)
+{
+    return action != AA_DEFEND;
+}
+
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
     int target_mode[kStatusSlotCapacity];
@@ -1817,6 +1826,7 @@ using H3AutoPolicy::MakeDefaultSpellCastTiming;
 using H3AutoPolicy::NormalizeSpellCastTiming;
 using H3AutoPolicy::StableStackIdentity;
 using H3AutoPolicy::MakeStableStackIdentity;
+using H3AutoPolicy::AfterWaitAppliesToAction;
 using H3AutoPolicy::CAST_TIMING_DEFAULT;
 using H3AutoPolicy::CAST_TIMING_UNIT;
 using H3AutoPolicy::MakeDefaultStatusFields;
