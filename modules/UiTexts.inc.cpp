@@ -22,6 +22,8 @@ struct UiTextEntry { const char* key; const char* text; };
 static const UiTextEntry kUiTextDefaults[] = {
     // ---- panel：设置面板 ----
     { "panel.title", "打铁设置" },
+    // 第二行右侧热键提示：%s = 用户配置的「打开设置」键名（改键后自动跟随）。
+    { "panel.open_settings_hint", "%s 打开设置" },
     { "panel.battle_dd", "本场存档 ▾" },
     { "panel.battle_dd_none", "无存档 ▾" },
     { "panel.status_battle_none", "{红}本场还没有存档（点√确定即存）" },

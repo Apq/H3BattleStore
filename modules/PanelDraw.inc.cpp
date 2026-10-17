@@ -82,6 +82,22 @@ static void DrawProfileButtons_(H3LoadedPcx16* destination)
     }
 }
 
+// 「打开打铁设置」热键提示（第二行右侧空档，右对齐）：键名现取用户配置
+// （[Hotkeys] OpenSettings → cfg.open_settings_vk），改键后即跟随，不写死默认键。
+// 与标题悬浮提示 tips.titlebar 共用同一套 HotkeyDisplayName_ 口径，两处不会互相打架。
+static void DrawOpenSettingsHint_(H3LoadedPcx16* scr)
+{
+    if (!scr) return;
+    char key[16] = {};
+    HotkeyDisplayName_(cfg.open_settings_vk, key, sizeof(key));
+    char text[64] = {};
+    _snprintf(text, sizeof(text), T("panel.open_settings_hint"), key);
+    text[sizeof(text) - 1] = 0;
+    DrawTxt(scr, GetSmallFont(), text,
+        PROFILE_HINT_X, PROFILE_BTN_Y, PROFILE_HINT_W, PROFILE_BTN_H,
+        (INT32)eTextColor::REGULAR, eTextAlignment::MIDDLE_RIGHT);
+}
+
 static void DrawPanelButtons_(H3LoadedPcx16* destination)
 {
     const H3POINT cursor = H3POINT::GetCursorPosition();
@@ -1495,6 +1511,7 @@ static void DrawPanelToBuffer_()
     DrawHelpButton_(scr);
     DrawBattleDropdownButton_(scr);
     DrawProfileButtons_(scr);
+    DrawOpenSettingsHint_(scr);
     DrawTabBar_(scr);
 
     // 下拉悬停高亮由 WH_MOUSE 钩子即时更新到 s_p.hover_cell/hover_idx，

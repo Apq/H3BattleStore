@@ -119,6 +119,10 @@ $singleLineBudget = @{
     # 同款复选框（停止行的「敌方魔力≤」5 字）用 72px 框 ⇒ 约 8px/半角宽，
     # 56px 容得下 6 半角（≈48px）且留余量；上限按实际字数取 6。
     'panel.cast_timing_after_wait' = 6
+    # 设置面板第二行右侧热键提示框 PROFILE_HINT_W = 100：
+    # 模板「%s 打开设置」= 3 半角 + 8 = 11 半角（≈88px）；%s 运行时替换成用户键名，
+    # 最坏是「F10」这类 3 半角 ⇒ 实际 12 半角（≈100px），正好贴住 100px 框。
+    'panel.open_settings_hint' = 12
 }
 
 $fullWidthRe = '[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]'
