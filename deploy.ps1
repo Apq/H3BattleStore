@@ -8,7 +8,7 @@ if (-not (Get-Command Get-H3GameDirs -ErrorAction SilentlyContinue)) {
     function Get-H3GameDirs {
         if ($env:H3_GAME_DIRS) { return @($env:H3_GAME_DIRS -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
         if ($env:H3_GAME_DIR) { return @($env:H3_GAME_DIR) }
-        return @('D:\Heroes3\Heroes3_2026.10.09', 'D:\Heroes3\英雄无敌3 V5.4')
+        return @('D:\Heroes3\英雄无敌3 热血雄鹰版V5.4B', 'D:\Heroes3\英雄无敌3 热血雄鹰版V5.8')
     }
 }
 # 热血插件目录与 H3RndNew 共用。2026-10-15 H3Auto 功能合并进本插件后，H3Auto
