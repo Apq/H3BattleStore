@@ -59,20 +59,24 @@ static const int CC_LABEL_H  = 11;
 static const int CC_ICON_FRAME_RIGHT = (CC_ICON_X - 1) + CC_ICON_FRAME_W; // ≈64
 static const int CC_COL2_X   = CC_ICON_FRAME_RIGHT + 4; // ≈68（等待方式组起点）
 // 等待方式：「等待方式:」标签 + 三选一下拉（无/每回合/不反兵攻城）。
-static const int CC_WAIT_LBL_W = 52;                            // 「等待方式:」
-static const int CC_WAIT_DD_X  = CC_COL2_X + CC_WAIT_LBL_W + 2; // ≈122
+// 2026-10-17 用户要求：标签宽 52 → 57（+5，字贴着框沿，看着挤），后续控件
+// 依次右移 5；为不牺牲第三列（近战槽 4/行、移动槽 6/行的容量硬约束），
+// 把两个组间距 4 → 2（省 4）、行动下拉 76 → 75（省 1，文本区仍 76-1-20=55
+// 恰好放下「不反兵攻城」5 个全角），于是第三列位置/宽度 282/225 保持原值。
+static const int CC_WAIT_LBL_W = 57;                            // 「等待方式:」
+static const int CC_WAIT_DD_X  = CC_COL2_X + CC_WAIT_LBL_W + 2; // ≈127
 // 2026-10-14（二次调整）：第三项由「智能」改名为「不反兵攻城」（5 个汉字），
 // 两个下拉都要放下它。硬约束：近战槽前两行每行仍要 4 个（54+3 间距），
 // 即第三列 ≥ 4*57-3=225；下拉文本区 = 宽-20 ≥ 5*11=55，即宽 ≥ 75。
-// 取 76/76、组间 4px：122+76+4+76+4=282，第三列 = 507-282 = 225 恰好双满足
-//（移动槽每行 6 个下限 207 也满足）。改前 60/76+6px 间隙时第三列 237。
+// 取 76/75、组间 2px：127+76+2+75+2=282，第三列 = 507-282 = 225 恰好双满足
+//（移动槽每行 6 个下限 207 也满足）。
 static const int CC_WAIT_DD_W  = 76;                            // 「不反兵攻城」+ 箭头
 // 行动下拉：整体右移到等待方式之后（同样要放下「不反兵攻城」）。
-static const int CC_ACTION_DD_X = CC_WAIT_DD_X + CC_WAIT_DD_W + 4; // ≈202
-static const int CC_ACTION_DD_W = 76;                              // 「不反兵攻城」+ 箭头
+static const int CC_ACTION_DD_X = CC_WAIT_DD_X + CC_WAIT_DD_W + 2; // ≈205
+static const int CC_ACTION_DD_W = 75;                              // 「不反兵攻城」+ 箭头
 // 降级复选框：仍在行动下拉正下方（小列2 下行），宽度沿用旧值。
 static const int CC_FALLBACK_W = 104;
-static const int CC_COL3_X   = CC_ACTION_DD_X + CC_ACTION_DD_W + 4; // ≈282
+static const int CC_COL3_X   = CC_ACTION_DD_X + CC_ACTION_DD_W + 2; // ≈282
 static const int CC_COL3_RIGHT = CC_CELL_W - 4; // 卡片右内边距
 static const int CC_COL3_W   = CC_COL3_RIGHT - CC_COL3_X; // ≈225
 static const int CC_ROW_H    = 22;
