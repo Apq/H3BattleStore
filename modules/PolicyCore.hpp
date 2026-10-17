@@ -401,37 +401,13 @@ inline void NormalizeSpellCastTiming(SpellCastTimingFields* f)
     f->_reserved = 0;
 }
 
-// 「等待后」判定状态机（纯逻辑，PolicyCoreTests 直接钉住）：
-// 只在「从别的部队交权 → 交权给目标部队」时记一次行动，因此同一次行动里被
-// 反复询问（施法动画期间消息循环会重入同一交权）不会重复计数。
-// 本轮第二次被交权（＝该部队等待过、或中了士气额外行动）才放行。
-struct CastTimingWaitState {
-    int turn;
-    int acts;
-    bool on_self;
-};
-
-inline void ResetCastTimingWaitState(CastTimingWaitState* s)
-{
-    if (!s) return;
-    s->turn = -1;
-    s->acts = 0;
-    s->on_self = false;
-}
-
-// 返回 true = 本轮已是目标部队的第二次（或更多）交权。
-inline bool NoteCastTimingHandoff(CastTimingWaitState* s, int turn, bool is_target)
-{
-    if (!s) return false;
-    if (s->turn != turn) {
-        s->turn = turn;
-        s->acts = 0;
-        s->on_self = false;
-    }
-    if (is_target && !s->on_self) ++s->acts;
-    s->on_self = is_target;
-    return s->acts >= 2;
-}
+// 「等待后」的唯一判据（2026-10-17 用户裁定）：只认游戏自己记的等待标志
+// （`H3CombatCreature::IsWaiting()`，creature+0x84 bit25），不再保留
+// 「本轮该部队已被交权 ≥2 次」这条备用判据——它用的 turn 是行动计数
+// （BattleMgr+0x13D6C，行动入口每 action 无条件 +1），每次交权都会清零，
+// 同一 turn 内第一次询问后又立刻把状态锁死，所以那条判据永远凑不满、
+// 是死代码。留着只会误导后来者，故删除；判定语义随之变成：
+// 勾了「等待后」= 该部队本轮「已等待」才施法，与「第几次被交权」无关。
 
 struct StatusProfileFields {
     int slots[kStatusSlotCapacity];
@@ -1843,9 +1819,6 @@ using H3AutoPolicy::StableStackIdentity;
 using H3AutoPolicy::MakeStableStackIdentity;
 using H3AutoPolicy::CAST_TIMING_DEFAULT;
 using H3AutoPolicy::CAST_TIMING_UNIT;
-using H3AutoPolicy::CastTimingWaitState;
-using H3AutoPolicy::ResetCastTimingWaitState;
-using H3AutoPolicy::NoteCastTimingHandoff;
 using H3AutoPolicy::MakeDefaultStatusFields;
 using H3AutoPolicy::kStatusSlotCapacity;
 using H3AutoPolicy::kBuffSpellIds;

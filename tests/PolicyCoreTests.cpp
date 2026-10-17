@@ -440,37 +440,12 @@ void TestSpellCastTiming()
             "unknown mode clears the after-wait flag");
     }
 
-    // 「等待后」判定状态机：只有「别的部队 → 目标部队」的切换才算新一次行动。
-    {
-        CastTimingWaitState st;
-        ResetCastTimingWaitState(&st);
-        Check(!NoteCastTimingHandoff(&st, 5, false),
-            "non-target handoff never allows the after-wait cast");
-        Check(!NoteCastTimingHandoff(&st, 5, false),
-            "repeated non-target handoffs stay harmless");
-        Check(!NoteCastTimingHandoff(&st, 5, true),
-            "first handoff to the target denies the after-wait cast");
-        // 同一次行动里被反复询问（施法动画期间消息循环重入同一交权）不重复计数。
-        Check(!NoteCastTimingHandoff(&st, 5, true),
-            "repeated queries inside one activation do not count twice");
-        Check(!NoteCastTimingHandoff(&st, 5, true),
-            "a third query inside the same activation still denies");
-        // 中间别的部队行动过 → 目标部队再次被交权＝等待后的那次。
-        Check(!NoteCastTimingHandoff(&st, 5, false),
-            "another stack acting in between tracks normally");
-        Check(NoteCastTimingHandoff(&st, 5, true),
-            "second handoff to the target allows the after-wait cast");
-        Check(NoteCastTimingHandoff(&st, 5, true),
-            "later handoffs in the same round stay allowed");
-        // 新回合重置：又变回「本轮第一次」。
-        Check(!NoteCastTimingHandoff(&st, 6, false),
-            "new round resets the handoff counter for non-target stacks");
-        Check(!NoteCastTimingHandoff(&st, 6, true),
-            "new round makes the target's handoff the first one again");
-        ResetCastTimingWaitState(&st);
-        Check(st.turn == -1 && st.acts == 0 && !st.on_self,
-            "explicit reset clears the after-wait state machine");
-    }
+    // 「等待后」的判定状态机已删除（2026-10-17 用户裁定）：原先那条
+    // 「本轮该部队已被交权 ≥2 次」的备用判据依赖 turn=行动计数（每次行动
+    // 无条件 +1、同一次行动内又被反复询问锁死），永远凑不满，是死代码。
+    // 现在唯一判据是游戏自己记的等待标志（`IsWaiting()`，creature+0x84
+    // bit25），由生产侧 `StackWaitedThisRound_` 直读，纯策略层不再持有状态，
+    // 因此这里不再有可测的状态机语义。
 
     // 记录去重：只改「等待后」勾选也算内容变化（5 个方案逐一验证）。
     BattleStoreRecord base = {};

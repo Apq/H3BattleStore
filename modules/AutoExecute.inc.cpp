@@ -1019,7 +1019,19 @@ static int GetHeroMana_(_BattleMgr_* mgr, int side)
 // 保留空函数供提交路径调用，日志指明配置已生效）。
 void SyncActiveProtect()
 {
-    LogInfo("[Protect] settings committed; next control hand-in re-checks");
+    // 生效施法时机快照（info）：玩家日志里直接可读「现在到底是不是等待后」，
+    // 不必再从 [Panel] 的点击流水反推（2026-10-17 玩家反馈：勾了等待后又点
+    // 取消，日志里只看得到点击、看不到生效值）。
+    const SpellCastTimingFields& ct = g_cast_timing[g_active_profile];
+    if (ct.mode == H3AutoPolicy::CAST_TIMING_UNIT) {
+        LogInfo("[Protect] settings committed; next control hand-in re-checks"
+                " | 施法时机=指定部队 kind=%d side=%d value=%d occ=%d 等待后=%d",
+                (int)ct.target_kind, (int)ct.target_side, (int)ct.target_value,
+                (int)ct.target_occurrence, (int)ct.after_wait);
+    } else {
+        LogInfo("[Protect] settings committed; next control hand-in re-checks"
+                " | 施法时机=首次行动 等待后=%d(不生效)", (int)ct.after_wait);
+    }
 }
 
 // 设置保存后进入「停」：保存只落方案，不立即自动执行；
@@ -1474,14 +1486,13 @@ static bool TryMaintainStatus_(_BattleMgr_* mgr, int side,
 // 它再次出现或玩家改配置。
 //
 // 勾了「等待后」（ct.after_wait）时，指定部队**本轮第一次**被交权也不施法，
-// 必须等它先「等待」、本轮再次被交权才施。判定用两条证据之一：
-//   1) 玩家按过等待 → 游戏在 creature+0x84 置 waiting 位（0x2000000）；
-//   2) 本轮该部队已被交权 ≥2 次（等待后必然再轮一次；同一次交权里被反复
-//      询问不会重复计数，见 PolicyCore 的 NoteCastTimingHandoff）。
-// 两条都拿不到（既没等到 waiting 位、也还是第一次交权）时不施法——本功能
-// 就是"等"，宁可漏施也不能提前施。
+// 必须等它先「等待」，等它再次被交权时才施放。
+// 判据只有一个（2026-10-17 用户裁定）：游戏自己记的等待标志——玩家按过等待后
+// 游戏在 creature+0x84 置 waiting 位（0x2000000）。原先还有一条「本轮该部队
+// 已被交权 ≥2 次」的备用判据，已删除：它依赖的 turn 是行动计数（每次行动
+// 无条件 +1）且同一次行动内会被反复询问锁死，永远凑不满，是死代码。
+// 没等到 waiting 位就不施法——本功能就是"等"，宁可漏施也不能提前施。
 static _BattleStack_* CurrentTurnStack_(_BattleMgr_* mgr); // 定义在本文件后部
-static H3AutoPolicy::CastTimingWaitState s_cast_wait_state = { -1, 0, false };
 
 // 该部队本回合是否已「等待」。H3API：H3CreatureInformation 大小 0x74，字段序
 // 为 town(0)/level(4)/soundName(8)/defName(0xC)/flags(0x10)；H3CombatCreature::info
@@ -1570,6 +1581,7 @@ static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
 
     _BattleStack_* self = nullptr;
     bool is_target = false;
+    H3AutoPolicy::StableStackIdentity cur_id = {};
     if (side >= 0 && side <= 1) {
         self = CurrentTurnStack_(mgr);
         if (self && self->def_group_ix == side) {
@@ -1577,31 +1589,40 @@ static bool CastTimingAllowsThisHandoff_(_BattleMgr_* mgr, int side)
             if (idx >= 0 && idx < 21) {
                 H3AutoPolicy::StableStackIdentity ids[21] = {};
                 BuildStableIdentitiesFromBattle_(mgr, side, ids);
+                cur_id = ids[idx];
                 if (ids[idx].kind != H3AutoPolicy::STACK_ID_NONE)
                     is_target =
                         H3AutoPolicy::StableStackIdentityEquals(want, ids[idx]);
             }
         }
     }
-    // 每次交权都要喂状态机：只有"别的部队 → 目标部队"的切换才算新的一次行动。
-    const bool second_handoff = H3AutoPolicy::NoteCastTimingHandoff(
-        &s_cast_wait_state, turn, is_target);
     if (!is_target) {
         // 指定部队时机：本轮不是它的回合——"设了指定部队却没施法"最常见的解释。
+        // 身份对照（每回合一行）：只打 slot 时看不出「配的是哪一支部队」，也分不清
+        // 「配错了」与「配的那支不在场」（2026-10-17）。
+        static int s_timing_detail_turn = -2;
+        if (s_timing_detail_turn != turn) {
+            s_timing_detail_turn = turn;
+            LogDebug("[CastTiming] 非指定部队 turn=%d cur=(k%d s%d v%d o%d)"
+                     " want=(k%d s%d v%d o%d)",
+                turn, (int)cur_id.kind, (int)cur_id.side, (int)cur_id.value,
+                (int)cur_id.occurrence, (int)want.kind, (int)want.side,
+                (int)want.value, (int)want.occurrence);
+        }
         LogDecline_("CastTiming", turn, self ? self->army_slot_ix : -1, DC_TIMING);
         return false;
     }
     if (!ct.after_wait) return true; // 未勾选：老行为，轮到它就施
-    if (turn < 0) return StackWaitedThisRound_(self);
+    // 唯一判据：游戏自己记的等待标志（用户裁定，见本函数开头注释）。
     const bool waited = StackWaitedThisRound_(self);
-    if (second_handoff || waited) {
-        LogDebug("[CastWait] 等待后放行 second=%d waited=%d turn=%d slot=%d",
-            second_handoff ? 1 : 0, waited ? 1 : 0, turn,
-            self ? self->army_slot_ix : -1);
+    if (waited) {
+        LogDebug("[CastWait] 等待后放行 waited=1 turn=%d slot=%d",
+            turn, self ? self->army_slot_ix : -1);
         return true;
     }
-    LogDebug("[CastWait] 等待后拦截：尚未等待且本轮首次交权 turn=%d slot=%d",
-        turn, self ? self->army_slot_ix : -1);
+    LogDebug("[CastWait] 等待后拦截：该队本轮尚未等待 turn=%d slot=%d hex=%d"
+             "（放行只认等待标志，需玩家先按「等待」）",
+        turn, self ? self->army_slot_ix : -1, self ? StackHex_(self) : -1);
     return false;
 }
 
@@ -1656,16 +1677,47 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
     for (int slot = 0; slot < 21; ++slot) {
         const AutoStackRule& rule = g_active_rules[slot];
 
+        // 逐槽跳过原因（debug，同一 5 秒收账闸）：过去这些 continue 是零日志，
+        // 「该救不救」只能靠 queue 行有没有出现来二分猜测（2026-10-17）。
         const StackTrackEntry& te = g_stack_track[slot];
-        if (!te.bound || te.side != side) continue;
+        if (!te.bound || te.side != side) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=unbound bound=%d side=%d",
+                    slot, te.bound ? 1 : 0, (int)te.side);
+            continue;
+        }
         _BattleStack_* st = &mgr->stack[side][slot];
-        if (!st) continue;
+        if (!st) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=no-stack", slot);
+            continue;
+        }
         const int baseline = ProtectBaselineCount_(mgr, side, st);
-        if (baseline <= 0) continue;
-        if (!CreatureInfoIndexValid_(st->creature_id)) continue;
-        if (H3AutoPolicy::IsWarMachineType(st->creature_id)) continue;
+        if (baseline <= 0) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=baseline cid=0x%X cnt=%d",
+                    slot, st->creature_id, st->count_current);
+            continue;
+        }
+        if (!CreatureInfoIndexValid_(st->creature_id)) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=cid cid=0x%X", slot,
+                    st->creature_id);
+            continue;
+        }
+        if (H3AutoPolicy::IsWarMachineType(st->creature_id)) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=war-machine cid=0x%X",
+                    slot, st->creature_id);
+            continue;
+        }
         const bool dead = st->count_current <= 0;
-        if (dead && StackHex_(st) < 0) continue;          // 没有可施法的尸体格
+        if (dead && StackHex_(st) < 0) {
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=no-corpse-hex dead=1 cid=0x%X",
+                    slot, st->creature_id);
+            continue;          // 没有可施法的尸体格
+        }
 
         // 损失口径与急救"失血数值"一致：死亡数×满血 + 顶层已损。
         // 死亡数从英雄战前军队数量算，不用 F9 重打后或按确定时的数量。
@@ -1686,8 +1738,15 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         const int spell_id = P_CreatureInformation[st->creature_id].undead
             ? 39 : 38;
         if (!HeroMagicAllowed_(cm, side, spell_id)
-            || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), spell_id))
+            || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), spell_id)) {
+            // 注意 HeroMagicAllowed_ 内含 heroCasted[side]：这里被跳过也可能是
+            // "本回合已施过法"，与"没学/法力不足/免疫"混在一起——把 heroCasted
+            // 一并打出来，避免两种原因被读成一种（2026-10-17）。
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=magic spell=%d heroCasted=%d mana=%d",
+                    slot, spell_id, GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side));
             continue;
+        }
         const int expertise = hero->GetSpellExpertise(spell_id, cm->specialTerrain);
         int spell_base = -1;
         int spell_effect = -1;
@@ -1720,8 +1779,15 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
         if (!H3AutoPolicy::ProtectShouldCast(
                 (H3AutoPolicy::ProtectMode)rule.protectMode,
                 restorable, wound,
-                st->count_current, rule.protectCountBelow))
+                st->count_current, rule.protectCountBelow)) {
+            // 门槛未达：把判据的完整输入打出来，区分"方式=不保活/阈值未到/
+            // 恢复量不够补损失"（2026-10-17）。
+            if (protect_detail_ok)
+                LogDebug("[Protect] skip slot=%d reason=threshold mode=%d restorable=%d wound=%d cnt=%d th=%d",
+                    slot, (int)rule.protectMode, restorable, wound,
+                    st->count_current, rule.protectCountBelow);
             continue;
+        }
         cands[cand_count] = cand;
         cand_slot[cand_count] = slot;
         cand_spell[cand_count] = spell_id;
@@ -1765,14 +1831,27 @@ static bool TryProtectCast_(_BattleMgr_* mgr)
 
     _BattleStack_* st = &mgr->stack[side][best_slot];
     if (!HeroMagicAllowed_(cm, side, best_spell)
-        || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), best_spell))
+        || !TargetMagicAllowed_(cm, side, reinterpret_cast<H3CombatCreature*>(st), best_spell)) {
+        // 选中后再复核失败（过去零日志）：候选阶段已过、最终却没施，属"最像幽灵"
+        // 的一种失败，必须留痕（2026-10-17）。
+        LogDebug("[Protect] skip: recheck failed slot=%d spell=%d heroCasted=%d mana=%d",
+            best_slot, best_spell, GetHeroCasted_(mgr, side), GetHeroMana_(mgr, side));
         return false;
+    }
     // cast_type_012=0：单体施法（逆向语义后续验证，见设计文档 §10.4）。
     // 原版施法失败不能逃出战斗回调。
     const int prot_mana_before = GetHeroMana_(mgr, side);
     const int prot_casted_before = GetHeroCasted_(mgr, side);
     const int prot_cas = CastSideGuardEnter_(cm, side);
     if (!cm->CanCastSpellAtCoord(best_spell, best_exp, StackHex_(st))) {
+        // 游戏自己判定"这一格此刻不能施这个法术"（过去零日志）：这是唯一
+        // 「其余全对却没施法」的指纹，必须能看见（2026-10-17）。
+        static int s_cancast_turn = -2;
+        if (s_cancast_turn != turn) {
+            s_cancast_turn = turn;
+            LogDebug("[Protect] skip: game-rejected cast spell=%d slot=%d hex=%d exp=%d",
+                best_spell, best_slot, StackHex_(st), best_exp);
+        }
         CastSideGuardLeave_(cm, prot_cas);
         return false;
     }
@@ -3283,7 +3362,18 @@ static bool TryProbeCastChannelFromMsg_(_BattleMgr_* mgr, bool force)
 {
     if (!mgr) return false;
     // 动作已落地时不补判：施法必须在提交动作之前（此时 action 仍为 0）。
-    if (mgr->action != 0) return false;
+    // 留一行原因（每回合一次）：玩家手点得比探针快时，这一回合的施法就是
+    // 这样静默丢掉的，过去日志里完全看不出（2026-10-17）。
+    if (mgr->action != 0) {
+        static int s_probe_skip_turn = -2;
+        const int skip_turn = GetCurrentBattleTurn_(mgr);
+        if (s_probe_skip_turn != skip_turn) {
+            s_probe_skip_turn = skip_turn;
+            LogDebug("[Protect] probe skipped: action pending turn=%d action=%d force=%d",
+                skip_turn, mgr->action, force ? 1 : 0);
+        }
+        return false;
+    }
     // 与 TrySubmitConfiguredAction_ 同口径的门槛：自动战斗/隐藏战斗/战术期不施放。
     if (mgr->auto_combat || IsHiddenBattle(mgr) || IsTacticsPhase_(mgr))
         return false;
@@ -3294,8 +3384,25 @@ static bool TryProbeCastChannelFromMsg_(_BattleMgr_* mgr, bool force)
         if (s_gate_turn == turn) return false;   // 本回合已补判过
         s_gate_turn = turn;
     }
-    LogDebug("[Protect] msg-entry cast probe turn=%d force=%d control=%d action=%d",
-        turn, force ? 1 : 0, (int)g_control, mgr->action);
+    // 探针行带上下文（debug）：一次交权最多一行。带 timing/wait/target/heroCasted，
+    // 让「为什么这一回合没施法」在单行日志里自证（2026-10-17 玩家反馈：
+    // 过去要知道生效时机必须从 [Panel] 点击流水反推，点过取消就看不出来）。
+    {
+        const SpellCastTimingFields& ct = g_cast_timing[g_active_profile];
+        int casted0 = -1, casted1 = -1;
+        __try {
+            if (H3CombatManager* probe_cm = H3CombatManager::Get()) {
+                casted0 = probe_cm->heroCasted[0];
+                casted1 = probe_cm->heroCasted[1];
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        LogDebug("[Protect] msg-entry cast probe turn=%d force=%d control=%d action=%d"
+                 " timing=%d wait=%d target=(k%d s%d v%d o%d) heroCasted=%d/%d",
+            turn, force ? 1 : 0, (int)g_control, mgr->action,
+            (int)ct.mode, (int)ct.after_wait,
+            (int)ct.target_kind, (int)ct.target_side, (int)ct.target_value,
+            (int)ct.target_occurrence, casted0, casted1);
+    }
     TryProtectCast_(mgr);
     TryAttackMagicCast_(mgr);     // 智能攻击同序补判（与 0x4744D0 路径一致）
     return true;
