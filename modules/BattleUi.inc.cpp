@@ -1021,25 +1021,6 @@ static void UiDrawBar_(H3CombatManager* mgr)
         UiToGbk_("自动存档", titleAuto, sizeof(titleAuto));
         font->TextDraw(c, titleAuto, kUiAutoListX + 6, g_uiLayout.TitleTop(),
             kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
-        // 第二行右端空档（双列列表区 ListsWidth=366 之后到条右缘 480，约 110px）：
-        // 提示「打开打铁设置」的热键。键名在绘制时取用户配置
-        // （ini [Hotkeys] OpenSettings → cfg.open_settings_vk，默认 P），改键后下一次
-        // 重绘即跟随，不写死默认键；与设置面板标题悬浮提示共用 HotkeyDisplayName_ 口径。
-        // 注意：本文件在 namespace autoassist 之外被包含（H3BattleStore.cpp L103 已闭合），
-        // 故 cfg 与 HotkeyDisplayName_ 必须带 autoassist:: 限定，否则找不到标识符。
-        {
-            char hintKey[16] = {};
-            autoassist::HotkeyDisplayName_(autoassist::cfg.open_settings_vk, hintKey,
-                sizeof(hintKey));
-            char hintUtf8[64] = {};
-            _snprintf(hintUtf8, sizeof(hintUtf8), "按%s打开设置", hintKey);
-            char hintGbk[96] = {};
-            UiToGbk_(hintUtf8, hintGbk, sizeof(hintGbk));
-            const int hintX = hbs_ui::ListsWidth + 4;
-            font->TextDraw(c, hintGbk, hintX, g_uiLayout.TitleTop(),
-                kUiBarWidth - 6 - hintX, UiRowHeight_(),
-                eTextColor::GOLD, eTextAlignment::MIDDLE_RIGHT);
-        }
         if (rows > 0) {
             c->FillRectangle(0, g_uiLayout.ListTop(), listWidth, rows * UiRowHeight_(),
                 (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
@@ -1051,6 +1032,37 @@ static void UiDrawBar_(H3CombatManager* mgr)
                 autoRows * UiRowHeight_(), (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
             c->DrawFrame(kUiAutoListX, g_uiLayout.ListTop(), autoListWidth,
                 autoRows * UiRowHeight_(), 160, 140, 70);
+        }
+        // ---- 第二行（状态带）右端热键提示：位置随界面形态走 ----
+        // 2026-10-17 用户裁定：战场外固定条（灯画在本面板内）→ 贴在状态灯**左侧**；
+        // 战场内折叠版（灯已移出面板，见 g_uiFoldLayout 注释）→ 贴在「键:X」框**左侧**。
+        // 文案「按X打开打铁设置」，X 在绘制时取用户配置
+        // （ini [Hotkeys] OpenSettings → cfg.open_settings_vk，默认 P），改键后下一次
+        // 重绘即跟随，不写死默认键；与设置面板标题悬浮提示共用 HotkeyDisplayName_ 口径。
+        // 注意：本文件在 namespace autoassist 之外被包含（H3BattleStore.cpp L103 已闭合），
+        // 故 cfg 与 HotkeyDisplayName_ 必须带 autoassist:: 限定，否则找不到标识符。
+        char hintGbk[96] = {};
+        int hintLeft = 0;
+        int hintWidth = 0;
+        {
+            const int hintRight = g_uiFoldLayout
+                ? hbs_ui::HotkeyX - 6
+                : hbs_ui::StatusLampX - hbs_ui::StatusLampRadius - 6;
+            // 重绑态状态行要放「可用：B F G K…Esc 取消」，同一时刻只留一句，提示让位。
+            if (!g_ui.awaitingRebind) {
+                char hintKey[16] = {};
+                autoassist::HotkeyDisplayName_(autoassist::cfg.open_settings_vk,
+                    hintKey, sizeof(hintKey));
+                char hintUtf8[64] = {};
+                _snprintf(hintUtf8, sizeof(hintUtf8), "按%s打开打铁设置", hintKey);
+                UiToGbk_(hintUtf8, hintGbk, sizeof(hintGbk));
+                const int measured = hintGbk[0] ? font->GetMaxLineWidth(hintGbk) : 0;
+                // 状态标签保底 60px：提示宽到挤不下就干脆不画，绝不让两段文字叠字。
+                if (measured > 0 && hintRight - measured - 12 > 60) {
+                    hintWidth = measured;
+                    hintLeft = hintRight - measured;
+                }
+            }
         }
         char label[128] = {};
         eTextColor labelColor = eTextColor::WHITE;
@@ -1076,12 +1088,19 @@ static void UiDrawBar_(H3CombatManager* mgr)
             _snprintf(utf8, sizeof(utf8), "[战场存档] %u 条，点击选择", (unsigned)g_store.entries.size());
             UiToGbk_(utf8, label, sizeof(label));
         }
-        while (font->GetMaxLineWidth(label) > hbs_ui::StatusLabelWidth && label[0]) {
+        // 状态标签宽度：原布局上限，但提示要贴灯/键框时给它让位（右端留 6px 空档）。
+        int statusWidth = hbs_ui::StatusLabelWidth;
+        if (hintWidth > 0 && hintLeft - 12 < statusWidth) statusWidth = hintLeft - 12;
+        while (font->GetMaxLineWidth(label) > statusWidth && label[0]) {
             char* end = label + strlen(label);
             *CharPrevExA(936, label, end, 0) = 0;
         }
-        font->TextDraw(c, label, 6, UiBandHeight_(), hbs_ui::StatusLabelWidth, UiBandHeight_(),
+        font->TextDraw(c, label, 6, UiBandHeight_(), statusWidth, UiBandHeight_(),
             labelColor, eTextAlignment::MIDDLE_LEFT);
+        // 金色小字，右缘贴住灯/键框左缘，右对齐保证「按P打开打铁设置」整体不跳动。
+        if (hintWidth > 0)
+            font->TextDraw(c, hintGbk, hintLeft, UiBandHeight_(), hintWidth,
+                UiBandHeight_(), eTextColor::GOLD, eTextAlignment::MIDDLE_RIGHT);
         const bool storageAllowed = UiStorageAllowed_(mgr);
         // 状态灯：旧界面画在合成图原位（第二行带内）；折叠版布局下灯移出
         // 面板外（见 g_uiFoldLayout 注释），这里不再往面板里画，由
