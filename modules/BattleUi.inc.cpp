@@ -1021,6 +1021,25 @@ static void UiDrawBar_(H3CombatManager* mgr)
         UiToGbk_("自动存档", titleAuto, sizeof(titleAuto));
         font->TextDraw(c, titleAuto, kUiAutoListX + 6, g_uiLayout.TitleTop(),
             kUiListWidth - 12, UiRowHeight_(), eTextColor::WHITE, eTextAlignment::MIDDLE_LEFT);
+        // 第二行右端空档（双列列表区 ListsWidth=366 之后到条右缘 480，约 110px）：
+        // 提示「打开打铁设置」的热键。键名在绘制时取用户配置
+        // （ini [Hotkeys] OpenSettings → cfg.open_settings_vk，默认 P），改键后下一次
+        // 重绘即跟随，不写死默认键；与设置面板标题悬浮提示共用 HotkeyDisplayName_ 口径。
+        // 注意：本文件在 namespace autoassist 之外被包含（H3BattleStore.cpp L103 已闭合），
+        // 故 cfg 与 HotkeyDisplayName_ 必须带 autoassist:: 限定，否则找不到标识符。
+        {
+            char hintKey[16] = {};
+            autoassist::HotkeyDisplayName_(autoassist::cfg.open_settings_vk, hintKey,
+                sizeof(hintKey));
+            char hintUtf8[64] = {};
+            _snprintf(hintUtf8, sizeof(hintUtf8), "按%s打开设置", hintKey);
+            char hintGbk[96] = {};
+            UiToGbk_(hintUtf8, hintGbk, sizeof(hintGbk));
+            const int hintX = hbs_ui::ListsWidth + 4;
+            font->TextDraw(c, hintGbk, hintX, g_uiLayout.TitleTop(),
+                kUiBarWidth - 6 - hintX, UiRowHeight_(),
+                eTextColor::GOLD, eTextAlignment::MIDDLE_RIGHT);
+        }
         if (rows > 0) {
             c->FillRectangle(0, g_uiLayout.ListTop(), listWidth, rows * UiRowHeight_(),
                 (BYTE)g_ui.listR, (BYTE)g_ui.listG, (BYTE)g_ui.listB);
